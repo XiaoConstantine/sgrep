@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -55,6 +56,7 @@ func init() {
 	rootCmd.AddCommand(watchCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(clearCmd)
+	rootCmd.AddCommand(listCmd)
 }
 
 func runSearch(cmd *cobra.Command, args []string) error {
@@ -136,20 +138,41 @@ func findIndexDir(startPath string) (string, error) {
 		return "", err
 	}
 
-	for {
-		indexPath := filepath.Join(abs, ".sgrep", "index.db")
-		if _, err := os.Stat(indexPath); err == nil {
-			return indexPath, nil
-		}
-
-		parent := filepath.Dir(abs)
-		if parent == abs {
-			break
-		}
-		abs = parent
+	// Get sgrep home
+	sgrepHome, err := getSgrepHome()
+	if err != nil {
+		return "", err
 	}
 
-	return "", fmt.Errorf("no .sgrep directory found")
+	// Hash the path to find the repo directory
+	repoID := hashPath(abs)
+	indexPath := filepath.Join(sgrepHome, "repos", repoID, "index.db")
+
+	if _, err := os.Stat(indexPath); err == nil {
+		return indexPath, nil
+	}
+
+	return "", fmt.Errorf("no index found for %s. Run 'sgrep index .' first", abs)
+}
+
+// getSgrepHome returns the sgrep home directory (~/.sgrep).
+func getSgrepHome() (string, error) {
+	if home := os.Getenv("SGREP_HOME"); home != "" {
+		return home, nil
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.Join(homeDir, ".sgrep"), nil
+}
+
+// hashPath creates a short hash of a path for directory naming.
+func hashPath(path string) string {
+	h := sha256.Sum256([]byte(path))
+	return fmt.Sprintf("%x", h[:6])
 }
 
 // Index command
@@ -242,6 +265,61 @@ var clearCmd = &cobra.Command{
 		}
 
 		fmt.Println("Index cleared")
+		return nil
+	},
+}
+
+// List command - show all indexed repos
+var listCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all indexed repositories",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		sgrepHome, err := getSgrepHome()
+		if err != nil {
+			return err
+		}
+
+		reposDir := filepath.Join(sgrepHome, "repos")
+		entries, err := os.ReadDir(reposDir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				fmt.Println("No repositories indexed yet")
+				return nil
+			}
+			return err
+		}
+
+		if len(entries) == 0 {
+			fmt.Println("No repositories indexed yet")
+			return nil
+		}
+
+		fmt.Println("Indexed repositories:")
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+
+			metadataPath := filepath.Join(reposDir, entry.Name(), "metadata.json")
+			data, err := os.ReadFile(metadataPath)
+			if err != nil {
+				continue
+			}
+
+			var metadata map[string]interface{}
+			if err := json.Unmarshal(data, &metadata); err != nil {
+				continue
+			}
+
+			path, _ := metadata["path"].(string)
+			indexedAt, _ := metadata["indexed_at"].(string)
+
+			fmt.Printf("  %s\n", path)
+			if indexedAt != "" {
+				fmt.Printf("    indexed: %s\n", indexedAt)
+			}
+		}
+
 		return nil
 	},
 }

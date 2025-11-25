@@ -101,14 +101,30 @@ sg -p 'rateLimiter.Check($ctx, $key)'
 rg "RATE_LIMIT_MAX"
 ```
 
+## Storage
+
+All indexes are stored in `~/.sgrep/`:
+```
+~/.sgrep/
+├── repos/
+│   ├── a1b2c3/              # Hash of /path/to/repo1
+│   │   ├── index.db         # SQLite + vectors
+│   │   └── metadata.json    # Repo path, index time
+│   └── d4e5f6/              # Hash of /path/to/repo2
+│       └── ...
+└── cache/                   # Embedding cache (future)
+```
+
+Use `sgrep list` to see all indexed repositories.
+
 ## Configuration
 
 Environment variables:
 ```bash
+SGREP_HOME=~/.sgrep                    # Index storage location
 SGREP_ENDPOINT=http://localhost:8080   # llama.cpp server
 SGREP_MODEL=nomic-embed-text           # embedding model
 SGREP_DIMS=768                         # vector dimensions
-SGREP_CACHE_DIR=~/.cache/sgrep         # embedding cache
 ```
 
 ## Commands
@@ -118,6 +134,7 @@ SGREP_CACHE_DIR=~/.cache/sgrep         # embedding cache
 | `sgrep [query]` | Semantic search (default) |
 | `sgrep index [path]` | Index a directory |
 | `sgrep watch [path]` | Watch and auto-index |
+| `sgrep list` | List all indexed repos |
 | `sgrep status` | Show index status |
 | `sgrep clear` | Clear index |
 

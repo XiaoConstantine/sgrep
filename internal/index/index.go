@@ -3,6 +3,8 @@ package index
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -36,14 +38,26 @@ func New(path string) (*Indexer, error) {
 		return nil, err
 	}
 
-	// Create .sgrep directory
-	sgrepDir := filepath.Join(absPath, ".sgrep")
-	if err := os.MkdirAll(sgrepDir, 0755); err != nil {
+	// Get sgrep home directory
+	sgrepHome, err := getSgrepHome()
+	if err != nil {
+		return nil, err
+	}
+
+	// Create repo-specific subdirectory based on path hash
+	repoID := hashPath(absPath)
+	repoDir := filepath.Join(sgrepHome, "repos", repoID)
+	if err := os.MkdirAll(repoDir, 0755); err != nil {
+		return nil, err
+	}
+
+	// Store repo metadata
+	if err := writeRepoMetadata(repoDir, absPath); err != nil {
 		return nil, err
 	}
 
 	// Open store
-	dbPath := filepath.Join(sgrepDir, "index.db")
+	dbPath := filepath.Join(repoDir, "index.db")
 	s, err := store.Open(dbPath)
 	if err != nil {
 		return nil, err
@@ -59,6 +73,44 @@ func New(path string) (*Indexer, error) {
 		chunkCfg: chunk.DefaultConfig(),
 		ignore:   ignore,
 	}, nil
+}
+
+// getSgrepHome returns the sgrep home directory (~/.sgrep).
+func getSgrepHome() (string, error) {
+	// Check SGREP_HOME env var first
+	if home := os.Getenv("SGREP_HOME"); home != "" {
+		return home, nil
+	}
+
+	// Default to ~/.sgrep
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	return filepath.Join(homeDir, ".sgrep"), nil
+}
+
+// hashPath creates a short hash of a path for directory naming.
+func hashPath(path string) string {
+	// Use first 12 chars of SHA256 for uniqueness
+	h := sha256.Sum256([]byte(path))
+	return fmt.Sprintf("%x", h[:6])
+}
+
+// writeRepoMetadata stores metadata about the indexed repo.
+func writeRepoMetadata(repoDir, repoPath string) error {
+	metadata := map[string]interface{}{
+		"path":       repoPath,
+		"indexed_at": time.Now().Format(time.RFC3339),
+	}
+
+	data, err := json.Marshal(metadata)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(filepath.Join(repoDir, "metadata.json"), data, 0644)
 }
 
 // Index indexes all files in the root path.
