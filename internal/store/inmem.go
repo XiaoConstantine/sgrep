@@ -8,10 +8,13 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
+	"github.com/XiaoConstantine/sgrep/internal/util"
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -24,6 +27,10 @@ type InMemStore struct {
 	vectors   [][]float32 // All embeddings in memory
 	docIDs    []string    // Corresponding document IDs
 	docsCache map[string]*Document
+
+	// fzf-inspired optimizations
+	slabPool   *util.SlabPool
+	partitions int
 }
 
 // OpenInMem opens a store with in-memory search capability.
@@ -40,20 +47,33 @@ func OpenInMem(path string) (*InMemStore, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
+	// fzf pattern: min(8 * NumCPU, 32) partitions
+	numCPU := runtime.NumCPU()
+	partitions := numCPU * 4 // Less aggressive than fzf since LLM is bottleneck
+	if partitions > 16 {
+		partitions = 16
+	}
+	if partitions < 2 {
+		partitions = 2
+	}
+
+	dims := getDims()
 	s := &InMemStore{
-		db:        db,
-		dims:      getDims(),
-		docsCache: make(map[string]*Document),
+		db:         db,
+		dims:       dims,
+		docsCache:  make(map[string]*Document),
+		partitions: partitions,
+		slabPool:   util.NewSlabPool(partitions, 10000, dims), // 10k docs per partition max
 	}
 
 	if err := s.init(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 
 	// Load all vectors into memory
 	if err := s.loadVectors(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 
@@ -105,7 +125,7 @@ func (s *InMemStore) loadVectors() error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var docID string
@@ -146,7 +166,7 @@ func (s *InMemStore) Store(ctx context.Context, doc *Document) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	metadata, _ := json.Marshal(doc.Metadata)
 
@@ -193,7 +213,7 @@ func (s *InMemStore) StoreBatch(ctx context.Context, docs []*Document) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	docStmt, err := tx.PrepareContext(ctx,
 		`INSERT OR REPLACE INTO documents (id, filepath, content, start_line, end_line, metadata)
@@ -201,14 +221,14 @@ func (s *InMemStore) StoreBatch(ctx context.Context, docs []*Document) error {
 	if err != nil {
 		return err
 	}
-	defer docStmt.Close()
+	defer func() { _ = docStmt.Close() }()
 
 	vecStmt, err := tx.PrepareContext(ctx,
 		`INSERT OR REPLACE INTO vec_embeddings (embedding, doc_id) VALUES (?, ?)`)
 	if err != nil {
 		return err
 	}
-	defer vecStmt.Close()
+	defer func() { _ = vecStmt.Close() }()
 
 	newIDs := make([]string, 0, len(docs))
 	newVecs := make([][]float32, 0, len(docs))
@@ -252,53 +272,162 @@ func (s *InMemStore) StoreBatch(ctx context.Context, docs []*Document) error {
 type searchResult struct {
 	id       string
 	distance float64
+	idx      int
 }
 
-// Search finds similar documents using in-memory L2 search.
+// partialResult holds results from one partition.
+type partialResult struct {
+	partition int
+	results   []searchResult
+}
+
+// Search finds similar documents using parallel partitioned in-memory L2 search.
+// Uses fzf-inspired patterns: pre-allocated slabs, partitioned parallelism.
 func (s *InMemStore) Search(ctx context.Context, embedding []float32, limit int, threshold float64) ([]*Document, []float64, error) {
 	s.mu.RLock()
 	vectors := s.vectors
 	docIDs := s.docIDs
 	s.mu.RUnlock()
 
-	if len(vectors) == 0 {
+	n := len(vectors)
+	if n == 0 {
 		return nil, nil, nil
 	}
 
-	// Compute L2 distances in-memory
-	results := make([]searchResult, len(vectors))
-	for i, vec := range vectors {
-		results[i] = searchResult{
-			id:       docIDs[i],
-			distance: l2Distance(embedding, vec),
-		}
+	// For small datasets, use simple sequential search
+	if n < 1000 {
+		return s.searchSequential(ctx, embedding, vectors, docIDs, limit, threshold)
 	}
 
-	// Sort by distance
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].distance < results[j].distance
-	})
+	// Parallel partitioned search for larger datasets
+	return s.searchParallel(ctx, embedding, vectors, docIDs, limit, threshold)
+}
 
-	// Filter by threshold and limit
+// searchSequential is the simple path for small datasets.
+func (s *InMemStore) searchSequential(ctx context.Context, embedding []float32, vectors [][]float32, docIDs []string, limit int, threshold float64) ([]*Document, []float64, error) {
+	n := len(vectors)
+
+	// Use single slab for sequential search
+	slab := s.slabPool.Get(0)
+	distances := slab.Distances(n)
+	indices := slab.Indices(n)
+
+	// Compute all distances using pre-allocated buffer
+	util.L2DistanceBatch(embedding, vectors, distances)
+
+	// Get top-k indices
+	topK := util.TopKIndices(distances, indices, limit*2) // Get more than needed for threshold filter
+
+	// Filter by threshold and collect results
 	var filtered []searchResult
-	for _, r := range results {
-		if r.distance > threshold {
+	for _, idx := range topK {
+		if distances[idx] > threshold {
 			continue
 		}
-		filtered = append(filtered, r)
+		filtered = append(filtered, searchResult{
+			id:       docIDs[idx],
+			distance: distances[idx],
+			idx:      idx,
+		})
 		if len(filtered) >= limit {
 			break
 		}
 	}
 
-	if len(filtered) == 0 {
+	return s.loadDocuments(ctx, filtered)
+}
+
+// searchParallel uses partitioned parallelism (fzf pattern).
+func (s *InMemStore) searchParallel(ctx context.Context, embedding []float32, vectors [][]float32, docIDs []string, limit int, threshold float64) ([]*Document, []float64, error) {
+	n := len(vectors)
+	numPartitions := s.partitions
+	if numPartitions > n {
+		numPartitions = n
+	}
+
+	chunkSize := (n + numPartitions - 1) / numPartitions
+	resultChan := make(chan partialResult, numPartitions)
+
+	var cancelled atomic.Bool
+	var wg sync.WaitGroup
+
+	// Launch parallel workers
+	for p := 0; p < numPartitions; p++ {
+		start := p * chunkSize
+		end := start + chunkSize
+		if end > n {
+			end = n
+		}
+		if start >= end {
+			continue
+		}
+
+		wg.Add(1)
+		go func(partition, start, end int) {
+			defer wg.Done()
+
+			if cancelled.Load() {
+				return
+			}
+
+			// Get pre-allocated slab for this partition
+			slab := s.slabPool.Get(partition)
+			partitionSize := end - start
+			distances := slab.Distances(partitionSize)
+
+			// Compute distances for this partition
+			util.L2DistanceBatch(embedding, vectors[start:end], distances)
+
+			// Collect results under threshold
+			var results []searchResult
+			for i := 0; i < partitionSize; i++ {
+				if distances[i] <= threshold {
+					results = append(results, searchResult{
+						id:       docIDs[start+i],
+						distance: distances[i],
+						idx:      start + i,
+					})
+				}
+			}
+
+			resultChan <- partialResult{partition: partition, results: results}
+		}(p, start, end)
+	}
+
+	// Close channel when all workers done
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	// Merge results from all partitions
+	var allResults []searchResult
+	for pr := range resultChan {
+		allResults = append(allResults, pr.results...)
+	}
+
+	// Sort merged results by distance
+	sort.Slice(allResults, func(i, j int) bool {
+		return allResults[i].distance < allResults[j].distance
+	})
+
+	// Take top limit
+	if len(allResults) > limit {
+		allResults = allResults[:limit]
+	}
+
+	return s.loadDocuments(ctx, allResults)
+}
+
+// loadDocuments fetches documents from SQLite for the given search results.
+func (s *InMemStore) loadDocuments(ctx context.Context, results []searchResult) ([]*Document, []float64, error) {
+	if len(results) == 0 {
 		return nil, nil, nil
 	}
 
-	// Load documents
-	placeholders := make([]string, len(filtered))
-	args := make([]interface{}, len(filtered))
-	for i, r := range filtered {
+	placeholders := make([]string, len(results))
+	args := make([]interface{}, len(results))
+	for i, r := range results {
 		placeholders[i] = "?"
 		args[i] = r.id
 	}
@@ -313,9 +442,9 @@ func (s *InMemStore) Search(ctx context.Context, embedding []float32, limit int,
 	if err != nil {
 		return nil, nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
-	docsByID := make(map[string]*Document, len(filtered))
+	docsByID := make(map[string]*Document, len(results))
 	for rows.Next() {
 		var doc Document
 		var metadataStr string
@@ -324,15 +453,15 @@ func (s *InMemStore) Search(ctx context.Context, embedding []float32, limit int,
 			return nil, nil, err
 		}
 		if metadataStr != "" {
-			json.Unmarshal([]byte(metadataStr), &doc.Metadata)
+			_ = json.Unmarshal([]byte(metadataStr), &doc.Metadata)
 		}
 		docsByID[doc.ID] = &doc
 	}
 
 	// Reconstruct ordered results
-	docs := make([]*Document, 0, len(filtered))
-	distances := make([]float64, 0, len(filtered))
-	for _, r := range filtered {
+	docs := make([]*Document, 0, len(results))
+	distances := make([]float64, 0, len(results))
+	for _, r := range results {
 		if d, ok := docsByID[r.id]; ok {
 			docs = append(docs, d)
 			distances = append(distances, r.distance)
@@ -342,26 +471,13 @@ func (s *InMemStore) Search(ctx context.Context, embedding []float32, limit int,
 	return docs, distances, nil
 }
 
-// l2Distance computes L2 (Euclidean) distance between two vectors.
-func l2Distance(a, b []float32) float64 {
-	if len(a) != len(b) {
-		return math.MaxFloat64
-	}
-	var sum float64
-	for i := range a {
-		d := float64(a[i] - b[i])
-		sum += d * d
-	}
-	return math.Sqrt(sum)
-}
-
 // Stats returns index statistics.
 func (s *InMemStore) Stats(ctx context.Context) (*Stats, error) {
 	var stats Stats
 
-	s.db.QueryRowContext(ctx,
+	_ = s.db.QueryRowContext(ctx,
 		`SELECT COUNT(DISTINCT filepath) FROM documents`).Scan(&stats.Documents)
-	s.db.QueryRowContext(ctx,
+	_ = s.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM documents`).Scan(&stats.Chunks)
 
 	s.mu.RLock()
@@ -381,10 +497,10 @@ func (s *InMemStore) DeleteByPath(ctx context.Context, filePath string) error {
 	var ids []string
 	for rows.Next() {
 		var id string
-		rows.Scan(&id)
+		_ = rows.Scan(&id)
 		ids = append(ids, id)
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	if len(ids) == 0 {
 		return nil
@@ -394,11 +510,11 @@ func (s *InMemStore) DeleteByPath(ctx context.Context, filePath string) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	for _, id := range ids {
-		tx.ExecContext(ctx, `DELETE FROM vec_embeddings WHERE doc_id = ?`, id)
-		tx.ExecContext(ctx, `DELETE FROM documents WHERE id = ?`, id)
+		_, _ = tx.ExecContext(ctx, `DELETE FROM vec_embeddings WHERE doc_id = ?`, id)
+		_, _ = tx.ExecContext(ctx, `DELETE FROM documents WHERE id = ?`, id)
 	}
 
 	if err := tx.Commit(); err != nil {

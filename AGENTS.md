@@ -9,16 +9,24 @@ go build -o sgrep ./cmd/sgrep
 # Test
 go test ./...
 
+# Lint
+golangci-lint run ./...
+
 # Install
 go install ./cmd/sgrep
 ```
 
-## Prerequisites
+## Setup
 
-llama.cpp server with embedding model:
 ```bash
-llama-server -m nomic-embed-text-v1.5.Q8_0.gguf --embedding --port 8080
+# Install llama.cpp (macOS)
+brew install llama.cpp
+
+# Download embedding model and verify installation
+sgrep setup
 ```
+
+The embedding server auto-starts when needed. No manual server management required.
 
 ## Usage for Coding Agents
 
@@ -54,12 +62,23 @@ sgrep --json "error handling"
 # → [{"file":"auth/handler.go","start":45,"end":67,"score":0.12}]
 ```
 
+## Server Management
+
+The embedding server runs as a daemon (auto-started, stays running):
+
+```bash
+sgrep server status   # Check if running
+sgrep server stop     # Stop daemon
+sgrep server start    # Manually start
+```
+
 ## Configuration
 
 ```bash
-SGREP_ENDPOINT=http://localhost:8080  # llama.cpp server
-SGREP_DIMS=768                        # embedding dimensions
-SGREP_MAX_TOKENS=1500                 # chunk size
+SGREP_HOME=~/.sgrep                   # Data directory
+SGREP_ENDPOINT=http://localhost:8080  # Override server URL
+SGREP_PORT=8080                       # Server port
+SGREP_DIMS=768                        # Embedding dimensions
 ```
 
 ## Code Style
@@ -68,3 +87,4 @@ SGREP_MAX_TOKENS=1500                 # chunk size
 - No external LLM dependencies (local llama.cpp only)
 - Minimal output by default (token-efficient)
 - JSON output for agent parsing
+- Use `_ = fn()` for intentionally ignored errors

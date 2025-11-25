@@ -29,16 +29,18 @@ sgrep "how does user authentication work"
 go install github.com/XiaoConstantine/sgrep@latest
 ```
 
-**Requirements**: llama.cpp server running with an embedding model:
+**Requirements**: llama.cpp (for the embedding server)
 ```bash
-# Start llama.cpp with nomic-embed-text (768 dims)
-llama-server -m nomic-embed-text-v1.5.Q8_0.gguf --embedding --port 8080
+brew install llama.cpp   # macOS
 ```
 
 ## Quick Start
 
 ```bash
-# Index your codebase (creates .sgrep/index.db)
+# One-time setup: downloads embedding model (~130MB)
+sgrep setup
+
+# Index your codebase (auto-starts embedding server)
 sgrep index .
 
 # Semantic search
@@ -49,6 +51,8 @@ sgrep "how are API rate limits implemented"
 # Watch mode (background indexing)
 sgrep watch .
 ```
+
+The embedding server starts automatically when needed and stays running as a daemon.
 
 ## Agent-Optimized Output
 
@@ -103,29 +107,22 @@ rg "RATE_LIMIT_MAX"
 
 ## Storage
 
-All indexes are stored in `~/.sgrep/`:
+All data is stored in `~/.sgrep/`:
 ```
 ~/.sgrep/
+├── models/
+│   └── nomic-embed-text-v1.5.Q8_0.gguf   # Embedding model (~130MB)
 ├── repos/
 │   ├── a1b2c3/              # Hash of /path/to/repo1
 │   │   ├── index.db         # SQLite + vectors
 │   │   └── metadata.json    # Repo path, index time
 │   └── d4e5f6/              # Hash of /path/to/repo2
 │       └── ...
-└── cache/                   # Embedding cache (future)
+├── server.pid               # Embedding server PID
+└── server.log               # Embedding server logs
 ```
 
 Use `sgrep list` to see all indexed repositories.
-
-## Configuration
-
-Environment variables:
-```bash
-SGREP_HOME=~/.sgrep                    # Index storage location
-SGREP_ENDPOINT=http://localhost:8080   # llama.cpp server
-SGREP_MODEL=nomic-embed-text           # embedding model
-SGREP_DIMS=768                         # vector dimensions
-```
 
 ## Commands
 
@@ -137,6 +134,10 @@ SGREP_DIMS=768                         # vector dimensions
 | `sgrep list` | List all indexed repos |
 | `sgrep status` | Show index status |
 | `sgrep clear` | Clear index |
+| `sgrep setup` | Download model, verify llama-server |
+| `sgrep server start` | Manually start embedding server |
+| `sgrep server stop` | Stop embedding server |
+| `sgrep server status` | Show server status |
 
 ## Flags
 
@@ -148,12 +149,23 @@ SGREP_DIMS=768                         # vector dimensions
 | `-q, --quiet` | Minimal output (paths only) |
 | `--threshold F` | L2 distance threshold (default: 1.5, lower = stricter) |
 
+## Configuration
+
+Environment variables:
+```bash
+SGREP_HOME=~/.sgrep                    # Data storage location
+SGREP_ENDPOINT=http://localhost:8080   # Override embedding server URL
+SGREP_PORT=8080                        # Embedding server port
+SGREP_DIMS=768                         # Vector dimensions
+```
+
 ## How It Works
 
-1. **Indexing**: Files are chunked using AST-aware splitting (Go, TS, Python) or size-based fallback
-2. **Embedding**: Each chunk is embedded via llama.cpp (local, $0 cost)
-3. **Storage**: Vectors stored in SQLite, loaded into memory for fast search
-4. **Search**: Query embedded → in-memory L2 search → load matching documents
+1. **Setup**: `sgrep setup` downloads the embedding model and verifies llama-server
+2. **Indexing**: Files are chunked using AST-aware splitting (Go, TS, Python) or size-based fallback
+3. **Embedding**: Each chunk is embedded via llama.cpp (local, $0 cost, auto-started)
+4. **Storage**: Vectors stored in SQLite, loaded into memory for fast search
+5. **Search**: Query embedded → in-memory L2 search → load matching documents
 
 ## Architecture
 
@@ -168,6 +180,9 @@ SGREP_DIMS=768                         # vector dimensions
 │  │ Embedding   │    │ L2 Search   │    │  Documents  │      │
 │  │   (~15ms)   │    │   (~2ms)    │    │   (~5ms)    │      │
 │  └─────────────┘    └─────────────┘    └─────────────┘      │
+│       ▲                                                      │
+│       │ Auto-started by sgrep                               │
+│       │ (daemon mode, PID tracked)                          │
 │                                                              │
 │  Total: ~30ms (vs 2800ms with sqlite-vec KNN)               │
 └──────────────────────────────────────────────────────────────┘

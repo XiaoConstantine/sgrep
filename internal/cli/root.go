@@ -11,6 +11,7 @@ import (
 
 	"github.com/XiaoConstantine/sgrep/internal/index"
 	"github.com/XiaoConstantine/sgrep/internal/search"
+	"github.com/XiaoConstantine/sgrep/internal/server"
 	"github.com/XiaoConstantine/sgrep/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -57,6 +58,8 @@ func init() {
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(clearCmd)
 	rootCmd.AddCommand(listCmd)
+	rootCmd.AddCommand(setupCmd)
+	rootCmd.AddCommand(serverCmd)
 }
 
 func runSearch(cmd *cobra.Command, args []string) error {
@@ -335,4 +338,118 @@ func formatBytes(b int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+// Setup command - download model and verify llama-server
+var setupCmd = &cobra.Command{
+	Use:   "setup",
+	Short: "Download embedding model and verify llama-server installation",
+	Long: `Setup downloads the nomic-embed-text embedding model (~130MB) and
+verifies that llama-server is installed.
+
+The model is stored in ~/.sgrep/models/`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		mgr, err := server.NewManager()
+		if err != nil {
+			return err
+		}
+
+		return mgr.Setup(true)
+	},
+}
+
+// Server command group
+var serverCmd = &cobra.Command{
+	Use:   "server",
+	Short: "Manage the embedding server",
+	Long: `Commands to manage the llama.cpp embedding server.
+
+The server runs automatically when needed, but you can also control it manually.`,
+}
+
+func init() {
+	serverCmd.AddCommand(serverStartCmd)
+	serverCmd.AddCommand(serverStopCmd)
+	serverCmd.AddCommand(serverStatusCmd)
+}
+
+var serverStartCmd = &cobra.Command{
+	Use:   "start",
+	Short: "Start the embedding server",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		mgr, err := server.NewManager()
+		if err != nil {
+			return err
+		}
+
+		if mgr.IsRunning() {
+			fmt.Println("Server already running")
+			return nil
+		}
+
+		fmt.Println("Starting embedding server...")
+		if err := mgr.Start(); err != nil {
+			return err
+		}
+		fmt.Println("Server started")
+		return nil
+	},
+}
+
+var serverStopCmd = &cobra.Command{
+	Use:   "stop",
+	Short: "Stop the embedding server",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		mgr, err := server.NewManager()
+		if err != nil {
+			return err
+		}
+
+		if !mgr.IsRunning() {
+			fmt.Println("Server not running")
+			return nil
+		}
+
+		if err := mgr.Stop(); err != nil {
+			return err
+		}
+		fmt.Println("Server stopped")
+		return nil
+	},
+}
+
+var serverStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show embedding server status",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		mgr, err := server.NewManager()
+		if err != nil {
+			return err
+		}
+
+		running, pid, port := mgr.Status()
+		if running {
+			fmt.Printf("Server running on port %d", port)
+			if pid > 0 {
+				fmt.Printf(" (PID %d)", pid)
+			}
+			fmt.Println()
+		} else {
+			fmt.Println("Server not running")
+		}
+
+		if mgr.ModelExists() {
+			fmt.Printf("Model: %s\n", mgr.ModelPath())
+		} else {
+			fmt.Println("Model: not downloaded (run 'sgrep setup')")
+		}
+
+		if mgr.LlamaServerInstalled() {
+			fmt.Println("llama-server: installed")
+		} else {
+			fmt.Println("llama-server: not found (brew install llama.cpp)")
+		}
+
+		return nil
+	},
 }

@@ -11,6 +11,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/XiaoConstantine/sgrep/internal/server"
+	"github.com/XiaoConstantine/sgrep/internal/util"
 )
 
 const (
@@ -19,12 +22,41 @@ const (
 	maxContextTokens = 1500 // Safe limit for 2048 context (llama.cpp tokens)
 )
 
+// Config holds embedder configuration (dependency injection).
+type Config struct {
+	Endpoint   string
+	Timeout    time.Duration
+	CacheSize  int
+	AutoStart  bool
+	ServerMgr  *server.Manager
+	EventBox   *util.EventBox
+}
+
+// DefaultConfig returns sensible defaults.
+func DefaultConfig() Config {
+	endpoint := os.Getenv("SGREP_ENDPOINT")
+	if endpoint == "" {
+		endpoint = defaultEndpoint
+	}
+	return Config{
+		Endpoint:  endpoint,
+		Timeout:   defaultTimeout,
+		CacheSize: 10000,
+		AutoStart: true,
+	}
+}
+
 // Embedder generates embeddings via llama.cpp server.
 type Embedder struct {
-	endpoint string
-	client   *http.Client
-	cache    *Cache
-	mu       sync.Mutex
+	endpoint   string
+	client     *http.Client
+	cache      *Cache
+	mu         sync.Mutex
+	serverMgr  *server.Manager
+	autoStart  bool
+	startOnce  sync.Once
+	startError error
+	eventBox   *util.EventBox
 
 	// Stats
 	totalRequests int64
@@ -32,24 +64,66 @@ type Embedder struct {
 	errors        int64
 }
 
-// New creates a new embedder.
+// New creates a new embedder with auto-start enabled.
 func New() *Embedder {
-	endpoint := os.Getenv("SGREP_ENDPOINT")
+	return NewWithConfig(DefaultConfig())
+}
+
+// NewWithOptions creates a new embedder with configurable auto-start.
+// Deprecated: Use NewWithConfig for full control.
+func NewWithOptions(autoStart bool) *Embedder {
+	cfg := DefaultConfig()
+	cfg.AutoStart = autoStart
+	return NewWithConfig(cfg)
+}
+
+// NewWithConfig creates an embedder with full configuration control.
+// This is the preferred constructor for dependency injection.
+func NewWithConfig(cfg Config) *Embedder {
+	endpoint := cfg.Endpoint
 	if endpoint == "" {
 		endpoint = defaultEndpoint
 	}
 
+	var mgr *server.Manager
+	if cfg.AutoStart {
+		if cfg.ServerMgr != nil {
+			mgr = cfg.ServerMgr
+		} else {
+			mgr, _ = server.NewManager()
+		}
+		if mgr != nil {
+			endpoint = mgr.Endpoint()
+		}
+	}
+
+	timeout := cfg.Timeout
+	if timeout == 0 {
+		timeout = defaultTimeout
+	}
+
+	cacheSize := cfg.CacheSize
+	if cacheSize == 0 {
+		cacheSize = 10000
+	}
+
 	return &Embedder{
-		endpoint: endpoint,
-		client: &http.Client{
-			Timeout: defaultTimeout,
-		},
-		cache: NewCache(10000),
+		endpoint:  endpoint,
+		client:    &http.Client{Timeout: timeout},
+		cache:     NewCache(cacheSize),
+		serverMgr: mgr,
+		autoStart: cfg.AutoStart,
+		eventBox:  cfg.EventBox,
 	}
 }
 
 // Embed generates an embedding for the given text.
 func (e *Embedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	// Ensure server is running (once per embedder lifetime)
+	if err := e.ensureServer(); err != nil {
+		return nil, err
+	}
+
 	e.mu.Lock()
 	e.totalRequests++
 	e.mu.Unlock()
@@ -78,6 +152,38 @@ func (e *Embedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	e.cache.Set(text, embedding)
 
 	return embedding, nil
+}
+
+// ensureServer starts the embedding server if auto-start is enabled.
+func (e *Embedder) ensureServer() error {
+	if !e.autoStart || e.serverMgr == nil {
+		return nil
+	}
+
+	e.startOnce.Do(func() {
+		if !e.serverMgr.IsRunning() {
+			// Emit event if eventBox is configured
+			if e.eventBox != nil {
+				e.eventBox.Set(util.EvtServerStarting, nil)
+			}
+
+			fmt.Fprintln(os.Stderr, "Starting embedding server...")
+			e.startError = e.serverMgr.Start()
+
+			if e.startError == nil {
+				fmt.Fprintln(os.Stderr, "Embedding server started")
+				if e.eventBox != nil {
+					e.eventBox.Set(util.EvtServerReady, nil)
+				}
+			} else {
+				if e.eventBox != nil {
+					e.eventBox.Set(util.EvtServerError, e.startError)
+				}
+			}
+		}
+	})
+
+	return e.startError
 }
 
 // truncateToTokenLimit truncates text to stay under the token limit.
@@ -169,7 +275,7 @@ func (e *Embedder) callLlamaCpp(ctx context.Context, text string) ([]float32, er
 	if err != nil {
 		return nil, fmt.Errorf("llama.cpp request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
