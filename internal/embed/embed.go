@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/XiaoConstantine/sgrep/internal/server"
@@ -326,7 +327,7 @@ type Cache struct {
 	mu       sync.RWMutex
 	data     map[string][]float32
 	maxSize  int
-	hitCount int64
+	hitCount atomic.Int64
 }
 
 func NewCache(maxSize int) *Cache {
@@ -340,7 +341,7 @@ func (c *Cache) Get(key string) []float32 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if v, ok := c.data[key]; ok {
-		c.hitCount++
+		c.hitCount.Add(1)
 		return v
 	}
 	return nil

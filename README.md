@@ -215,6 +215,37 @@ The embedding model (nomic-embed-text) has a 2048 token context limit. sgrep han
 2. Safety truncation at 1500 tokens in embedder
 3. Large functions/types split into parts automatically
 
+## Testing
+
+Run the test suite:
+
+```bash
+# Quick tests (skips slow integration tests)
+go test -short ./...
+
+# Full test suite with race detection
+go test -race ./...
+
+# Run tests with coverage
+go test -short -cover ./...
+```
+
+**Test patterns used:**
+- `httptest.NewServer` for mocking llama.cpp embedding server
+- `t.TempDir()` for isolated database paths
+- Mock `Storer` interface for search tests without real embeddings
+- `-race` flag to detect concurrent access issues
+
+**Current coverage:**
+| Package | Coverage |
+|---------|----------|
+| internal/index | 25% |
+| internal/server | 58% |
+| internal/store | 46% |
+| internal/search | 95% |
+
+Note: Lower coverage in index/server is expected—they require a running llama-server for full integration testing.
+
 ## License
 
 Apache-2.0

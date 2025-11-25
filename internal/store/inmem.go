@@ -304,15 +304,15 @@ func (s *InMemStore) Search(ctx context.Context, embedding []float32, limit int,
 }
 
 // searchSequential is the simple path for small datasets.
+// Allocates fresh buffers per call for concurrent safety.
 func (s *InMemStore) searchSequential(ctx context.Context, embedding []float32, vectors [][]float32, docIDs []string, limit int, threshold float64) ([]*Document, []float64, error) {
 	n := len(vectors)
 
-	// Use single slab for sequential search
-	slab := s.slabPool.Get(0)
-	distances := slab.Distances(n)
-	indices := slab.Indices(n)
+	// Allocate fresh buffers for concurrent safety
+	distances := make([]float64, n)
+	indices := make([]int, n)
 
-	// Compute all distances using pre-allocated buffer
+	// Compute all distances
 	util.L2DistanceBatch(embedding, vectors, distances)
 
 	// Get top-k indices

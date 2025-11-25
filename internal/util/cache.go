@@ -34,26 +34,22 @@ func NewQueryCache(capacity int, ttl time.Duration) *QueryCache {
 
 // Get retrieves a value from cache, returns nil if not found or expired.
 func (c *QueryCache) Get(key string) interface{} {
-	c.mu.RLock()
-	elem, ok := c.items[key]
-	c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
+	elem, ok := c.items[key]
 	if !ok {
 		return nil
 	}
 
 	entry := elem.Value.(*cacheEntry)
 	if time.Now().After(entry.expiresAt) {
-		c.mu.Lock()
 		c.removeElement(elem)
-		c.mu.Unlock()
 		return nil
 	}
 
 	// Move to front (most recently used)
-	c.mu.Lock()
 	c.order.MoveToFront(elem)
-	c.mu.Unlock()
 
 	return entry.value
 }
