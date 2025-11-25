@@ -18,12 +18,12 @@ type Result struct {
 
 // Searcher handles semantic search.
 type Searcher struct {
-	store    *store.Store
+	store    store.Storer
 	embedder *embed.Embedder
 }
 
 // New creates a new searcher.
-func New(s *store.Store) *Searcher {
+func New(s store.Storer) *Searcher {
 	return &Searcher{
 		store:    s,
 		embedder: embed.New(),

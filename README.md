@@ -146,21 +146,59 @@ SGREP_DIMS=768                         # vector dimensions
 | `-c, --context` | Show code context |
 | `--json` | JSON output for agents |
 | `-q, --quiet` | Minimal output (paths only) |
-| `--threshold F` | Similarity threshold (0-1) |
+| `--threshold F` | L2 distance threshold (default: 1.5, lower = stricter) |
 
 ## How It Works
 
 1. **Indexing**: Files are chunked using AST-aware splitting (Go, TS, Python) or size-based fallback
 2. **Embedding**: Each chunk is embedded via llama.cpp (local, $0 cost)
-3. **Storage**: Vectors stored in SQLite with sqlite-vec (int8 quantized)
-4. **Search**: Query embedded → vector similarity search → ranked results
+3. **Storage**: Vectors stored in SQLite, loaded into memory for fast search
+4. **Search**: Query embedded → in-memory L2 search → load matching documents
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                         sgrep                                │
+├──────────────────────────────────────────────────────────────┤
+│  Query: "error handling"                                     │
+│         ↓                                                    │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐      │
+│  │ llama.cpp   │───▶│ In-Memory   │───▶│   SQLite    │      │
+│  │ Embedding   │    │ L2 Search   │    │  Documents  │      │
+│  │   (~15ms)   │    │   (~2ms)    │    │   (~5ms)    │      │
+│  └─────────────┘    └─────────────┘    └─────────────┘      │
+│                                                              │
+│  Total: ~30ms (vs 2800ms with sqlite-vec KNN)               │
+└──────────────────────────────────────────────────────────────┘
+```
 
 ## Performance
 
-- **Indexing**: ~100 files/sec with llama.cpp on M1
-- **Search**: <50ms for 10K chunks
-- **Storage**: ~1KB per chunk (quantized vectors)
-- **Memory**: ~50MB for 10K file index
+Benchmarked on maestro codebase (102 files, 1572 chunks, 768-dim vectors):
+
+| Metric | sgrep | ripgrep | 
+|--------|-------|---------|
+| Latency (avg) | **31ms** | 10ms |
+| Token usage | **57% less** | baseline |
+| Attempts needed | 1 | 3-7 |
+
+**Why in-memory search?**
+
+sqlite-vec's KNN queries are slow (~2.9s for 1.5K vectors) due to SQLite's fragmented storage. We load vectors into memory on startup and compute L2 distance in Go, achieving **88x faster** search:
+
+- Vector load: ~95ms (once on startup)
+- Embedding: ~15ms (HTTP to llama.cpp)
+- L2 search: ~2ms (in-memory)
+- Doc fetch: ~5ms (SQLite by ID)
+
+## Chunk Size Limits
+
+The embedding model (nomic-embed-text) has a 2048 token context limit. sgrep handles this by:
+
+1. Default chunk size: 1000 tokens (with AST-aware splitting)
+2. Safety truncation at 1500 tokens in embedder
+3. Large functions/types split into parts automatically
 
 ## License
 

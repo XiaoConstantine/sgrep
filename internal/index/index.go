@@ -23,7 +23,7 @@ import (
 // Indexer handles file indexing.
 type Indexer struct {
 	rootPath  string
-	store     *store.Store
+	store     store.Storer
 	embedder  *embed.Embedder
 	chunkCfg  *chunk.Config
 	ignore    *IgnoreRules
@@ -56,9 +56,9 @@ func New(path string) (*Indexer, error) {
 		return nil, err
 	}
 
-	// Open store
+	// Open store (use in-memory search for speed)
 	dbPath := filepath.Join(repoDir, "index.db")
-	s, err := store.Open(dbPath)
+	s, err := store.OpenInMem(dbPath)
 	if err != nil {
 		return nil, err
 	}

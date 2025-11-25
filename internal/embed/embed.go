@@ -16,7 +16,7 @@ import (
 const (
 	defaultEndpoint  = "http://localhost:8080"
 	defaultTimeout   = 30 * time.Second
-	maxContextTokens = 1800 // Leave headroom for 2048 context limit
+	maxContextTokens = 1500 // Safe limit for 2048 context (llama.cpp tokens)
 )
 
 // Embedder generates embeddings via llama.cpp server.
@@ -81,18 +81,20 @@ func (e *Embedder) Embed(ctx context.Context, text string) ([]float32, error) {
 }
 
 // truncateToTokenLimit truncates text to stay under the token limit.
-// Uses a conservative estimate of ~4 chars per token.
+// Uses ~3 chars per token (conservative for code which has more special chars).
 func truncateToTokenLimit(text string, maxTokens int) string {
-	maxChars := maxTokens * 4
+	maxChars := maxTokens * 3
 	if len(text) <= maxChars {
 		return text
 	}
-	// Truncate at word boundary
+	// Truncate at word/line boundary
 	truncated := text[:maxChars]
-	if idx := strings.LastIndex(truncated, " "); idx > maxChars/2 {
+	if idx := strings.LastIndex(truncated, "\n"); idx > maxChars*3/4 {
+		truncated = truncated[:idx]
+	} else if idx := strings.LastIndex(truncated, " "); idx > maxChars/2 {
 		truncated = truncated[:idx]
 	}
-	return truncated + "..."
+	return truncated
 }
 
 // EmbedBatch generates embeddings for multiple texts.

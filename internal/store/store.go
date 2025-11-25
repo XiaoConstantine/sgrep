@@ -7,12 +7,23 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	_ "github.com/mattn/go-sqlite3"
 )
 
 const defaultDims = 768 // nomic-embed-text dimensions
+
+// Storer interface for vector stores.
+type Storer interface {
+	Store(ctx context.Context, doc *Document) error
+	StoreBatch(ctx context.Context, docs []*Document) error
+	Search(ctx context.Context, embedding []float32, limit int, threshold float64) ([]*Document, []float64, error)
+	Stats(ctx context.Context) (*Stats, error)
+	DeleteByPath(ctx context.Context, filepath string) error
+	Close() error
+}
 
 // Document represents an indexed code chunk.
 type Document struct {
@@ -74,6 +85,20 @@ func getDims() int {
 }
 
 func (s *Store) init() error {
+	// Performance PRAGMAs - critical for sqlite-vec performance
+	pragmas := []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA synchronous=NORMAL",
+		"PRAGMA temp_store=MEMORY",
+		"PRAGMA cache_size=-50000",    // ~50MB cache
+		"PRAGMA mmap_size=268435456",  // 256MB mmap
+	}
+	for _, p := range pragmas {
+		if _, err := s.db.Exec(p); err != nil {
+			return fmt.Errorf("failed to set pragma: %w", err)
+		}
+	}
+
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS documents (
 			id TEXT PRIMARY KEY,
@@ -191,59 +216,91 @@ func (s *Store) StoreBatch(ctx context.Context, docs []*Document) error {
 }
 
 // Search finds similar documents to the query embedding.
+// Uses two-phase search: KNN first, then load documents.
 func (s *Store) Search(ctx context.Context, embedding []float32, limit int, threshold float64) ([]*Document, []float64, error) {
 	blob, err := sqlite_vec.SerializeFloat32(embedding)
 	if err != nil {
 		return nil, nil, err
 	}
 
+	// Phase 1: Fast KNN search - only get IDs and distances
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT 
-			d.id, d.filepath, d.content, d.start_line, d.end_line, d.metadata,
-			v.distance
-		FROM vec_embeddings v
-		JOIN documents d ON d.id = v.doc_id
-		WHERE v.embedding MATCH ?
-		  AND k = ?
-		ORDER BY v.distance
-	`, blob, limit*2) // Get more, filter by threshold
+		SELECT doc_id, distance
+		FROM vec_embeddings
+		WHERE embedding MATCH ?
+		ORDER BY distance
+		LIMIT ?
+	`, blob, limit)
 	if err != nil {
-		return nil, nil, fmt.Errorf("search query failed: %w", err)
+		return nil, nil, fmt.Errorf("KNN search failed: %w", err)
 	}
-	defer rows.Close()
 
-	var docs []*Document
+	var ids []string
 	var distances []float64
-
 	for rows.Next() {
-		var doc Document
-		var metadataStr string
+		var id string
 		var distance float64
-
-		err := rows.Scan(&doc.ID, &doc.FilePath, &doc.Content,
-			&doc.StartLine, &doc.EndLine, &metadataStr, &distance)
-		if err != nil {
+		if err := rows.Scan(&id, &distance); err != nil {
+			rows.Close()
 			return nil, nil, err
 		}
-
-		// Filter by threshold
 		if distance > threshold {
 			continue
 		}
+		ids = append(ids, id)
+		distances = append(distances, distance)
+	}
+	rows.Close()
 
+	if len(ids) == 0 {
+		return nil, nil, nil
+	}
+
+	// Phase 2: Load documents for matched IDs only
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, filepath, content, start_line, end_line, metadata
+		FROM documents
+		WHERE id IN (%s)
+	`, strings.Join(placeholders, ","))
+
+	docRows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("document fetch failed: %w", err)
+	}
+	defer docRows.Close()
+
+	docsByID := make(map[string]*Document, len(ids))
+	for docRows.Next() {
+		var doc Document
+		var metadataStr string
+		if err := docRows.Scan(&doc.ID, &doc.FilePath, &doc.Content,
+			&doc.StartLine, &doc.EndLine, &metadataStr); err != nil {
+			return nil, nil, err
+		}
 		if metadataStr != "" {
 			json.Unmarshal([]byte(metadataStr), &doc.Metadata)
 		}
+		docsByID[doc.ID] = &doc
+	}
 
-		docs = append(docs, &doc)
-		distances = append(distances, distance)
-
-		if len(docs) >= limit {
-			break
+	// Reconstruct ordered results
+	docs := make([]*Document, 0, len(ids))
+	finalDistances := make([]float64, 0, len(ids))
+	for i, id := range ids {
+		if d, ok := docsByID[id]; ok {
+			docs = append(docs, d)
+			finalDistances = append(finalDistances, distances[i])
 		}
 	}
 
-	return docs, distances, nil
+	return docs, finalDistances, nil
 }
 
 // DeleteByPath removes all documents for a file path.

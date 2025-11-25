@@ -49,7 +49,7 @@ func init() {
 	rootCmd.Flags().BoolVarP(&showContext, "context", "c", false, "Show code context")
 	rootCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON (for agents)")
 	rootCmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "Minimal output (paths only)")
-	rootCmd.Flags().Float64Var(&threshold, "threshold", 0.5, "Similarity threshold (0-1, lower is more similar)")
+	rootCmd.Flags().Float64Var(&threshold, "threshold", 1.5, "Similarity threshold (L2 distance, lower is more similar)")
 
 	// Add subcommands
 	rootCmd.AddCommand(indexCmd)
@@ -73,8 +73,8 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no index found. Run 'sgrep index .' first")
 	}
 
-	// Open store
-	s, err := store.Open(indexPath)
+	// Open store (use in-memory for fast search)
+	s, err := store.OpenInMem(indexPath)
 	if err != nil {
 		return fmt.Errorf("failed to open index: %w", err)
 	}
@@ -230,7 +230,7 @@ var statusCmd = &cobra.Command{
 			return nil
 		}
 
-		s, err := store.Open(indexPath)
+		s, err := store.OpenInMem(indexPath)
 		if err != nil {
 			return err
 		}
