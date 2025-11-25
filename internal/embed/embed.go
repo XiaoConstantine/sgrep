@@ -5,15 +5,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	defaultEndpoint = "http://localhost:8080"
-	defaultTimeout  = 30 * time.Second
+	defaultEndpoint  = "http://localhost:8080"
+	defaultTimeout   = 30 * time.Second
+	maxContextTokens = 1800 // Leave headroom for 2048 context limit
 )
 
 // Embedder generates embeddings via llama.cpp server.
@@ -51,6 +54,9 @@ func (e *Embedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	e.totalRequests++
 	e.mu.Unlock()
 
+	// Truncate if too long to avoid context size errors
+	text = truncateToTokenLimit(text, maxContextTokens)
+
 	// Check cache
 	if cached := e.cache.Get(text); cached != nil {
 		e.mu.Lock()
@@ -72,6 +78,21 @@ func (e *Embedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	e.cache.Set(text, embedding)
 
 	return embedding, nil
+}
+
+// truncateToTokenLimit truncates text to stay under the token limit.
+// Uses a conservative estimate of ~4 chars per token.
+func truncateToTokenLimit(text string, maxTokens int) string {
+	maxChars := maxTokens * 4
+	if len(text) <= maxChars {
+		return text
+	}
+	// Truncate at word boundary
+	truncated := text[:maxChars]
+	if idx := strings.LastIndex(truncated, " "); idx > maxChars/2 {
+		truncated = truncated[:idx]
+	}
+	return truncated + "..."
 }
 
 // EmbedBatch generates embeddings for multiple texts.
@@ -121,8 +142,12 @@ type llamaCppRequest struct {
 	Content string `json:"content"`
 }
 
-type llamaCppResponse struct {
-	Embedding []float32 `json:"embedding"`
+// llamaCppResponse handles both formats:
+// - Array format: [{"index": 0, "embedding": [[...]]}]
+// - Object format: {"embedding": [...]}
+type llamaCppResponseItem struct {
+	Index     int         `json:"index"`
+	Embedding [][]float32 `json:"embedding"` // Nested array in new format
 }
 
 func (e *Embedder) callLlamaCpp(ctx context.Context, text string) ([]float32, error) {
@@ -145,15 +170,40 @@ func (e *Embedder) callLlamaCpp(ctx context.Context, text string) ([]float32, er
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("llama.cpp returned status %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("llama.cpp returned status %d: %s", resp.StatusCode, string(body))
 	}
 
-	var result llamaCppResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
+	// Read raw response
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	return result.Embedding, nil
+	// Try array format first (new llama.cpp format)
+	var arrayResult []llamaCppResponseItem
+	if err := json.Unmarshal(body, &arrayResult); err == nil && len(arrayResult) > 0 {
+		if len(arrayResult[0].Embedding) > 0 {
+			return arrayResult[0].Embedding[0], nil
+		}
+	}
+
+	// Try simple object format
+	var objectResult struct {
+		Embedding []float32 `json:"embedding"`
+	}
+	if err := json.Unmarshal(body, &objectResult); err == nil && len(objectResult.Embedding) > 0 {
+		return objectResult.Embedding, nil
+	}
+
+	return nil, fmt.Errorf("failed to parse embedding response: %s", string(body[:min(100, len(body))]))
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // Stats returns embedder statistics.

@@ -120,6 +120,7 @@ func (idx *Indexer) Index(ctx context.Context) error {
 
 	// Collect files
 	var files []string
+	var skippedDirs, skippedFiles, nonCode int
 	err := filepath.WalkDir(idx.rootPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // Skip errors
@@ -128,6 +129,7 @@ func (idx *Indexer) Index(ctx context.Context) error {
 		// Skip directories
 		if d.IsDir() {
 			if idx.ignore.ShouldIgnore(path) {
+				skippedDirs++
 				return filepath.SkipDir
 			}
 			return nil
@@ -135,16 +137,21 @@ func (idx *Indexer) Index(ctx context.Context) error {
 
 		// Skip ignored files
 		if idx.ignore.ShouldIgnore(path) {
+			skippedFiles++
 			return nil
 		}
 
 		// Only index code files
 		if isCodeFile(path) {
 			files = append(files, path)
+		} else {
+			nonCode++
 		}
 
 		return nil
 	})
+	
+	fmt.Printf("Skipped: %d dirs, %d files, %d non-code\n", skippedDirs, skippedFiles, nonCode)
 	if err != nil {
 		return err
 	}
@@ -398,20 +405,50 @@ func (ir *IgnoreRules) ShouldIgnore(path string) bool {
 		return false
 	}
 
+	// Never ignore root
+	if relPath == "." {
+		return false
+	}
+
 	base := filepath.Base(path)
 
 	for _, pattern := range ir.patterns {
-		// Check base name
+		// Skip patterns that would match regular files (like binary names)
+		// Only match if it looks like a directory pattern or glob
+		if !strings.Contains(pattern, "*") && !strings.Contains(pattern, "/") {
+			// For simple names, only match hidden dirs or known dirs
+			if !strings.HasPrefix(pattern, ".") && !isKnownIgnoreDir(pattern) {
+				continue
+			}
+		}
+
+		// Check base name exact match
 		if matched, _ := filepath.Match(pattern, base); matched {
 			return true
 		}
-		// Check relative path
-		if strings.Contains(relPath, pattern) {
-			return true
+		// Check if path component matches (not substring)
+		parts := strings.Split(relPath, string(filepath.Separator))
+		for _, part := range parts {
+			if part == pattern {
+				return true
+			}
+			if matched, _ := filepath.Match(pattern, part); matched {
+				return true
+			}
 		}
 	}
 
 	return false
+}
+
+// isKnownIgnoreDir returns true for directory names that should always be ignored.
+func isKnownIgnoreDir(name string) bool {
+	knownDirs := map[string]bool{
+		"node_modules": true, "vendor": true, "__pycache__": true,
+		"dist": true, "build": true, ".git": true, ".sgrep": true,
+		".idea": true, ".vscode": true,
+	}
+	return knownDirs[name]
 }
 
 func isCodeFile(path string) bool {

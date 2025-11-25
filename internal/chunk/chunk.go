@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	defaultMaxTokens    = 1500
+	defaultMaxTokens    = 1000 // Conservative limit to stay under 2048 with description prefix
 	defaultContextLines = 10
 	defaultOverlap      = 3
 )
