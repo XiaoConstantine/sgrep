@@ -1,0 +1,409 @@
+package search
+
+import (
+	"context"
+	"errors"
+	"math/rand"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/XiaoConstantine/sgrep/internal/store"
+	"github.com/XiaoConstantine/sgrep/internal/util"
+)
+
+type mockStore struct {
+	docs      []*store.Document
+	distances []float64
+	searchErr error
+	mu        sync.Mutex
+}
+
+func (m *mockStore) Store(ctx context.Context, doc *store.Document) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.docs = append(m.docs, doc)
+	return nil
+}
+
+func (m *mockStore) StoreBatch(ctx context.Context, docs []*store.Document) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.docs = append(m.docs, docs...)
+	return nil
+}
+
+func (m *mockStore) Search(ctx context.Context, embedding []float32, limit int, threshold float64) ([]*store.Document, []float64, error) {
+	if m.searchErr != nil {
+		return nil, nil, m.searchErr
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	n := len(m.docs)
+	if limit < n {
+		n = limit
+	}
+
+	results := make([]*store.Document, n)
+	dists := make([]float64, n)
+
+	for i := 0; i < n; i++ {
+		results[i] = m.docs[i]
+		if i < len(m.distances) {
+			dists[i] = m.distances[i]
+		} else {
+			dists[i] = float64(i) * 0.1
+		}
+	}
+
+	return results, dists, nil
+}
+
+func (m *mockStore) Stats(ctx context.Context) (*store.Stats, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return &store.Stats{Chunks: int64(len(m.docs))}, nil
+}
+
+func (m *mockStore) DeleteByPath(ctx context.Context, filepath string) error {
+	return nil
+}
+
+func (m *mockStore) Close() error {
+	return nil
+}
+
+type mockEmbedder struct {
+	embeddings map[string][]float32
+	embedErr   error
+	callCount  int
+	mu         sync.Mutex
+}
+
+func (m *mockEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.callCount++
+
+	if m.embedErr != nil {
+		return nil, m.embedErr
+	}
+
+	if emb, ok := m.embeddings[text]; ok {
+		return emb, nil
+	}
+
+	vec := make([]float32, 768)
+	for i := range vec {
+		vec[i] = rand.Float32()
+	}
+	return vec, nil
+}
+
+func TestNew(t *testing.T) {
+	ms := &mockStore{}
+	s := New(ms)
+
+	if s == nil {
+		t.Error("New should return non-nil searcher")
+	}
+	if s.store != ms {
+		t.Error("store should be set")
+	}
+	if s.queryCache == nil {
+		t.Error("queryCache should be initialized")
+	}
+}
+
+func TestNewWithOptions(t *testing.T) {
+	ms := &mockStore{}
+	s := NewWithOptions(ms, 50, 2*time.Minute)
+
+	if s == nil {
+		t.Error("NewWithOptions should return non-nil searcher")
+	}
+}
+
+func TestNewWithConfig(t *testing.T) {
+	ms := &mockStore{}
+	eb := util.NewEventBox()
+
+	cfg := Config{
+		Store:     ms,
+		CacheSize: 200,
+		CacheTTL:  10 * time.Minute,
+		EventBox:  eb,
+	}
+
+	s := NewWithConfig(cfg)
+
+	if s == nil {
+		t.Error("NewWithConfig should return non-nil searcher")
+	}
+	if s.eventBox != eb {
+		t.Error("eventBox should be set")
+	}
+}
+
+func TestSearcher_Search_EmptyStore(t *testing.T) {
+	ms := &mockStore{}
+	s := New(ms)
+
+	results, err := s.Search(context.Background(), "test query", 10, 2.0)
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+
+	if len(results) != 0 {
+		t.Errorf("expected 0 results from empty store, got %d", len(results))
+	}
+}
+
+func TestSearcher_Search_WithResults(t *testing.T) {
+	ms := &mockStore{
+		docs: []*store.Document{
+			{ID: "doc1", FilePath: "/test.go", Content: "func main()", StartLine: 1, EndLine: 5},
+			{ID: "doc2", FilePath: "/test2.go", Content: "type Foo struct{}", StartLine: 10, EndLine: 15},
+		},
+		distances: []float64{0.5, 1.2},
+	}
+	s := New(ms)
+
+	results, err := s.Search(context.Background(), "main function", 10, 2.0)
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+
+	if len(results) != 2 {
+		t.Errorf("expected 2 results, got %d", len(results))
+	}
+
+	if results[0].FilePath != "/test.go" {
+		t.Errorf("expected first result filepath /test.go, got %s", results[0].FilePath)
+	}
+	if results[0].Score != 0.5 {
+		t.Errorf("expected score 0.5, got %f", results[0].Score)
+	}
+}
+
+func TestSearcher_Search_StoreError(t *testing.T) {
+	ms := &mockStore{
+		searchErr: errors.New("store error"),
+	}
+	s := New(ms)
+
+	_, err := s.Search(context.Background(), "test query", 10, 2.0)
+	if err == nil {
+		t.Error("expected error from store to propagate")
+	}
+}
+
+func TestSearcher_Search_Caching(t *testing.T) {
+	ms := &mockStore{
+		docs: []*store.Document{
+			{ID: "doc1", FilePath: "/test.go", Content: "content"},
+		},
+	}
+
+	s := New(ms)
+
+	_, _ = s.Search(context.Background(), "test query", 10, 2.0)
+	_, _ = s.Search(context.Background(), "test query", 10, 2.0)
+
+	stats := s.CacheStats()
+	if stats.Size == 0 {
+		t.Error("expected cache to have entries after search")
+	}
+}
+
+func TestSearcher_Search_DifferentParams(t *testing.T) {
+	ms := &mockStore{
+		docs: []*store.Document{
+			{ID: "doc1", FilePath: "/test.go", Content: "content"},
+		},
+	}
+	s := New(ms)
+
+	r1, _ := s.Search(context.Background(), "test", 5, 1.0)
+	r2, _ := s.Search(context.Background(), "test", 10, 1.0)
+	r3, _ := s.Search(context.Background(), "test", 5, 2.0)
+
+	_ = r1
+	_ = r2
+	_ = r3
+}
+
+func TestSearcher_Search_EventBox(t *testing.T) {
+	eb := util.NewEventBox()
+	ms := &mockStore{
+		docs: []*store.Document{
+			{ID: "doc1", FilePath: "/test.go", Content: "content"},
+		},
+	}
+
+	s := NewWithConfig(Config{
+		Store:    ms,
+		EventBox: eb,
+	})
+
+	done := make(chan bool)
+	go func() {
+		evtType, _ := eb.Wait(util.EvtSearchStart, util.EvtSearchComplete)
+		if evtType == util.EvtSearchStart || evtType == util.EvtSearchComplete {
+			done <- true
+		}
+	}()
+
+	go func() {
+		_, _ = s.Search(context.Background(), "test query", 10, 2.0)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Error("expected search events to be emitted")
+	}
+}
+
+func TestSearcher_ClearCache(t *testing.T) {
+	ms := &mockStore{
+		docs: []*store.Document{
+			{ID: "doc1", FilePath: "/test.go", Content: "content"},
+		},
+	}
+	s := New(ms)
+
+	_, _ = s.Search(context.Background(), "test query", 10, 2.0)
+	s.ClearCache()
+
+	stats := s.CacheStats()
+	if stats.Size != 0 {
+		t.Errorf("expected cache size 0 after clear, got %d", stats.Size)
+	}
+}
+
+func TestSearcher_CacheStats(t *testing.T) {
+	ms := &mockStore{
+		docs: []*store.Document{
+			{ID: "doc1", FilePath: "/test.go", Content: "content"},
+		},
+	}
+	s := New(ms)
+
+	stats := s.CacheStats()
+	if stats.Capacity != 100 {
+		t.Errorf("expected default capacity 100, got %d", stats.Capacity)
+	}
+}
+
+func TestSearcher_cacheKey(t *testing.T) {
+	ms := &mockStore{}
+	s := New(ms)
+
+	key1 := s.cacheKey("query", 10, 2.0)
+	key2 := s.cacheKey("query", 10, 2.0)
+	key3 := s.cacheKey("query", 5, 2.0)
+	key4 := s.cacheKey("different", 10, 2.0)
+
+	if key1 != key2 {
+		t.Error("same params should produce same cache key")
+	}
+	if key1 == key3 {
+		t.Error("different limit should produce different cache key")
+	}
+	if key1 == key4 {
+		t.Error("different query should produce different cache key")
+	}
+}
+
+func TestResult_Fields(t *testing.T) {
+	r := Result{
+		FilePath:  "/test/file.go",
+		StartLine: 10,
+		EndLine:   20,
+		Score:     0.5,
+		Content:   "func main() {}",
+	}
+
+	if r.FilePath != "/test/file.go" {
+		t.Errorf("unexpected FilePath: %s", r.FilePath)
+	}
+	if r.StartLine != 10 {
+		t.Errorf("unexpected StartLine: %d", r.StartLine)
+	}
+	if r.EndLine != 20 {
+		t.Errorf("unexpected EndLine: %d", r.EndLine)
+	}
+	if r.Score != 0.5 {
+		t.Errorf("unexpected Score: %f", r.Score)
+	}
+	if r.Content != "func main() {}" {
+		t.Errorf("unexpected Content: %s", r.Content)
+	}
+}
+
+func TestSearcher_ConcurrentSearch(t *testing.T) {
+	ms := &mockStore{
+		docs: []*store.Document{
+			{ID: "doc1", FilePath: "/test.go", Content: "content"},
+		},
+	}
+	s := New(ms)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, err := s.Search(context.Background(), "query"+string(rune('0'+i%10)), 10, 2.0)
+			if err != nil {
+				t.Errorf("concurrent search failed: %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
+// Benchmarks
+
+func BenchmarkSearcher_Search_CacheHit(b *testing.B) {
+	ms := &mockStore{
+		docs: []*store.Document{
+			{ID: "doc1", FilePath: "/test.go", Content: "content"},
+		},
+	}
+	s := New(ms)
+
+	_, _ = s.Search(context.Background(), "test query", 10, 2.0)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = s.Search(context.Background(), "test query", 10, 2.0)
+	}
+}
+
+func BenchmarkSearcher_Search_CacheMiss(b *testing.B) {
+	ms := &mockStore{
+		docs: []*store.Document{
+			{ID: "doc1", FilePath: "/test.go", Content: "content"},
+		},
+	}
+	s := New(ms)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = s.Search(context.Background(), "query"+string(rune(i%256)), 10, 2.0)
+	}
+}
+
+func BenchmarkSearcher_cacheKey(b *testing.B) {
+	ms := &mockStore{}
+	s := New(ms)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		s.cacheKey("test query", 10, 2.0)
+	}
+}
