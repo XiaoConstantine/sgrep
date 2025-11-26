@@ -23,6 +23,7 @@ type NodeTypeConfig struct {
 	NameField      string // Field name for the identifier (e.g., "name")
 	DocstringField string // Field name for docstring (e.g., "body" for Python where first child may be string)
 	DocstringType  string // Node type for docstring (e.g., "expression_statement" containing "string")
+	LeadingComment bool   // If true, look for doc comments before the node (JS/TS JSDoc, Rust ///)
 }
 
 // Registry holds all supported languages.

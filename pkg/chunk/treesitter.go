@@ -94,7 +94,11 @@ func extractChunk(node *tree_sitter.Node, content []byte, path, lang string, ntC
 	// Extract docstring if available
 	docstring := ""
 	if ntCfg.DocstringField != "" && ntCfg.DocstringType != "" {
+		// Python-style: docstring inside body
 		docstring = extractDocstring(node, content, ntCfg)
+	} else if ntCfg.LeadingComment {
+		// JS/Rust-style: doc comment before the node
+		docstring = extractLeadingComment(node, content)
 	}
 
 	description := buildTreeSitterDescription(lang, ntCfg.Kind, name, path, docstring)
@@ -152,6 +156,93 @@ func extractDocstring(node *tree_sitter.Node, content []byte, ntCfg NodeTypeConf
 	docstring = cleanDocstring(docstring)
 
 	return docstring
+}
+
+// extractLeadingComment extracts JSDoc or Rust doc comments before a node.
+func extractLeadingComment(node *tree_sitter.Node, content []byte) string {
+	// Get the previous sibling - doc comments appear right before the function
+	prevSibling := node.PrevSibling()
+	if prevSibling == nil {
+		return ""
+	}
+
+	kind := prevSibling.Kind()
+
+	// Check for comment types
+	isDocComment := false
+	switch kind {
+	case "comment":
+		// JS/TS: Could be JSDoc /** ... */ or regular comment
+		isDocComment = true
+	case "line_comment":
+		// Rust: /// doc comment
+		isDocComment = true
+	case "block_comment":
+		// Rust: /** ... */ or /* ... */
+		isDocComment = true
+	}
+
+	if !isDocComment {
+		return ""
+	}
+
+	startByte := prevSibling.StartByte()
+	endByte := prevSibling.EndByte()
+	if startByte >= uint(len(content)) || endByte > uint(len(content)) {
+		return ""
+	}
+
+	comment := string(content[startByte:endByte])
+
+	// Clean up the comment
+	return cleanComment(comment)
+}
+
+// cleanComment removes comment markers and cleans up.
+func cleanComment(s string) string {
+	// Remove JSDoc style /** ... */
+	if strings.HasPrefix(s, "/**") {
+		s = strings.TrimPrefix(s, "/**")
+		s = strings.TrimSuffix(s, "*/")
+	} else if strings.HasPrefix(s, "/*") {
+		s = strings.TrimPrefix(s, "/*")
+		s = strings.TrimSuffix(s, "*/")
+	}
+
+	// Remove Rust doc comment ///
+	if strings.HasPrefix(s, "///") {
+		s = strings.TrimPrefix(s, "///")
+	} else if strings.HasPrefix(s, "//!") {
+		s = strings.TrimPrefix(s, "//!")
+	} else if strings.HasPrefix(s, "//") {
+		s = strings.TrimPrefix(s, "//")
+	}
+
+	// Clean up JSDoc annotations and asterisks
+	lines := strings.Split(s, "\n")
+	var cleaned []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		// Remove leading asterisks from JSDoc
+		line = strings.TrimPrefix(line, "* ")
+		line = strings.TrimPrefix(line, "*")
+		line = strings.TrimSpace(line)
+
+		// Skip @param, @returns, etc. - keep only description
+		if strings.HasPrefix(line, "@") {
+			continue
+		}
+		if line != "" {
+			cleaned = append(cleaned, line)
+		}
+
+		// Limit to ~200 chars
+		if len(strings.Join(cleaned, " ")) > 200 {
+			break
+		}
+	}
+
+	return strings.Join(cleaned, " ")
 }
 
 // cleanDocstring removes quotes and cleans up a docstring.
