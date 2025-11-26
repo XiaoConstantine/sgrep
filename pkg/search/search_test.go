@@ -418,6 +418,10 @@ func TestDefaultSearchOptions(t *testing.T) {
 }
 
 func TestSearcher_SearchWithOptions_IncludeTests(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test that requires embedding server")
+	}
+
 	ms := &mockStore{
 		docs: []*store.Document{
 			{ID: "impl", FilePath: "/main.go", Content: "func main()", IsTest: false},
@@ -443,6 +447,10 @@ func TestSearcher_SearchWithOptions_IncludeTests(t *testing.T) {
 }
 
 func TestSearcher_SearchWithOptions_Deduplicate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test that requires embedding server")
+	}
+
 	ms := &mockStore{
 		docs: []*store.Document{
 			{ID: "chunk1", FilePath: "/main.go", Content: "func foo()", StartLine: 1, EndLine: 5},
@@ -475,6 +483,10 @@ func TestSearcher_SearchWithOptions_Deduplicate(t *testing.T) {
 }
 
 func TestSearcher_SearchWithOptions_NoBoost(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test that requires embedding server")
+	}
+
 	ms := &mockStore{
 		docs: []*store.Document{
 			{ID: "doc1", FilePath: "/main.go", Content: "content", IsTest: false},
