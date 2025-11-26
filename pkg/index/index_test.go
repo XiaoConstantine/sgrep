@@ -114,3 +114,218 @@ func TestIndexer_Fields(t *testing.T) {
 		t.Error("field issue")
 	}
 }
+
+func TestDefaultIndexConfig(t *testing.T) {
+	cfg := DefaultIndexConfig()
+	if cfg == nil {
+		t.Fatal("expected non-nil config")
+	}
+	if cfg.Workers < 4 {
+		t.Errorf("workers should be at least 4, got %d", cfg.Workers)
+	}
+	if cfg.Workers > 16 {
+		t.Errorf("workers should be capped at 16, got %d", cfg.Workers)
+	}
+	if cfg.EmbedConcurrency != 8 {
+		t.Errorf("expected EmbedConcurrency 8, got %d", cfg.EmbedConcurrency)
+	}
+}
+
+func TestIsTestFile(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		// Go test files
+		{"main_test.go", true},
+		{"pkg/foo_test.go", true},
+		{"main.go", false},
+
+		// JS/TS test files
+		{"app.test.ts", true},
+		{"app.test.tsx", true},
+		{"app.test.js", true},
+		{"app.test.jsx", true},
+		{"app.spec.ts", true},
+		{"app.spec.tsx", true},
+		{"app.spec.js", true},
+		{"app.spec.jsx", true},
+		{"app.ts", false},
+		{"app.js", false},
+
+		// Python test files
+		{"test_main.py", true},
+		{"main_test.py", true},
+		{"main.py", false},
+
+		// Ruby test files
+		{"main_spec.rb", true},
+		{"main.rb", false},
+
+		// Rust test files
+		{"main_test.rs", true},
+		{"main.rs", false},
+
+		// Java test files
+		{"MainTest.java", true},
+		{"MainTests.java", true},
+		{"Main.java", false},
+
+		// Files in test directories
+		{"tests/main.go", true},
+		{"test/main.py", true},
+		{"__tests__/app.js", true},
+		{"spec/helper.rb", true},
+		{"specs/main.rb", true},
+		{"_tests/foo.go", true},
+
+		// Non-test files
+		{"src/main.go", false},
+		{"lib/util.py", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got := isTestFile(tt.path)
+			if got != tt.want {
+				t.Errorf("isTestFile(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTruncateAtBoundary(t *testing.T) {
+	tests := []struct {
+		name     string
+		text     string
+		maxChars int
+		want     string
+	}{
+		{
+			name:     "no truncation needed",
+			text:     "hello world",
+			maxChars: 20,
+			want:     "hello world",
+		},
+		{
+			name:     "truncate at line boundary",
+			text:     "line one\nline two\nline three",
+			maxChars: 20,
+			want:     "line one\nline two",
+		},
+		{
+			name:     "truncate at word boundary",
+			text:     "hello beautiful world today",
+			maxChars: 15,
+			want:     "hello beautiful",
+		},
+		{
+			name:     "hard truncate when no good boundary",
+			text:     "abcdefghijklmnop",
+			maxChars: 10,
+			want:     "abcdefghij",
+		},
+		{
+			name:     "empty string",
+			text:     "",
+			maxChars: 10,
+			want:     "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateAtBoundary(tt.text, tt.maxChars)
+			if len(got) > tt.maxChars {
+				t.Errorf("truncateAtBoundary() returned string longer than maxChars: len=%d, max=%d", len(got), tt.maxChars)
+			}
+		})
+	}
+}
+
+func TestIgnoreRules_Patterns(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create .gitignore with various patterns
+	gitignore := `# Comment
+*.log
+build/
+*.min.js
+`
+	_ = os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(gitignore), 0644)
+
+	ir := NewIgnoreRules(dir)
+
+	tests := []struct {
+		path string
+		want bool
+	}{
+		// Default ignores
+		{filepath.Join(dir, "node_modules"), true},
+		{filepath.Join(dir, "vendor"), true},
+		{filepath.Join(dir, "__pycache__"), true},
+		{filepath.Join(dir, ".idea"), true},
+		{filepath.Join(dir, ".vscode"), true},
+		{filepath.Join(dir, "dist"), true},
+		{filepath.Join(dir, "build"), true},
+		{filepath.Join(dir, ".git"), true},
+		{filepath.Join(dir, ".sgrep"), true},
+
+		// From .gitignore
+		{filepath.Join(dir, "app.log"), true},
+		{filepath.Join(dir, "bundle.min.js"), true},
+
+		// Should not ignore
+		{filepath.Join(dir, "src"), false},
+		{filepath.Join(dir, "main.go"), false},
+		{filepath.Join(dir, "app.js"), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(filepath.Base(tt.path), func(t *testing.T) {
+			got := ir.ShouldIgnore(tt.path)
+			if got != tt.want {
+				t.Errorf("ShouldIgnore(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIgnoreRules_CommentLines(t *testing.T) {
+	dir := t.TempDir()
+
+	// .gitignore with comments
+	content := `# This is a comment
+*.log
+# Another comment
+`
+	_ = os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(content), 0644)
+
+	ir := NewIgnoreRules(dir)
+
+	// Comments should not be treated as patterns
+	if ir.ShouldIgnore(filepath.Join(dir, "# This is a comment")) {
+		t.Error("comment line should not be used as pattern")
+	}
+}
+
+func TestIgnoreRules_EmptyLines(t *testing.T) {
+	dir := t.TempDir()
+
+	content := `*.log
+
+*.tmp
+
+`
+	_ = os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(content), 0644)
+
+	ir := NewIgnoreRules(dir)
+
+	// Should ignore .log and .tmp files
+	if !ir.ShouldIgnore(filepath.Join(dir, "app.log")) {
+		t.Error("should ignore .log files")
+	}
+	if !ir.ShouldIgnore(filepath.Join(dir, "temp.tmp")) {
+		t.Error("should ignore .tmp files")
+	}
+}
