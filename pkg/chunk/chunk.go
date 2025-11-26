@@ -57,16 +57,18 @@ func ChunkFile(path string, content string, cfg *Config) ([]Chunk, error) {
 
 	ext := strings.ToLower(filepath.Ext(path))
 
-	switch ext {
-	case ".go":
+	// Special case: Keep using Go's native AST (more accurate)
+	if ext == ".go" {
 		return chunkGo(path, content, cfg)
-	case ".ts", ".tsx", ".js", ".jsx":
-		return chunkBySize(path, content, cfg) // TODO: AST for TS
-	case ".py":
-		return chunkBySize(path, content, cfg) // TODO: AST for Python
-	default:
-		return chunkBySize(path, content, cfg)
 	}
+
+	// Try tree-sitter for registered languages
+	if langCfg := GetLanguageByPath(path); langCfg != nil {
+		return chunkTreeSitter(path, content, cfg, langCfg)
+	}
+
+	// Fallback to size-based chunking
+	return chunkBySize(path, content, cfg)
 }
 
 // chunkGo uses Go AST to split at function/type boundaries.
