@@ -14,7 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/XiaoConstantine/sgrep/internal/util"
+	"github.com/XiaoConstantine/sgrep/pkg/util"
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	_ "github.com/mattn/go-sqlite3"
 )

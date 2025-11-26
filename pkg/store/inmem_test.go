@@ -12,7 +12,7 @@ import (
 
 func TestOpenInMem(t *testing.T) {
 	s := newStore(t)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if s.db == nil || s.dims != 768 || s.partitions < 2 {
 		t.Error("init failed")
 	}
@@ -24,13 +24,13 @@ func TestOpenInMem_CreatesDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.Close()
+	_ = s.Close()
 }
 
 func TestOpenInMem_CustomDims(t *testing.T) {
 	t.Setenv("SGREP_DIMS", "384")
 	s := newStore(t)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if s.dims != 384 {
 		t.Errorf("got %d", s.dims)
 	}
@@ -38,7 +38,7 @@ func TestOpenInMem_CustomDims(t *testing.T) {
 
 func TestStore_Single(t *testing.T) {
 	s := newStore(t)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	doc := &Document{
 		ID: "d1", FilePath: "/f.go", Content: "x",
@@ -55,7 +55,7 @@ func TestStore_Single(t *testing.T) {
 
 func TestStoreBatch(t *testing.T) {
 	s := newStore(t)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	docs := make([]*Document, 50)
 	for i := range docs {
@@ -73,7 +73,7 @@ func TestStoreBatch(t *testing.T) {
 
 func TestStoreBatch_Empty(t *testing.T) {
 	s := newStore(t)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if err := s.StoreBatch(context.Background(), nil); err != nil {
 		t.Error(err)
 	}
@@ -81,7 +81,7 @@ func TestStoreBatch_Empty(t *testing.T) {
 
 func TestSearch_Empty(t *testing.T) {
 	s := newStore(t)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	docs, dists, err := s.Search(context.Background(), rndVec(768), 10, 5.0)
 	if err != nil || len(docs) != 0 || len(dists) != 0 {
 		t.Error("should be empty")
@@ -90,7 +90,7 @@ func TestSearch_Empty(t *testing.T) {
 
 func TestSearch_Sequential(t *testing.T) {
 	s := newStore(t)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	base := rndVec(768)
 	docs := make([]*Document, 100)
@@ -101,7 +101,7 @@ func TestSearch_Sequential(t *testing.T) {
 		}
 		docs[i] = &Document{ID: itoa(i), FilePath: "/f.go", Content: "x", Embedding: e}
 	}
-	s.StoreBatch(context.Background(), docs)
+	_ = s.StoreBatch(context.Background(), docs)
 
 	results, dists, _ := s.Search(context.Background(), base, 5, 5.0)
 	if len(results) == 0 {
@@ -119,7 +119,7 @@ func TestSearch_Parallel(t *testing.T) {
 		t.Skip("skipping parallel test in short mode")
 	}
 	s := newStore(t)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	base := rndVec(768)
 	docs := make([]*Document, 1200)
@@ -130,7 +130,7 @@ func TestSearch_Parallel(t *testing.T) {
 		}
 		docs[i] = &Document{ID: itoa(i), FilePath: "/f.go", Content: "x", Embedding: e}
 	}
-	s.StoreBatch(context.Background(), docs)
+	_ = s.StoreBatch(context.Background(), docs)
 
 	results, dists, _ := s.Search(context.Background(), base, 10, 50.0)
 	if len(results) < 5 {
@@ -145,15 +145,15 @@ func TestSearch_Parallel(t *testing.T) {
 
 func TestSearch_Threshold(t *testing.T) {
 	s := newStore(t)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	near := make([]float32, 768)
 	near[0] = 1.0
 	far := make([]float32, 768)
 	far[0] = 100.0
 
-	s.Store(context.Background(), &Document{ID: "near", FilePath: "/f", Content: "x", Embedding: near})
-	s.Store(context.Background(), &Document{ID: "far", FilePath: "/f", Content: "x", Embedding: far})
+	_ = s.Store(context.Background(), &Document{ID: "near", FilePath: "/f", Content: "x", Embedding: near})
+	_ = s.Store(context.Background(), &Document{ID: "far", FilePath: "/f", Content: "x", Embedding: far})
 
 	query := make([]float32, 768)
 	results, _, _ := s.Search(context.Background(), query, 10, 5.0)
@@ -164,10 +164,10 @@ func TestSearch_Threshold(t *testing.T) {
 
 func TestStats(t *testing.T) {
 	s := newStore(t)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	for i := 0; i < 5; i++ {
-		s.Store(context.Background(), &Document{
+		_ = s.Store(context.Background(), &Document{
 			ID: itoa(i), FilePath: "/f" + itoa(i%2) + ".go", Content: "x", Embedding: rndVec(768),
 		})
 	}
@@ -179,12 +179,12 @@ func TestStats(t *testing.T) {
 
 func TestDeleteByPath(t *testing.T) {
 	s := newStore(t)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	base := rndVec(768)
-	s.Store(context.Background(), &Document{ID: "d1", FilePath: "/a.go", Content: "x", Embedding: base})
-	s.Store(context.Background(), &Document{ID: "d2", FilePath: "/a.go", Content: "x", Embedding: base})
-	s.Store(context.Background(), &Document{ID: "d3", FilePath: "/b.go", Content: "x", Embedding: base})
+	_ = s.Store(context.Background(), &Document{ID: "d1", FilePath: "/a.go", Content: "x", Embedding: base})
+	_ = s.Store(context.Background(), &Document{ID: "d2", FilePath: "/a.go", Content: "x", Embedding: base})
+	_ = s.Store(context.Background(), &Document{ID: "d3", FilePath: "/b.go", Content: "x", Embedding: base})
 
 	if err := s.DeleteByPath(context.Background(), "/a.go"); err != nil {
 		t.Fatal(err)
@@ -201,7 +201,7 @@ func TestDeleteByPath(t *testing.T) {
 
 func TestDeleteByPath_NonExistent(t *testing.T) {
 	s := newStore(t)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if err := s.DeleteByPath(context.Background(), "/x.go"); err != nil {
 		t.Error(err)
 	}
@@ -243,13 +243,13 @@ func TestConcurrentRead(t *testing.T) {
 		t.Skip("skipping concurrent test in short mode")
 	}
 	s := newStore(t)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	docs := make([]*Document, 100)
 	for i := range docs {
 		docs[i] = &Document{ID: itoa(i), FilePath: "/f.go", Content: "x", Embedding: rndVec(768)}
 	}
-	s.StoreBatch(context.Background(), docs)
+	_ = s.StoreBatch(context.Background(), docs)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 3; i++ {
@@ -257,7 +257,7 @@ func TestConcurrentRead(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 3; j++ {
-				s.Search(context.Background(), rndVec(768), 5, 10.0)
+				_, _, _ = s.Search(context.Background(), rndVec(768), 5, 10.0)
 			}
 		}()
 	}
@@ -269,7 +269,7 @@ func TestConcurrentWrite(t *testing.T) {
 		t.Skip("skipping concurrent test in short mode")
 	}
 	s := newStore(t)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	var wg sync.WaitGroup
 	for i := 0; i < 3; i++ {
@@ -280,7 +280,7 @@ func TestConcurrentWrite(t *testing.T) {
 			for j := range docs {
 				docs[j] = &Document{ID: itoa(idx*100 + j), FilePath: "/f.go", Content: "x", Embedding: rndVec(768)}
 			}
-			s.StoreBatch(context.Background(), docs)
+			_ = s.StoreBatch(context.Background(), docs)
 		}(i)
 	}
 	wg.Wait()
@@ -293,7 +293,7 @@ func TestConcurrentWrite(t *testing.T) {
 
 func TestLoadDocuments_Empty(t *testing.T) {
 	s := newStore(t)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	docs, dists, err := s.loadDocuments(context.Background(), nil)
 	if err != nil || docs != nil || dists != nil {
 		t.Error("should be nil")
@@ -311,21 +311,21 @@ func TestClose(t *testing.T) {
 
 func BenchmarkSearch_100(b *testing.B) {
 	s := benchStore(b, 100)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	q := rndVec(768)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		s.Search(context.Background(), q, 10, 5.0)
+		_, _, _ = s.Search(context.Background(), q, 10, 5.0)
 	}
 }
 
 func BenchmarkSearch_1000(b *testing.B) {
 	s := benchStore(b, 1000)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	q := rndVec(768)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		s.Search(context.Background(), q, 10, 5.0)
+		_, _, _ = s.Search(context.Background(), q, 10, 5.0)
 	}
 }
 
@@ -337,8 +337,8 @@ func BenchmarkStoreBatch_100(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		s := benchStoreEmpty(b)
-		s.StoreBatch(context.Background(), docs)
-		s.Close()
+		_ = s.StoreBatch(context.Background(), docs)
+		_ = s.Close()
 	}
 }
 
@@ -358,7 +358,7 @@ func benchStore(b *testing.B, n int) *InMemStore {
 	for i := range docs {
 		docs[i] = &Document{ID: itoa(i), FilePath: "/f.go", Content: "x", Embedding: rndVec(768)}
 	}
-	s.StoreBatch(context.Background(), docs)
+	_ = s.StoreBatch(context.Background(), docs)
 	return s
 }
 
@@ -386,5 +386,5 @@ func itoa(n int) string {
 }
 
 func init() {
-	os.Setenv("SGREP_DIMS", "")
+	_ = os.Setenv("SGREP_DIMS", "")
 }

@@ -3,13 +3,12 @@ package search
 import (
 	"context"
 	"errors"
-	"math/rand"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/XiaoConstantine/sgrep/internal/store"
-	"github.com/XiaoConstantine/sgrep/internal/util"
+	"github.com/XiaoConstantine/sgrep/pkg/store"
+	"github.com/XiaoConstantine/sgrep/pkg/util"
 )
 
 type mockStore struct {
@@ -75,39 +74,12 @@ func (m *mockStore) Close() error {
 	return nil
 }
 
-type mockEmbedder struct {
-	embeddings map[string][]float32
-	embedErr   error
-	callCount  int
-	mu         sync.Mutex
-}
-
-func (m *mockEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.callCount++
-
-	if m.embedErr != nil {
-		return nil, m.embedErr
-	}
-
-	if emb, ok := m.embeddings[text]; ok {
-		return emb, nil
-	}
-
-	vec := make([]float32, 768)
-	for i := range vec {
-		vec[i] = rand.Float32()
-	}
-	return vec, nil
-}
-
 func TestNew(t *testing.T) {
 	ms := &mockStore{}
 	s := New(ms)
 
 	if s == nil {
-		t.Error("New should return non-nil searcher")
+		t.Fatal("New should return non-nil searcher")
 	}
 	if s.store != ms {
 		t.Error("store should be set")
@@ -122,7 +94,7 @@ func TestNewWithOptions(t *testing.T) {
 	s := NewWithOptions(ms, 50, 2*time.Minute)
 
 	if s == nil {
-		t.Error("NewWithOptions should return non-nil searcher")
+		t.Fatal("NewWithOptions should return non-nil searcher")
 	}
 }
 
@@ -140,7 +112,7 @@ func TestNewWithConfig(t *testing.T) {
 	s := NewWithConfig(cfg)
 
 	if s == nil {
-		t.Error("NewWithConfig should return non-nil searcher")
+		t.Fatal("NewWithConfig should return non-nil searcher")
 	}
 	if s.eventBox != eb {
 		t.Error("eventBox should be set")

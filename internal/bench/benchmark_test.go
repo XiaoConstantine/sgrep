@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/XiaoConstantine/sgrep/internal/chunk"
-	"github.com/XiaoConstantine/sgrep/internal/store"
-	"github.com/XiaoConstantine/sgrep/internal/util"
+	"github.com/XiaoConstantine/sgrep/pkg/chunk"
+	"github.com/XiaoConstantine/sgrep/pkg/store"
+	"github.com/XiaoConstantine/sgrep/pkg/util"
 )
 
 const (

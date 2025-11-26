@@ -13,8 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/XiaoConstantine/sgrep/internal/server"
-	"github.com/XiaoConstantine/sgrep/internal/util"
+	"github.com/XiaoConstantine/sgrep/pkg/server"
+	"github.com/XiaoConstantine/sgrep/pkg/util"
 )
 
 const (

@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/XiaoConstantine/sgrep/internal/embed"
-	"github.com/XiaoConstantine/sgrep/internal/store"
+	"github.com/XiaoConstantine/sgrep/pkg/embed"
+	"github.com/XiaoConstantine/sgrep/pkg/store"
 )
 
 func main() {
@@ -27,7 +27,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	fmt.Printf("2. Store open + vector load: %v\n", time.Since(t1))
 
 	t2 := time.Now()

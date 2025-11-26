@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/XiaoConstantine/sgrep/internal/util"
+	"github.com/XiaoConstantine/sgrep/pkg/util"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -74,7 +74,7 @@ func TestNew(t *testing.T) {
 	e := New()
 
 	if e == nil {
-		t.Error("New should return non-nil embedder")
+		t.Fatal("New should return non-nil embedder")
 	}
 	if e.cache == nil {
 		t.Error("cache should be initialized")

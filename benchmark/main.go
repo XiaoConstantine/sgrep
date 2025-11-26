@@ -133,7 +133,7 @@ func main() {
 
 	// Save to file
 	data, _ := json.MarshalIndent(suite, "", "  ")
-	os.WriteFile("benchmark_results.json", data, 0644)
+	_ = os.WriteFile("benchmark_results.json", data, 0644)
 	fmt.Println("\nResults saved to benchmark_results.json")
 }
 

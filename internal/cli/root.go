@@ -9,10 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/XiaoConstantine/sgrep/internal/index"
-	"github.com/XiaoConstantine/sgrep/internal/search"
-	"github.com/XiaoConstantine/sgrep/internal/server"
-	"github.com/XiaoConstantine/sgrep/internal/store"
+	"github.com/XiaoConstantine/sgrep/pkg/index"
+	"github.com/XiaoConstantine/sgrep/pkg/search"
+	"github.com/XiaoConstantine/sgrep/pkg/server"
+	"github.com/XiaoConstantine/sgrep/pkg/store"
 	"github.com/spf13/cobra"
 )
 
@@ -81,7 +81,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open index: %w", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	// Search
 	searcher := search.New(s)
@@ -194,7 +194,7 @@ var indexCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("failed to create indexer: %w", err)
 		}
-		defer indexer.Close()
+		defer func() { _ = indexer.Close() }()
 
 		return indexer.Index(ctx)
 	},
@@ -216,7 +216,7 @@ var watchCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("failed to create indexer: %w", err)
 		}
-		defer indexer.Close()
+		defer func() { _ = indexer.Close() }()
 
 		return indexer.Watch(ctx)
 	},
@@ -237,7 +237,7 @@ var statusCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer s.Close()
+		defer func() { _ = s.Close() }()
 
 		stats, err := s.Stats(context.Background())
 		if err != nil {

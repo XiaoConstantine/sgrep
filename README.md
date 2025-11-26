@@ -25,13 +25,21 @@ sgrep "how does user authentication work"
 
 ## Installation
 
+### As CLI Tool
+
 ```bash
-go install github.com/XiaoConstantine/sgrep@latest
+go install github.com/XiaoConstantine/sgrep/cmd/sgrep@latest
 ```
 
 **Requirements**: llama.cpp (for the embedding server)
 ```bash
 brew install llama.cpp   # macOS
+```
+
+### As Library
+
+```bash
+go get github.com/XiaoConstantine/sgrep@latest
 ```
 
 ## Quick Start
@@ -215,6 +223,55 @@ The embedding model (nomic-embed-text) has a 2048 token context limit. sgrep han
 2. Safety truncation at 1500 tokens in embedder
 3. Large functions/types split into parts automatically
 
+## Library Usage
+
+Use sgrep as an embedded library in your Go application:
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+
+    "github.com/XiaoConstantine/sgrep"
+)
+
+func main() {
+    ctx := context.Background()
+    
+    // Create client for a codebase
+    client, err := sgrep.New("/path/to/codebase")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer client.Close()
+
+    // Index the codebase (required before searching)
+    if err := client.Index(ctx); err != nil {
+        log.Fatal(err)
+    }
+
+    // Search for code by semantic intent
+    results, err := client.Search(ctx, "authentication logic", 10)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    for _, r := range results {
+        fmt.Printf("%s:%d-%d (score: %.2f)\n", r.FilePath, r.StartLine, r.EndLine, r.Score)
+    }
+}
+```
+
+For more control, use the `pkg/` subpackages directly:
+- `pkg/index` - Indexing and file watching
+- `pkg/search` - Search with caching
+- `pkg/embed` - Embedding generation
+- `pkg/store` - Vector storage
+- `pkg/chunk` - Code chunking with AST awareness
+
 ## Testing
 
 Run the test suite:
@@ -239,10 +296,10 @@ go test -short -cover ./...
 **Current coverage:**
 | Package | Coverage |
 |---------|----------|
-| internal/index | 25% |
-| internal/server | 58% |
-| internal/store | 46% |
-| internal/search | 95% |
+| pkg/index | 25% |
+| pkg/server | 58% |
+| pkg/store | 46% |
+| pkg/search | 95% |
 
 Note: Lower coverage in index/server is expected—they require a running llama-server for full integration testing.
 

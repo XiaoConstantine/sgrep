@@ -111,9 +111,8 @@ func TestDownloadFile_NoContentLength(t *testing.T) {
 	destPath := filepath.Join(tmpDir, "test.gguf")
 
 	err := downloadFile(destPath, server.URL, func(downloaded, total int64) {
-		if total != ModelSize {
-			// Should fall back to ModelSize when Content-Length is not set
-		}
+		// Content-Length not set, so total should fall back to ModelSize
+		_ = total
 	})
 
 	if err != nil {

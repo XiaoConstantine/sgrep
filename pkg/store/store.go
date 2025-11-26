@@ -67,7 +67,7 @@ func Open(path string) (*Store, error) {
 	s := &Store{db: db, dims: getDims()}
 
 	if err := s.init(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 
@@ -136,7 +136,7 @@ func (s *Store) Store(ctx context.Context, doc *Document) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	metadata, _ := json.Marshal(doc.Metadata)
 
@@ -175,7 +175,7 @@ func (s *Store) StoreBatch(ctx context.Context, docs []*Document) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	docStmt, err := tx.PrepareContext(ctx,
 		`INSERT OR REPLACE INTO documents (id, filepath, content, start_line, end_line, metadata)
@@ -183,14 +183,14 @@ func (s *Store) StoreBatch(ctx context.Context, docs []*Document) error {
 	if err != nil {
 		return err
 	}
-	defer docStmt.Close()
+	defer func() { _ = docStmt.Close() }()
 
 	vecStmt, err := tx.PrepareContext(ctx,
 		`INSERT OR REPLACE INTO vec_embeddings (embedding, doc_id) VALUES (?, ?)`)
 	if err != nil {
 		return err
 	}
-	defer vecStmt.Close()
+	defer func() { _ = vecStmt.Close() }()
 
 	for _, doc := range docs {
 		metadata, _ := json.Marshal(doc.Metadata)
@@ -241,7 +241,7 @@ func (s *Store) Search(ctx context.Context, embedding []float32, limit int, thre
 		var id string
 		var distance float64
 		if err := rows.Scan(&id, &distance); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, nil, err
 		}
 		if distance > threshold {
@@ -250,7 +250,7 @@ func (s *Store) Search(ctx context.Context, embedding []float32, limit int, thre
 		ids = append(ids, id)
 		distances = append(distances, distance)
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	if len(ids) == 0 {
 		return nil, nil, nil
@@ -274,7 +274,7 @@ func (s *Store) Search(ctx context.Context, embedding []float32, limit int, thre
 	if err != nil {
 		return nil, nil, fmt.Errorf("document fetch failed: %w", err)
 	}
-	defer docRows.Close()
+	defer func() { _ = docRows.Close() }()
 
 	docsByID := make(map[string]*Document, len(ids))
 	for docRows.Next() {
@@ -285,7 +285,7 @@ func (s *Store) Search(ctx context.Context, embedding []float32, limit int, thre
 			return nil, nil, err
 		}
 		if metadataStr != "" {
-			json.Unmarshal([]byte(metadataStr), &doc.Metadata)
+			_ = json.Unmarshal([]byte(metadataStr), &doc.Metadata)
 		}
 		docsByID[doc.ID] = &doc
 	}
@@ -314,10 +314,10 @@ func (s *Store) DeleteByPath(ctx context.Context, filepath string) error {
 	var ids []string
 	for rows.Next() {
 		var id string
-		rows.Scan(&id)
+		_ = rows.Scan(&id)
 		ids = append(ids, id)
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	if len(ids) == 0 {
 		return nil
@@ -327,11 +327,11 @@ func (s *Store) DeleteByPath(ctx context.Context, filepath string) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	for _, id := range ids {
-		tx.ExecContext(ctx, `DELETE FROM vec_embeddings WHERE doc_id = ?`, id)
-		tx.ExecContext(ctx, `DELETE FROM documents WHERE id = ?`, id)
+		_, _ = tx.ExecContext(ctx, `DELETE FROM vec_embeddings WHERE doc_id = ?`, id)
+		_, _ = tx.ExecContext(ctx, `DELETE FROM documents WHERE id = ?`, id)
 	}
 
 	return tx.Commit()
@@ -342,16 +342,16 @@ func (s *Store) Stats(ctx context.Context) (*Stats, error) {
 	var stats Stats
 
 	// Count unique files
-	s.db.QueryRowContext(ctx,
+	_ = s.db.QueryRowContext(ctx,
 		`SELECT COUNT(DISTINCT filepath) FROM documents`).Scan(&stats.Documents)
 
 	// Count chunks
-	s.db.QueryRowContext(ctx,
+	_ = s.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM documents`).Scan(&stats.Chunks)
 
 	// Get database size
 	var dbPath string
-	s.db.QueryRowContext(ctx, `PRAGMA database_list`).Scan(nil, nil, &dbPath)
+	_ = s.db.QueryRowContext(ctx, `PRAGMA database_list`).Scan(nil, nil, &dbPath)
 	if info, err := os.Stat(dbPath); err == nil {
 		stats.SizeBytes = info.Size()
 	}

@@ -14,9 +14,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/XiaoConstantine/sgrep/internal/chunk"
-	"github.com/XiaoConstantine/sgrep/internal/embed"
-	"github.com/XiaoConstantine/sgrep/internal/store"
+	"github.com/XiaoConstantine/sgrep/pkg/chunk"
+	"github.com/XiaoConstantine/sgrep/pkg/embed"
+	"github.com/XiaoConstantine/sgrep/pkg/store"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -267,7 +267,7 @@ func (idx *Indexer) Watch(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer watcher.Close()
+	defer func() { _ = watcher.Close() }()
 
 	// Add directories recursively
 	err = filepath.WalkDir(idx.rootPath, func(path string, d fs.DirEntry, err error) error {
@@ -309,7 +309,7 @@ func (idx *Indexer) Watch(ctx context.Context) error {
 				} else {
 					// File deleted
 					relPath, _ := filepath.Rel(idx.rootPath, path)
-					idx.store.DeleteByPath(ctx, relPath)
+					_ = idx.store.DeleteByPath(ctx, relPath)
 					fmt.Printf("Removed: %s\n", relPath)
 				}
 			}
@@ -345,6 +345,12 @@ func (idx *Indexer) Watch(ctx context.Context) error {
 // Close closes the indexer.
 func (idx *Indexer) Close() error {
 	return idx.store.Close()
+}
+
+// Store returns the underlying store for direct access.
+// Useful for library users who want to use the store with a custom searcher.
+func (idx *Indexer) Store() (store.Storer, error) {
+	return idx.store, nil
 }
 
 // IgnoreRules handles .gitignore and .sgrepignore patterns.
@@ -388,7 +394,7 @@ func (ir *IgnoreRules) loadIgnoreFile(path string) {
 	if err != nil {
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
