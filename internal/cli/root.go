@@ -25,6 +25,9 @@ var (
 	threshold    float64
 	includeTests bool
 	allChunks    bool
+
+	// Index flags
+	indexWorkers int
 )
 
 func Execute() error {
@@ -200,8 +203,14 @@ var indexCmd = &cobra.Command{
 			path = args[0]
 		}
 
+		// Build config from flags
+		cfg := index.DefaultIndexConfig()
+		if indexWorkers > 0 {
+			cfg.Workers = indexWorkers
+		}
+
 		ctx := context.Background()
-		indexer, err := index.New(path)
+		indexer, err := index.NewWithConfig(path, cfg)
 		if err != nil {
 			return fmt.Errorf("failed to create indexer: %w", err)
 		}
@@ -209,6 +218,11 @@ var indexCmd = &cobra.Command{
 
 		return indexer.Index(ctx)
 	},
+}
+
+func init() {
+	// Add index-specific flags
+	indexCmd.Flags().IntVar(&indexWorkers, "workers", 0, "Number of parallel workers (default: 2x CPU cores, max 16)")
 }
 
 // Watch command

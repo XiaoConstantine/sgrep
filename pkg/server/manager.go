@@ -94,7 +94,8 @@ func (m *Manager) Start() error {
 		return fmt.Errorf("failed to open log file: %w", err)
 	}
 
-	cmd := exec.Command(llamaPath,
+	// Build command with GPU support if available
+	args := []string{
 		"-m", modelPath,
 		"--embedding",
 		"--port", strconv.Itoa(m.port),
@@ -103,7 +104,10 @@ func (m *Manager) Start() error {
 		"-b", "2048",  // logical batch size
 		"-ub", "2048", // physical batch size (must match -b for embeddings)
 		"--threads", "4",
-	)
+		"-ngl", "99", // Use GPU (Metal on Mac, CUDA on Linux) - offload all layers
+	}
+
+	cmd := exec.Command(llamaPath, args...)
 
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile

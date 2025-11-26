@@ -174,6 +174,13 @@ func chunkBySize(path string, content string, cfg *Config) ([]Chunk, error) {
 		return nil, nil
 	}
 
+	// Reserve tokens for description overhead
+	descOverhead := 50 // Approximate tokens for "Code from file.go (lines X-Y)"
+	effectiveMax := cfg.MaxTokens - descOverhead
+	if effectiveMax < 100 {
+		effectiveMax = 100
+	}
+
 	var chunks []Chunk
 	var currentLines []string
 	currentTokens := 0
@@ -182,7 +189,39 @@ func chunkBySize(path string, content string, cfg *Config) ([]Chunk, error) {
 	for i, line := range lines {
 		lineTokens := estimateTokens(line)
 
-		if currentTokens+lineTokens > cfg.MaxTokens && len(currentLines) > 0 {
+		// Handle single lines that exceed the limit
+		if lineTokens > effectiveMax {
+			// Flush current chunk first
+			if len(currentLines) > 0 {
+				chunk := Chunk{
+					Content:     strings.Join(currentLines, "\n"),
+					StartLine:   startLine,
+					EndLine:     i,
+					FilePath:    path,
+					Description: buildSizeDescription(path, startLine, i),
+				}
+				chunks = append(chunks, chunk)
+				currentLines = nil
+				currentTokens = 0
+			}
+
+			// Split the long line
+			splitLines := splitLongLine(line, effectiveMax)
+			for _, sl := range splitLines {
+				chunk := Chunk{
+					Content:     sl,
+					StartLine:   i + 1,
+					EndLine:     i + 1,
+					FilePath:    path,
+					Description: buildSizeDescription(path, i+1, i+1),
+				}
+				chunks = append(chunks, chunk)
+			}
+			startLine = i + 2
+			continue
+		}
+
+		if currentTokens+lineTokens > effectiveMax && len(currentLines) > 0 {
 			chunk := Chunk{
 				Content:     strings.Join(currentLines, "\n"),
 				StartLine:   startLine,
@@ -225,10 +264,49 @@ func splitOversized(chunk Chunk, cfg *Config) []Chunk {
 	currentTokens := 0
 	startLine := chunk.StartLine
 
+	// Reserve tokens for description overhead (description + "\n\n" separator)
+	descTokens := estimateTokens(chunk.Description) + 10 // +10 buffer for separator and part suffix
+	effectiveMax := cfg.MaxTokens - descTokens
+	if effectiveMax < 100 {
+		effectiveMax = 100 // Minimum content size
+	}
+
 	for i, line := range lines {
 		lineTokens := estimateTokens(line)
 
-		if currentTokens+lineTokens > cfg.MaxTokens && len(currentLines) > 0 {
+		// Handle single lines that exceed the limit
+		if lineTokens > effectiveMax {
+			// Flush current chunk first if not empty
+			if len(currentLines) > 0 {
+				c := Chunk{
+					Content:     strings.Join(currentLines, "\n"),
+					StartLine:   startLine,
+					EndLine:     chunk.StartLine + i - 1,
+					FilePath:    chunk.FilePath,
+					Description: chunk.Description + fmt.Sprintf(" (part %d)", len(chunks)+1),
+				}
+				chunks = append(chunks, c)
+				currentLines = nil
+				currentTokens = 0
+			}
+
+			// Split the long line into multiple chunks
+			splitLines := splitLongLine(line, effectiveMax)
+			for _, sl := range splitLines {
+				c := Chunk{
+					Content:     sl,
+					StartLine:   chunk.StartLine + i,
+					EndLine:     chunk.StartLine + i,
+					FilePath:    chunk.FilePath,
+					Description: chunk.Description + fmt.Sprintf(" (part %d)", len(chunks)+1),
+				}
+				chunks = append(chunks, c)
+			}
+			startLine = chunk.StartLine + i + 1
+			continue
+		}
+
+		if currentTokens+lineTokens > effectiveMax && len(currentLines) > 0 {
 			c := Chunk{
 				Content:     strings.Join(currentLines, "\n"),
 				StartLine:   startLine,
@@ -262,6 +340,44 @@ func splitOversized(chunk Chunk, cfg *Config) []Chunk {
 	}
 
 	return chunks
+}
+
+// splitLongLine splits a single line that exceeds the token limit at word boundaries.
+func splitLongLine(line string, maxTokens int) []string {
+	words := strings.Fields(line)
+	if len(words) == 0 {
+		return []string{line}
+	}
+
+	var result []string
+	var current strings.Builder
+	currentTokens := 0
+
+	for _, word := range words {
+		wordTokens := estimateTokens(word + " ")
+
+		// If a single word exceeds the limit, include it anyway (unavoidable)
+		if wordTokens > maxTokens && current.Len() == 0 {
+			result = append(result, word)
+			continue
+		}
+
+		if currentTokens+wordTokens > maxTokens && current.Len() > 0 {
+			result = append(result, strings.TrimSpace(current.String()))
+			current.Reset()
+			currentTokens = 0
+		}
+
+		current.WriteString(word)
+		current.WriteString(" ")
+		currentTokens += wordTokens
+	}
+
+	if current.Len() > 0 {
+		result = append(result, strings.TrimSpace(current.String()))
+	}
+
+	return result
 }
 
 func buildFuncDescription(fileName, pkgName string, fn *ast.FuncDecl) string {
@@ -334,9 +450,16 @@ func formatType(expr ast.Expr) string {
 	}
 }
 
-func estimateTokens(text string) int {
+// EstimateTokens estimates the number of tokens in text using word count * 1.3.
+// This is a conservative estimate for code with special characters.
+func EstimateTokens(text string) int {
 	words := len(strings.Fields(text))
 	return int(float64(words) * 1.3)
+}
+
+// estimateTokens is an internal alias for EstimateTokens.
+func estimateTokens(text string) int {
+	return EstimateTokens(text)
 }
 
 func max(a, b int) int {

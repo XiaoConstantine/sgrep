@@ -91,8 +91,9 @@ func (s *Store) init() error {
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA synchronous=NORMAL",
 		"PRAGMA temp_store=MEMORY",
-		"PRAGMA cache_size=-50000",    // ~50MB cache
-		"PRAGMA mmap_size=268435456",  // 256MB mmap
+		"PRAGMA cache_size=-50000",   // ~50MB cache
+		"PRAGMA mmap_size=268435456", // 256MB mmap
+		"PRAGMA busy_timeout=10000",  // Wait up to 10s for locks (concurrent workers)
 	}
 	for _, p := range pragmas {
 		if _, err := s.db.Exec(p); err != nil {

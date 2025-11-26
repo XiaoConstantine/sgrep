@@ -204,8 +204,115 @@ func truncateToTokenLimit(text string, maxTokens int) string {
 	return truncated
 }
 
-// EmbedBatch generates embeddings for multiple texts.
+// EmbedBatch generates embeddings for multiple texts using true batch API.
+// This sends all texts in a single HTTP request for maximum efficiency.
 func (e *Embedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
+
+	// Ensure server is running
+	if err := e.ensureServer(); err != nil {
+		return nil, err
+	}
+
+	// Truncate all texts first
+	truncatedTexts := make([]string, len(texts))
+	for i, text := range texts {
+		truncatedTexts[i] = truncateToTokenLimit(text, maxContextTokens)
+	}
+
+	// Check cache for all texts first
+	results := make([][]float32, len(texts))
+	uncachedIndices := make([]int, 0, len(texts))
+	uncachedTexts := make([]string, 0, len(texts))
+
+	for i, text := range truncatedTexts {
+		if cached := e.cache.Get(text); cached != nil {
+			results[i] = cached
+			e.mu.Lock()
+			e.cacheHits++
+			e.mu.Unlock()
+		} else {
+			uncachedIndices = append(uncachedIndices, i)
+			uncachedTexts = append(uncachedTexts, text)
+		}
+	}
+
+	// If all cached, return early
+	if len(uncachedTexts) == 0 {
+		return results, nil
+	}
+
+	// Try true batch API first (single request for all texts)
+	embeddings, err := e.callLlamaCppBatch(ctx, uncachedTexts)
+	if err != nil {
+		// Fall back to individual requests if batch fails
+		return e.embedBatchFallback(ctx, texts)
+	}
+
+	// Store results and cache them
+	for i, idx := range uncachedIndices {
+		results[idx] = embeddings[i]
+		e.cache.Set(uncachedTexts[i], embeddings[i])
+	}
+
+	return results, nil
+}
+
+// callLlamaCppBatch sends multiple texts in a single request
+func (e *Embedder) callLlamaCppBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	reqBody, err := json.Marshal(llamaCppBatchRequest{Content: texts})
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		e.endpoint+"/embedding", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := e.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("llama.cpp batch request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("llama.cpp returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	// Parse batch response - array of embedding results
+	var batchResult []llamaCppResponseItem
+	if err := json.Unmarshal(body, &batchResult); err != nil {
+		return nil, fmt.Errorf("failed to parse batch response: %w", err)
+	}
+
+	if len(batchResult) != len(texts) {
+		return nil, fmt.Errorf("batch response count mismatch: got %d, expected %d", len(batchResult), len(texts))
+	}
+
+	results := make([][]float32, len(texts))
+	for _, item := range batchResult {
+		if item.Index >= len(texts) || len(item.Embedding) == 0 {
+			return nil, fmt.Errorf("invalid batch response item: index=%d", item.Index)
+		}
+		results[item.Index] = item.Embedding[0]
+	}
+
+	return results, nil
+}
+
+// embedBatchFallback uses concurrent individual requests as fallback
+func (e *Embedder) embedBatchFallback(ctx context.Context, texts []string) ([][]float32, error) {
 	results := make([][]float32, len(texts))
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -249,6 +356,11 @@ func (e *Embedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32,
 
 type llamaCppRequest struct {
 	Content string `json:"content"`
+}
+
+// llamaCppBatchRequest supports sending multiple texts in one request
+type llamaCppBatchRequest struct {
+	Content []string `json:"content"`
 }
 
 // llamaCppResponse handles both formats:

@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,19 +21,50 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+// IndexConfig holds indexer configuration.
+type IndexConfig struct {
+	Workers          int // Number of parallel workers (default: 2 * NumCPU, capped at 16)
+	EmbedConcurrency int // Concurrent embedding requests per batch (default: 8)
+}
+
+// DefaultIndexConfig returns sensible defaults for indexing.
+func DefaultIndexConfig() *IndexConfig {
+	workers := runtime.NumCPU() * 2
+	if workers < 4 {
+		workers = 4
+	}
+	if workers > 16 {
+		workers = 16
+	}
+	return &IndexConfig{
+		Workers:          workers,
+		EmbedConcurrency: 8,
+	}
+}
+
 // Indexer handles file indexing.
 type Indexer struct {
 	rootPath  string
 	store     store.Storer
 	embedder  *embed.Embedder
 	chunkCfg  *chunk.Config
+	indexCfg  *IndexConfig
 	ignore    *IgnoreRules
 	processed int64
 	errors    int64
 }
 
-// New creates a new indexer for the given path.
+// New creates a new indexer for the given path with default configuration.
 func New(path string) (*Indexer, error) {
+	return NewWithConfig(path, nil)
+}
+
+// NewWithConfig creates a new indexer with custom configuration.
+func NewWithConfig(path string, cfg *IndexConfig) (*Indexer, error) {
+	if cfg == nil {
+		cfg = DefaultIndexConfig()
+	}
+
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
@@ -71,6 +103,7 @@ func New(path string) (*Indexer, error) {
 		store:    s,
 		embedder: embed.New(),
 		chunkCfg: chunk.DefaultConfig(),
+		indexCfg: cfg,
 		ignore:   ignore,
 	}, nil
 }
@@ -150,7 +183,7 @@ func (idx *Indexer) Index(ctx context.Context) error {
 
 		return nil
 	})
-	
+
 	fmt.Printf("Skipped: %d dirs, %d files, %d non-code\n", skippedDirs, skippedFiles, nonCode)
 	if err != nil {
 		return err
@@ -158,22 +191,42 @@ func (idx *Indexer) Index(ctx context.Context) error {
 
 	fmt.Printf("Found %d files to index\n", len(files))
 
-	// Process files with worker pool
-	const numWorkers = 4
-	fileChan := make(chan string, len(files))
-	var wg sync.WaitGroup
+	// Process files with worker pool using configured worker count
+	numWorkers := idx.indexCfg.Workers
 
-	// Start workers
+	fileChan := make(chan string, len(files))
+	// Channel for documents ready to be stored (decouples embedding from DB writes)
+	docChan := make(chan []*store.Document, numWorkers*2)
+	var wg sync.WaitGroup
+	var writerWg sync.WaitGroup
+
+	// Start single DB writer goroutine - serializes all writes, eliminates lock contention
+	writerWg.Add(1)
+	go func() {
+		defer writerWg.Done()
+		for docs := range docChan {
+			if err := idx.store.StoreBatch(ctx, docs); err != nil {
+				atomic.AddInt64(&idx.errors, 1)
+				fmt.Fprintf(os.Stderr, "Error storing batch: %v\n", err)
+			}
+		}
+	}()
+
+	// Start embedding workers - they only do read/chunk/embed, then send to docChan
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for path := range fileChan {
-				if err := idx.indexFile(ctx, path); err != nil {
+				docs, err := idx.prepareFile(ctx, path)
+				if err != nil {
 					atomic.AddInt64(&idx.errors, 1)
 					fmt.Fprintf(os.Stderr, "Error indexing %s: %v\n", path, err)
-				} else {
+				} else if len(docs) > 0 {
+					docChan <- docs // Send to writer (non-blocking due to buffered channel)
 					atomic.AddInt64(&idx.processed, 1)
+				} else {
+					atomic.AddInt64(&idx.processed, 1) // Empty file or skipped
 				}
 
 				// Progress
@@ -191,7 +244,12 @@ func (idx *Indexer) Index(ctx context.Context) error {
 	}
 	close(fileChan)
 
+	// Wait for all embedding workers to finish
 	wg.Wait()
+	// Close doc channel to signal writer to finish
+	close(docChan)
+	// Wait for writer to finish
+	writerWg.Wait()
 
 	elapsed := time.Since(startTime)
 	fmt.Printf("\rIndexed %d files in %v (%d errors)\n",
@@ -200,53 +258,65 @@ func (idx *Indexer) Index(ctx context.Context) error {
 	return nil
 }
 
-// indexFile indexes a single file.
-func (idx *Indexer) indexFile(ctx context.Context, path string) error {
+// maxEmbedTokens is the safe limit for embedding input (leaving buffer under 1500 limit)
+const maxEmbedTokens = 1400
+
+// prepareFile reads, chunks, and embeds a file, returning documents ready for storage.
+// This does NOT write to the database - that's handled by the single writer goroutine.
+func (idx *Indexer) prepareFile(ctx context.Context, path string) ([]*store.Document, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Skip empty or very large files
 	if len(content) == 0 || len(content) > 1<<20 { // 1MB limit
-		return nil
+		return nil, nil
 	}
 
 	// Chunk the file
 	relPath, _ := filepath.Rel(idx.rootPath, path)
 	chunks, err := chunk.ChunkFile(relPath, string(content), idx.chunkCfg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if len(chunks) == 0 {
-		return nil
+		return nil, nil
 	}
+
+	// Validate and re-chunk any oversized chunks
+	chunks = idx.validateAndRechunk(chunks)
 
 	// Detect if this is a test file
 	isTest := isTestFile(relPath)
 
-	// Generate embeddings and store
-	var docs []*store.Document
+	// Prepare embedding texts
+	texts := make([]string, len(chunks))
 	for i, c := range chunks {
-		// Create embedding text with description
-		embeddingText := c.Content
 		if c.Description != "" {
-			embeddingText = c.Description + "\n\n" + c.Content
+			texts[i] = c.Description + "\n\n" + c.Content
+		} else {
+			texts[i] = c.Content
 		}
+	}
 
-		embedding, err := idx.embedder.Embed(ctx, embeddingText)
-		if err != nil {
-			return fmt.Errorf("embedding failed: %w", err)
-		}
+	// Generate embeddings in batch (concurrent with retry)
+	embeddings, err := idx.embedBatchWithRetry(ctx, texts, 3)
+	if err != nil {
+		return nil, fmt.Errorf("embedding failed: %w", err)
+	}
 
+	// Build documents with embeddings
+	docs := make([]*store.Document, 0, len(chunks))
+	for i, c := range chunks {
 		doc := &store.Document{
 			ID:        fmt.Sprintf("%s:chunk_%d", relPath, i+1),
 			FilePath:  relPath,
 			Content:   c.Content,
 			StartLine: c.StartLine,
 			EndLine:   c.EndLine,
-			Embedding: embedding,
+			Embedding: embeddings[i],
 			IsTest:    isTest,
 			Metadata: map[string]string{
 				"description": c.Description,
@@ -255,7 +325,177 @@ func (idx *Indexer) indexFile(ctx context.Context, path string) error {
 		docs = append(docs, doc)
 	}
 
+	return docs, nil
+}
+
+// indexFile is a convenience wrapper for single-file indexing (used by Watch).
+func (idx *Indexer) indexFile(ctx context.Context, path string) error {
+	docs, err := idx.prepareFile(ctx, path)
+	if err != nil {
+		return err
+	}
+	if len(docs) == 0 {
+		return nil
+	}
 	return idx.store.StoreBatch(ctx, docs)
+}
+
+// validateAndRechunk checks chunks for token limit compliance and re-chunks oversized ones.
+func (idx *Indexer) validateAndRechunk(chunks []chunk.Chunk) []chunk.Chunk {
+	var result []chunk.Chunk
+
+	for _, c := range chunks {
+		// Calculate total tokens including description
+		totalText := c.Content
+		if c.Description != "" {
+			totalText = c.Description + "\n\n" + c.Content
+		}
+		tokens := chunk.EstimateTokens(totalText)
+
+		if tokens <= maxEmbedTokens {
+			result = append(result, c)
+			continue
+		}
+
+		// Re-chunk this oversized chunk with a smaller limit
+		// Use a conservative limit that accounts for description
+		smallerCfg := &chunk.Config{
+			MaxTokens:    maxEmbedTokens - chunk.EstimateTokens(c.Description) - 20,
+			ContextLines: idx.chunkCfg.ContextLines,
+			Overlap:      idx.chunkCfg.Overlap,
+		}
+		if smallerCfg.MaxTokens < 100 {
+			smallerCfg.MaxTokens = 100
+		}
+
+		// Re-chunk the content
+		subChunks, err := chunk.ChunkFile(c.FilePath, c.Content, smallerCfg)
+		if err != nil || len(subChunks) == 0 {
+			// Fallback: just use original (will be truncated by retry logic)
+			result = append(result, c)
+			continue
+		}
+
+		// Preserve original description with part suffix
+		for i, sc := range subChunks {
+			sc.Description = c.Description + fmt.Sprintf(" (part %d)", i+1)
+			sc.StartLine = c.StartLine + sc.StartLine - 1
+			sc.EndLine = c.StartLine + sc.EndLine - 1
+			result = append(result, sc)
+		}
+	}
+
+	return result
+}
+
+// embedBatchWithRetry embeds multiple texts concurrently with retry logic.
+// It first tries batch embedding, then falls back to individual retry on failures.
+func (idx *Indexer) embedBatchWithRetry(ctx context.Context, texts []string, maxRetries int) ([][]float32, error) {
+	// First try batch embedding (concurrent with semaphore)
+	embeddings, err := idx.embedder.EmbedBatch(ctx, texts)
+	if err == nil {
+		return embeddings, nil
+	}
+
+	// If batch failed, fall back to individual embedding with retry
+	// This handles cases where only some texts are problematic
+	results := make([][]float32, len(texts))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	var firstErr error
+
+	// Use semaphore for concurrency control (same as EmbedBatch)
+	sem := make(chan struct{}, 8)
+
+	for i, text := range texts {
+		wg.Add(1)
+		go func(index int, t string, embedder *Indexer) {
+			defer wg.Done()
+
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			emb, err := embedder.embedWithRetry(ctx, t, maxRetries)
+			if err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+				return
+			}
+
+			mu.Lock()
+			results[index] = emb
+			mu.Unlock()
+		}(i, text, idx)
+	}
+
+	wg.Wait()
+
+	if firstErr != nil {
+		return nil, firstErr
+	}
+
+	return results, nil
+}
+
+// embedWithRetry attempts to embed text, retrying with truncation on overflow errors.
+func (idx *Indexer) embedWithRetry(ctx context.Context, text string, maxRetries int) ([]float32, error) {
+	var lastErr error
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		embedding, err := idx.embedder.Embed(ctx, text)
+		if err == nil {
+			return embedding, nil
+		}
+
+		lastErr = err
+
+		// Check if error is due to input size (llama.cpp returns 500 for oversized input)
+		errStr := err.Error()
+		if !strings.Contains(errStr, "too large") && !strings.Contains(errStr, "500") {
+			return nil, err // Non-recoverable error
+		}
+
+		if attempt == maxRetries {
+			break
+		}
+
+		// Truncate by 25% each retry
+		truncateRatio := 0.75 - (float64(attempt) * 0.1)
+		if truncateRatio < 0.3 {
+			truncateRatio = 0.3
+		}
+		maxChars := int(float64(len(text)) * truncateRatio)
+		text = truncateAtBoundary(text, maxChars)
+
+		// Log the retry (to stderr so it doesn't mess up progress output)
+		fmt.Fprintf(os.Stderr, "Retry %d: truncated input to %d chars\n", attempt+1, len(text))
+	}
+
+	return nil, fmt.Errorf("failed after %d retries: %w", maxRetries, lastErr)
+}
+
+// truncateAtBoundary truncates text to maxChars, trying to break at line boundaries.
+func truncateAtBoundary(text string, maxChars int) string {
+	if len(text) <= maxChars {
+		return text
+	}
+
+	truncated := text[:maxChars]
+
+	// Try to break at line boundary (prefer 75% of way through)
+	if idx := strings.LastIndex(truncated, "\n"); idx > maxChars*3/4 {
+		return truncated[:idx]
+	}
+
+	// Try to break at word boundary (prefer 50% of way through)
+	if idx := strings.LastIndex(truncated, " "); idx > maxChars/2 {
+		return truncated[:idx]
+	}
+
+	return truncated
 }
 
 // Watch watches for file changes and re-indexes.
