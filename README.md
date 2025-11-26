@@ -25,15 +25,37 @@ sgrep "how does user authentication work"
 
 ## Installation
 
-### As CLI Tool
+### Homebrew (macOS/Linux)
+
+```bash
+brew tap XiaoConstantine/tap
+brew install sgrep
+```
+
+### Quick Install (curl)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/XiaoConstantine/sgrep/main/install.sh | bash
+```
+
+### Go Install
 
 ```bash
 go install github.com/XiaoConstantine/sgrep/cmd/sgrep@latest
 ```
 
+### From Source
+
+```bash
+git clone https://github.com/XiaoConstantine/sgrep.git
+cd sgrep
+go build -o sgrep ./cmd/sgrep
+```
+
 **Requirements**: llama.cpp (for the embedding server)
 ```bash
 brew install llama.cpp   # macOS
+# or build from source: https://github.com/ggerganov/llama.cpp
 ```
 
 ### As Library
