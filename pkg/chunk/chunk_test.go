@@ -572,3 +572,203 @@ func BenchmarkEstimateTokens(b *testing.B) {
 		estimateTokens(text)
 	}
 }
+
+func TestSplitLongLine(t *testing.T) {
+	tests := []struct {
+		name      string
+		line      string
+		maxTokens int
+		minParts  int
+	}{
+		{
+			name:      "empty line",
+			line:      "",
+			maxTokens: 10,
+			minParts:  1,
+		},
+		{
+			name:      "short line",
+			line:      "hello world",
+			maxTokens: 100,
+			minParts:  1,
+		},
+		{
+			name:      "long line needs splitting",
+			line:      "word1 word2 word3 word4 word5 word6 word7 word8 word9 word10",
+			maxTokens: 5,
+			minParts:  2,
+		},
+		{
+			name:      "single very long word",
+			line:      "superlongwordthatexceedsthelimit",
+			maxTokens: 2,
+			minParts:  1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := splitLongLine(tt.line, tt.maxTokens)
+			if len(result) < tt.minParts {
+				t.Errorf("expected at least %d parts, got %d", tt.minParts, len(result))
+			}
+		})
+	}
+}
+
+func TestChunkBySize_LongLines(t *testing.T) {
+	// Create content with a very long line
+	longLine := strings.Repeat("word ", 500)
+	content := "short line\n" + longLine + "\nanother short line"
+
+	cfg := &Config{
+		MaxTokens:    50,
+		ContextLines: 5,
+		Overlap:      2,
+	}
+
+	chunks, err := chunkBySize("/test/file.txt", content, cfg)
+	if err != nil {
+		t.Fatalf("chunkBySize failed: %v", err)
+	}
+
+	if len(chunks) == 0 {
+		t.Error("expected at least one chunk")
+	}
+}
+
+func TestChunkFile_Rust(t *testing.T) {
+	content := `
+fn main() {
+    println!("Hello, world!");
+}
+
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+impl Point {
+    fn new(x: i32, y: i32) -> Self {
+        Point { x, y }
+    }
+}
+`
+
+	chunks, err := ChunkFile("/test/main.rs", content, nil)
+	if err != nil {
+		t.Fatalf("ChunkFile failed: %v", err)
+	}
+
+	if len(chunks) == 0 {
+		t.Error("expected at least one chunk")
+	}
+}
+
+func TestChunkFile_JavaScript(t *testing.T) {
+	content := `
+function hello() {
+    console.log("hello");
+}
+
+class Service {
+    constructor() {
+        this.name = "service";
+    }
+
+    run() {
+        return true;
+    }
+}
+
+const arrow = () => {
+    return 42;
+};
+`
+
+	chunks, err := ChunkFile("/test/app.js", content, nil)
+	if err != nil {
+		t.Fatalf("ChunkFile failed: %v", err)
+	}
+
+	if len(chunks) == 0 {
+		t.Error("expected at least one chunk")
+	}
+}
+
+func TestChunkFile_EmptyContent(t *testing.T) {
+	chunks, err := ChunkFile("/test/empty.go", "", nil)
+	if err != nil {
+		t.Fatalf("ChunkFile failed: %v", err)
+	}
+
+	// Empty content should produce no or minimal chunks
+	if len(chunks) > 1 {
+		t.Errorf("expected at most 1 chunk for empty content, got %d", len(chunks))
+	}
+}
+
+func TestSplitOversized_WithVeryLongLine(t *testing.T) {
+	// Create a chunk with a very long line
+	longLine := strings.Repeat("longword ", 200)
+	chunk := Chunk{
+		Content:     "short line\n" + longLine + "\nshort line",
+		StartLine:   1,
+		EndLine:     3,
+		FilePath:    "/test/file.go",
+		Description: "test chunk",
+	}
+
+	cfg := &Config{
+		MaxTokens: 30,
+		Overlap:   0,
+	}
+
+	chunks := splitOversized(chunk, cfg)
+
+	if len(chunks) == 0 {
+		t.Error("expected at least one chunk")
+	}
+}
+
+func TestConfig_Fields(t *testing.T) {
+	cfg := &Config{
+		MaxTokens:    500,
+		ContextLines: 5,
+		Overlap:      2,
+	}
+
+	if cfg.MaxTokens != 500 {
+		t.Error("unexpected MaxTokens")
+	}
+	if cfg.ContextLines != 5 {
+		t.Error("unexpected ContextLines")
+	}
+	if cfg.Overlap != 2 {
+		t.Error("unexpected Overlap")
+	}
+}
+
+func TestChunkBySize_SmallMaxTokens(t *testing.T) {
+	// Create multi-line content to ensure chunking
+	lines := make([]string, 50)
+	for i := range lines {
+		lines[i] = "word word word"
+	}
+	content := strings.Join(lines, "\n")
+
+	cfg := &Config{
+		MaxTokens:    20, // Small to force multiple chunks
+		ContextLines: 2,
+		Overlap:      1,
+	}
+
+	chunks, err := chunkBySize("/test/file.txt", content, cfg)
+	if err != nil {
+		t.Fatalf("chunkBySize failed: %v", err)
+	}
+
+	if len(chunks) < 2 {
+		t.Errorf("expected multiple chunks with small MaxTokens, got %d", len(chunks))
+	}
+}

@@ -265,6 +265,7 @@ func TestGetSgrepHome(t *testing.T) {
 	}
 }
 
+
 func mustPort(url string) int {
 	for i := len(url) - 1; i >= 0; i-- {
 		if url[i] == ':' {

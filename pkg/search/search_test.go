@@ -397,3 +397,157 @@ func BenchmarkSearcher_cacheKey(b *testing.B) {
 		s.cacheKey("test query", 10, 2.0)
 	}
 }
+
+func TestDefaultSearchOptions(t *testing.T) {
+	opts := DefaultSearchOptions()
+	if opts.Limit != 10 {
+		t.Errorf("expected Limit 10, got %d", opts.Limit)
+	}
+	if opts.Threshold != 1.5 {
+		t.Errorf("expected Threshold 1.5, got %f", opts.Threshold)
+	}
+	if opts.IncludeTests != false {
+		t.Error("expected IncludeTests false")
+	}
+	if opts.Deduplicate != true {
+		t.Error("expected Deduplicate true")
+	}
+	if opts.BoostImpl != 0.85 {
+		t.Errorf("expected BoostImpl 0.85, got %f", opts.BoostImpl)
+	}
+}
+
+func TestSearcher_SearchWithOptions_IncludeTests(t *testing.T) {
+	ms := &mockStore{
+		docs: []*store.Document{
+			{ID: "impl", FilePath: "/main.go", Content: "func main()", IsTest: false},
+			{ID: "test", FilePath: "/main_test.go", Content: "func TestMain()", IsTest: true},
+		},
+		distances: []float64{0.5, 0.6},
+	}
+	s := New(ms)
+
+	// Without tests
+	opts := DefaultSearchOptions()
+	opts.IncludeTests = false
+	results, err := s.SearchWithOptions(context.Background(), "main", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, r := range results {
+		if r.IsTest {
+			t.Error("should not include test files when IncludeTests=false")
+		}
+	}
+}
+
+func TestSearcher_SearchWithOptions_Deduplicate(t *testing.T) {
+	ms := &mockStore{
+		docs: []*store.Document{
+			{ID: "chunk1", FilePath: "/main.go", Content: "func foo()", StartLine: 1, EndLine: 5},
+			{ID: "chunk2", FilePath: "/main.go", Content: "func bar()", StartLine: 10, EndLine: 15},
+			{ID: "chunk3", FilePath: "/other.go", Content: "func baz()", StartLine: 1, EndLine: 5},
+		},
+		distances: []float64{0.3, 0.5, 0.4},
+	}
+	s := New(ms)
+
+	// With deduplication
+	opts := DefaultSearchOptions()
+	opts.Deduplicate = true
+	results, err := s.SearchWithOptions(context.Background(), "func", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should have deduplicated main.go
+	fileCount := make(map[string]int)
+	for _, r := range results {
+		fileCount[r.FilePath]++
+	}
+
+	for file, count := range fileCount {
+		if count > 1 {
+			t.Errorf("file %s appears %d times, should be deduplicated", file, count)
+		}
+	}
+}
+
+func TestSearcher_SearchWithOptions_NoBoost(t *testing.T) {
+	ms := &mockStore{
+		docs: []*store.Document{
+			{ID: "doc1", FilePath: "/main.go", Content: "content", IsTest: false},
+		},
+		distances: []float64{1.0},
+	}
+	s := New(ms)
+
+	// With boost disabled (BoostImpl = 1.0 means no boost)
+	opts := DefaultSearchOptions()
+	opts.BoostImpl = 1.0
+	results, err := s.SearchWithOptions(context.Background(), "test", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(results) > 0 && results[0].Score != 1.0 {
+		t.Errorf("expected score 1.0 with no boost, got %f", results[0].Score)
+	}
+}
+
+func TestSearcher_cacheKeyWithOpts(t *testing.T) {
+	ms := &mockStore{}
+	s := New(ms)
+
+	opts1 := DefaultSearchOptions()
+	opts2 := DefaultSearchOptions()
+	opts2.IncludeTests = true
+
+	key1 := s.cacheKeyWithOpts("query", opts1)
+	key2 := s.cacheKeyWithOpts("query", opts2)
+
+	if key1 == key2 {
+		t.Error("different options should produce different cache keys")
+	}
+
+	// Same options should produce same key
+	key3 := s.cacheKeyWithOpts("query", opts1)
+	if key1 != key3 {
+		t.Error("same options should produce same cache key")
+	}
+}
+
+func TestDeduplicateResults(t *testing.T) {
+	results := []Result{
+		{FilePath: "/a.go", Score: 0.3},
+		{FilePath: "/a.go", Score: 0.5},
+		{FilePath: "/b.go", Score: 0.4},
+		{FilePath: "/a.go", Score: 0.2}, // Best score for /a.go
+	}
+
+	deduped := deduplicateResults(results)
+
+	if len(deduped) != 2 {
+		t.Errorf("expected 2 deduplicated results, got %d", len(deduped))
+	}
+
+	// Check that /a.go kept the best score
+	for _, r := range deduped {
+		if r.FilePath == "/a.go" && r.Score != 0.2 {
+			t.Errorf("expected best score 0.2 for /a.go, got %f", r.Score)
+		}
+	}
+}
+
+func TestDeduplicateResults_Empty(t *testing.T) {
+	results := deduplicateResults(nil)
+	if len(results) != 0 {
+		t.Error("expected empty result for nil input")
+	}
+
+	results = deduplicateResults([]Result{})
+	if len(results) != 0 {
+		t.Error("expected empty result for empty input")
+	}
+}

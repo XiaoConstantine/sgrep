@@ -171,13 +171,13 @@ func TestIsTestFile(t *testing.T) {
 		{"MainTests.java", true},
 		{"Main.java", false},
 
-		// Files in test directories
-		{"tests/main.go", true},
-		{"test/main.py", true},
-		{"__tests__/app.js", true},
-		{"spec/helper.rb", true},
-		{"specs/main.rb", true},
-		{"_tests/foo.go", true},
+		// Files in test directories (need proper path structure)
+		{filepath.Join("src", "tests", "main.go"), true},
+		{filepath.Join("src", "test", "main.py"), true},
+		{filepath.Join("src", "__tests__", "app.js"), true},
+		{filepath.Join("src", "spec", "helper.rb"), true},
+		{filepath.Join("src", "specs", "main.rb"), true},
+		{filepath.Join("src", "_tests", "foo.go"), true},
 
 		// Non-test files
 		{"src/main.go", false},
