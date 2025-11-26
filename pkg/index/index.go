@@ -223,6 +223,9 @@ func (idx *Indexer) indexFile(ctx context.Context, path string) error {
 		return nil
 	}
 
+	// Detect if this is a test file
+	isTest := isTestFile(relPath)
+
 	// Generate embeddings and store
 	var docs []*store.Document
 	for i, c := range chunks {
@@ -244,6 +247,7 @@ func (idx *Indexer) indexFile(ctx context.Context, path string) error {
 			StartLine: c.StartLine,
 			EndLine:   c.EndLine,
 			Embedding: embedding,
+			IsTest:    isTest,
 			Metadata: map[string]string{
 				"description": c.Description,
 			},
@@ -484,4 +488,42 @@ func isCodeFile(path string) bool {
 		".toml":  true,
 	}
 	return codeExts[ext]
+}
+
+// isTestFile returns true if the file is a test file based on naming conventions.
+func isTestFile(path string) bool {
+	base := filepath.Base(path)
+	lower := strings.ToLower(base)
+
+	// Check common test file patterns
+	testSuffixes := []string{
+		"_test.go",
+		".test.ts", ".test.tsx", ".test.js", ".test.jsx",
+		".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx",
+		"_test.py", "_spec.rb",
+		"test.java", "tests.java",
+		"_test.rs",
+	}
+	for _, suffix := range testSuffixes {
+		if strings.HasSuffix(lower, suffix) {
+			return true
+		}
+	}
+
+	// Check test_*.py pattern (Python convention)
+	if strings.HasPrefix(lower, "test_") && strings.HasSuffix(lower, ".py") {
+		return true
+	}
+
+	// Check if file is in a test directory
+	dir := filepath.Dir(path)
+	testDirs := []string{"_tests", "__tests__", "tests", "test", "spec", "specs"}
+	for _, td := range testDirs {
+		if strings.Contains(dir, string(filepath.Separator)+td+string(filepath.Separator)) ||
+			strings.HasSuffix(dir, string(filepath.Separator)+td) {
+			return true
+		}
+	}
+
+	return false
 }

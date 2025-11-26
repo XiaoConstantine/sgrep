@@ -101,6 +101,7 @@ func (s *InMemStore) init() error {
 			start_line INTEGER NOT NULL,
 			end_line INTEGER NOT NULL,
 			metadata TEXT,
+			is_test INTEGER DEFAULT 0,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS vec_embeddings USING vec0(
@@ -109,6 +110,7 @@ func (s *InMemStore) init() error {
 			doc_id TEXT PARTITION KEY
 		)`, s.dims),
 		`CREATE INDEX IF NOT EXISTS idx_documents_filepath ON documents(filepath)`,
+		`CREATE INDEX IF NOT EXISTS idx_documents_is_test ON documents(is_test)`,
 	}
 
 	for _, q := range queries {
@@ -169,11 +171,15 @@ func (s *InMemStore) Store(ctx context.Context, doc *Document) error {
 	defer func() { _ = tx.Rollback() }()
 
 	metadata, _ := json.Marshal(doc.Metadata)
+	isTest := 0
+	if doc.IsTest {
+		isTest = 1
+	}
 
 	_, err = tx.ExecContext(ctx,
-		`INSERT OR REPLACE INTO documents (id, filepath, content, start_line, end_line, metadata)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		doc.ID, doc.FilePath, doc.Content, doc.StartLine, doc.EndLine, string(metadata))
+		`INSERT OR REPLACE INTO documents (id, filepath, content, start_line, end_line, metadata, is_test)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		doc.ID, doc.FilePath, doc.Content, doc.StartLine, doc.EndLine, string(metadata), isTest)
 	if err != nil {
 		return fmt.Errorf("failed to insert document: %w", err)
 	}
@@ -216,8 +222,8 @@ func (s *InMemStore) StoreBatch(ctx context.Context, docs []*Document) error {
 	defer func() { _ = tx.Rollback() }()
 
 	docStmt, err := tx.PrepareContext(ctx,
-		`INSERT OR REPLACE INTO documents (id, filepath, content, start_line, end_line, metadata)
-		 VALUES (?, ?, ?, ?, ?, ?)`)
+		`INSERT OR REPLACE INTO documents (id, filepath, content, start_line, end_line, metadata, is_test)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -235,9 +241,13 @@ func (s *InMemStore) StoreBatch(ctx context.Context, docs []*Document) error {
 
 	for _, doc := range docs {
 		metadata, _ := json.Marshal(doc.Metadata)
+		isTest := 0
+		if doc.IsTest {
+			isTest = 1
+		}
 
 		_, err = docStmt.ExecContext(ctx,
-			doc.ID, doc.FilePath, doc.Content, doc.StartLine, doc.EndLine, string(metadata))
+			doc.ID, doc.FilePath, doc.Content, doc.StartLine, doc.EndLine, string(metadata), isTest)
 		if err != nil {
 			return fmt.Errorf("failed to insert document %s: %w", doc.ID, err)
 		}
@@ -433,7 +443,7 @@ func (s *InMemStore) loadDocuments(ctx context.Context, results []searchResult) 
 	}
 
 	query := fmt.Sprintf(`
-		SELECT id, filepath, content, start_line, end_line, metadata
+		SELECT id, filepath, content, start_line, end_line, metadata, is_test
 		FROM documents
 		WHERE id IN (%s)
 	`, strings.Join(placeholders, ","))
@@ -448,13 +458,15 @@ func (s *InMemStore) loadDocuments(ctx context.Context, results []searchResult) 
 	for rows.Next() {
 		var doc Document
 		var metadataStr string
+		var isTest int
 		if err := rows.Scan(&doc.ID, &doc.FilePath, &doc.Content,
-			&doc.StartLine, &doc.EndLine, &metadataStr); err != nil {
+			&doc.StartLine, &doc.EndLine, &metadataStr, &isTest); err != nil {
 			return nil, nil, err
 		}
 		if metadataStr != "" {
 			_ = json.Unmarshal([]byte(metadataStr), &doc.Metadata)
 		}
+		doc.IsTest = isTest == 1
 		docsByID[doc.ID] = &doc
 	}
 

@@ -12,8 +12,8 @@ func init() {
 		Extensions: []string{".py", ".pyw", ".pyi"},
 		Language:   func() unsafe.Pointer { return tree_sitter_python.Language() },
 		NodeTypes: []NodeTypeConfig{
-			{Type: "function_definition", Kind: "function", NameField: "name"},
-			{Type: "class_definition", Kind: "class", NameField: "name"},
+			{Type: "function_definition", Kind: "function", NameField: "name", DocstringField: "body", DocstringType: "expression_statement"},
+			{Type: "class_definition", Kind: "class", NameField: "name", DocstringField: "body", DocstringType: "expression_statement"},
 			{Type: "decorated_definition", Kind: "decorated", NameField: ""},
 		},
 	})

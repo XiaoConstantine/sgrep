@@ -18,9 +18,11 @@ type LanguageConfig struct {
 
 // NodeTypeConfig defines a semantic unit to extract from the AST.
 type NodeTypeConfig struct {
-	Type      string // tree-sitter node type (e.g., "function_definition")
-	Kind      string // Human-readable kind (e.g., "function", "class")
-	NameField string // Field name for the identifier (e.g., "name")
+	Type           string // tree-sitter node type (e.g., "function_definition")
+	Kind           string // Human-readable kind (e.g., "function", "class")
+	NameField      string // Field name for the identifier (e.g., "name")
+	DocstringField string // Field name for docstring (e.g., "body" for Python where first child may be string)
+	DocstringType  string // Node type for docstring (e.g., "expression_statement" containing "string")
 }
 
 // Registry holds all supported languages.

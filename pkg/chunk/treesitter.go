@@ -91,7 +91,13 @@ func extractChunk(node *tree_sitter.Node, content []byte, path, lang string, ntC
 		}
 	}
 
-	description := buildTreeSitterDescription(lang, ntCfg.Kind, name, path)
+	// Extract docstring if available
+	docstring := ""
+	if ntCfg.DocstringField != "" && ntCfg.DocstringType != "" {
+		docstring = extractDocstring(node, content, ntCfg)
+	}
+
+	description := buildTreeSitterDescription(lang, ntCfg.Kind, name, path, docstring)
 
 	return &Chunk{
 		Content:     chunkContent,
@@ -102,8 +108,89 @@ func extractChunk(node *tree_sitter.Node, content []byte, path, lang string, ntC
 	}
 }
 
+// extractDocstring extracts a docstring from a function/class body.
+func extractDocstring(node *tree_sitter.Node, content []byte, ntCfg NodeTypeConfig) string {
+	// Get the body field
+	bodyNode := node.ChildByFieldName(ntCfg.DocstringField)
+	if bodyNode == nil {
+		return ""
+	}
+
+	// Look for the first child that matches docstring type (e.g., expression_statement)
+	childCount := bodyNode.NamedChildCount()
+	if childCount == 0 {
+		return ""
+	}
+
+	firstChild := bodyNode.NamedChild(0)
+	if firstChild == nil || firstChild.Kind() != ntCfg.DocstringType {
+		return ""
+	}
+
+	// For Python, expression_statement contains a string node
+	// For JS/TS, we might look for a comment node
+	stringNode := firstChild.NamedChild(0)
+	if stringNode == nil {
+		return ""
+	}
+
+	// Check if it's a string literal (Python docstring)
+	kind := stringNode.Kind()
+	if kind != "string" && kind != "concatenated_string" {
+		return ""
+	}
+
+	startByte := stringNode.StartByte()
+	endByte := stringNode.EndByte()
+	if startByte >= uint(len(content)) || endByte > uint(len(content)) {
+		return ""
+	}
+
+	docstring := string(content[startByte:endByte])
+
+	// Clean up the docstring - remove quotes and trim
+	docstring = cleanDocstring(docstring)
+
+	return docstring
+}
+
+// cleanDocstring removes quotes and cleans up a docstring.
+func cleanDocstring(s string) string {
+	// Remove triple quotes (""" or ''')
+	s = strings.TrimPrefix(s, `"""`)
+	s = strings.TrimSuffix(s, `"""`)
+	s = strings.TrimPrefix(s, `'''`)
+	s = strings.TrimSuffix(s, `'''`)
+	// Remove single/double quotes
+	s = strings.TrimPrefix(s, `"`)
+	s = strings.TrimSuffix(s, `"`)
+	s = strings.TrimPrefix(s, `'`)
+	s = strings.TrimSuffix(s, `'`)
+
+	// Trim whitespace and get first line/paragraph
+	s = strings.TrimSpace(s)
+
+	// Get first paragraph (up to blank line or 200 chars)
+	lines := strings.Split(s, "\n")
+	var result []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" && len(result) > 0 {
+			break // Stop at first blank line after content
+		}
+		if line != "" {
+			result = append(result, line)
+		}
+		if len(strings.Join(result, " ")) > 200 {
+			break
+		}
+	}
+
+	return strings.Join(result, " ")
+}
+
 // buildTreeSitterDescription builds a description for embeddings.
-func buildTreeSitterDescription(lang, kind, name, path string) string {
+func buildTreeSitterDescription(lang, kind, name, path, docstring string) string {
 	var b strings.Builder
 	b.WriteString(strings.ToUpper(lang[:1]))
 	b.WriteString(lang[1:])
@@ -115,6 +202,13 @@ func buildTreeSitterDescription(lang, kind, name, path string) string {
 	}
 	b.WriteString(" in ")
 	b.WriteString(filepath.Base(path))
+
+	// Append docstring if available
+	if docstring != "" {
+		b.WriteString(". ")
+		b.WriteString(docstring)
+	}
+
 	return b.String()
 }
 

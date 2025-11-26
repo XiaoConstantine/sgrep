@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/XiaoConstantine/sgrep/pkg/embed"
@@ -19,6 +20,27 @@ type Result struct {
 	EndLine   int     `json:"end"`
 	Score     float64 `json:"score"`
 	Content   string  `json:"content,omitempty"`
+	IsTest    bool    `json:"is_test,omitempty"`
+}
+
+// SearchOptions configures search behavior.
+type SearchOptions struct {
+	Limit        int
+	Threshold    float64
+	IncludeTests bool    // Include test files in results (default: false)
+	Deduplicate  bool    // Deduplicate results by file (default: true)
+	BoostImpl    float64 // Boost factor for implementation files (default: 0.85, lower = better ranking)
+}
+
+// DefaultSearchOptions returns sensible default options.
+func DefaultSearchOptions() SearchOptions {
+	return SearchOptions{
+		Limit:        10,
+		Threshold:    1.5,
+		IncludeTests: false,
+		Deduplicate:  true,
+		BoostImpl:    0.85, // Implementation files get 15% score boost (lower L2 = better)
+	}
 }
 
 // cachedResult is stored in the query cache.
@@ -92,16 +114,24 @@ func NewWithConfig(cfg Config) *Searcher {
 	}
 }
 
-// Search finds code matching the query.
+// Search finds code matching the query (backward compatible).
 // Uses multi-level caching: L1 (embedding cache in embedder), L3 (query result cache here).
 func (s *Searcher) Search(ctx context.Context, query string, limit int, threshold float64) ([]Result, error) {
+	opts := DefaultSearchOptions()
+	opts.Limit = limit
+	opts.Threshold = threshold
+	return s.SearchWithOptions(ctx, query, opts)
+}
+
+// SearchWithOptions finds code matching the query with full control over search behavior.
+func (s *Searcher) SearchWithOptions(ctx context.Context, query string, opts SearchOptions) ([]Result, error) {
 	// Emit search start event
 	if s.eventBox != nil {
 		s.eventBox.Set(util.EvtSearchStart, query)
 	}
 
-	// Generate cache key from query + params
-	cacheKey := s.cacheKey(query, limit, threshold)
+	// Generate cache key from query + all options
+	cacheKey := s.cacheKeyWithOpts(query, opts)
 
 	// Check L3 cache (query → results)
 	if cached := s.queryCache.Get(cacheKey); cached != nil {
@@ -119,22 +149,55 @@ func (s *Searcher) Search(ctx context.Context, query string, limit int, threshol
 		return nil, err
 	}
 
+	// Request more results than limit to allow for filtering
+	fetchLimit := opts.Limit * 3
+	if !opts.IncludeTests {
+		fetchLimit = opts.Limit * 5 // Need more results when filtering tests
+	}
+
 	// Search store (parallel partitioned search with slabs)
-	docs, distances, err := s.store.Search(ctx, queryEmb, limit, threshold)
+	docs, distances, err := s.store.Search(ctx, queryEmb, fetchLimit, opts.Threshold)
 	if err != nil {
 		return nil, err
 	}
 
-	// Convert to results
-	results := make([]Result, len(docs))
+	// Convert to results with IsTest flag
+	var results []Result
 	for i, doc := range docs {
-		results[i] = Result{
+		// Filter out test files if not requested
+		if !opts.IncludeTests && doc.IsTest {
+			continue
+		}
+
+		score := distances[i]
+		// Apply boost to implementation files (lower score = better)
+		if !doc.IsTest && opts.BoostImpl > 0 && opts.BoostImpl < 1.0 {
+			score *= opts.BoostImpl
+		}
+
+		results = append(results, Result{
 			FilePath:  doc.FilePath,
 			StartLine: doc.StartLine,
 			EndLine:   doc.EndLine,
-			Score:     distances[i],
+			Score:     score,
 			Content:   doc.Content,
-		}
+			IsTest:    doc.IsTest,
+		})
+	}
+
+	// Re-sort by adjusted score
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Score < results[j].Score
+	})
+
+	// Deduplicate by file if requested
+	if opts.Deduplicate {
+		results = deduplicateResults(results)
+	}
+
+	// Apply limit after filtering and deduplication
+	if len(results) > opts.Limit {
+		results = results[:opts.Limit]
 	}
 
 	// Cache results (L3)
@@ -151,10 +214,38 @@ func (s *Searcher) Search(ctx context.Context, query string, limit int, threshol
 	return results, nil
 }
 
+// deduplicateResults keeps only the best result per file.
+func deduplicateResults(results []Result) []Result {
+	seen := make(map[string]int) // filepath -> index in dedupedResults
+	var dedupedResults []Result
+
+	for _, r := range results {
+		if existingIdx, ok := seen[r.FilePath]; ok {
+			// Keep the one with better (lower) score
+			if r.Score < dedupedResults[existingIdx].Score {
+				dedupedResults[existingIdx] = r
+			}
+		} else {
+			seen[r.FilePath] = len(dedupedResults)
+			dedupedResults = append(dedupedResults, r)
+		}
+	}
+
+	return dedupedResults
+}
+
 // cacheKey generates a unique key for query + parameters.
 func (s *Searcher) cacheKey(query string, limit int, threshold float64) string {
 	h := sha256.New()
 	_, _ = fmt.Fprintf(h, "%s:%d:%.4f", query, limit, threshold)
+	return hex.EncodeToString(h.Sum(nil)[:8])
+}
+
+// cacheKeyWithOpts generates a unique key for query + all options.
+func (s *Searcher) cacheKeyWithOpts(query string, opts SearchOptions) string {
+	h := sha256.New()
+	_, _ = fmt.Fprintf(h, "%s:%d:%.4f:%v:%v:%.4f",
+		query, opts.Limit, opts.Threshold, opts.IncludeTests, opts.Deduplicate, opts.BoostImpl)
 	return hex.EncodeToString(h.Sum(nil)[:8])
 }
 

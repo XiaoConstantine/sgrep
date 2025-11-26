@@ -178,6 +178,8 @@ Use `sgrep list` to see all indexed repositories.
 | `--json` | JSON output for agents |
 | `-q, --quiet` | Minimal output (paths only) |
 | `--threshold F` | L2 distance threshold (default: 1.5, lower = stricter) |
+| `-t, --include-tests` | Include test files in results (excluded by default) |
+| `--all-chunks` | Show all matching chunks (disable deduplication) |
 
 ## Configuration
 

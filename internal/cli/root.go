@@ -18,11 +18,13 @@ import (
 
 var (
 	// Global flags
-	limit       int
-	showContext bool
-	jsonOutput  bool
-	quiet       bool
-	threshold   float64
+	limit        int
+	showContext  bool
+	jsonOutput   bool
+	quiet        bool
+	threshold    float64
+	includeTests bool
+	allChunks    bool
 )
 
 func Execute() error {
@@ -51,6 +53,8 @@ func init() {
 	rootCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON (for agents)")
 	rootCmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "Minimal output (paths only)")
 	rootCmd.Flags().Float64Var(&threshold, "threshold", 1.5, "Similarity threshold (L2 distance, lower is more similar)")
+	rootCmd.Flags().BoolVarP(&includeTests, "include-tests", "t", false, "Include test files in results")
+	rootCmd.Flags().BoolVar(&allChunks, "all-chunks", false, "Show all matching chunks (disable deduplication)")
 
 	// Add subcommands
 	rootCmd.AddCommand(indexCmd)
@@ -83,9 +87,16 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 	defer func() { _ = s.Close() }()
 
+	// Build search options
+	opts := search.DefaultSearchOptions()
+	opts.Limit = limit
+	opts.Threshold = threshold
+	opts.IncludeTests = includeTests
+	opts.Deduplicate = !allChunks
+
 	// Search
 	searcher := search.New(s)
-	results, err := searcher.Search(ctx, query, limit, threshold)
+	results, err := searcher.SearchWithOptions(ctx, query, opts)
 	if err != nil {
 		return fmt.Errorf("search failed: %w", err)
 	}
