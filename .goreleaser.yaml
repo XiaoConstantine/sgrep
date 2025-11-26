@@ -6,7 +6,8 @@ before:
     - go generate ./...
 
 builds:
-  - main: ./cmd/sgrep
+  - id: sgrep-cgo
+    main: ./cmd/sgrep
     binary: sgrep
     env:
       - CGO_ENABLED=1
@@ -17,6 +18,7 @@ builds:
       - amd64
       - arm64
     ignore:
+      # CGO cross-compilation is complex; build native only
       - goos: linux
         goarch: arm64
     ldflags:
@@ -33,9 +35,9 @@ archives:
       {{- if eq .Arch "amd64" }}x86_64
       {{- else if eq .Arch "386" }}i386
       {{- else }}{{ .Arch }}{{ end }}
-    format_overrides:
-      - goos: windows
-        format: zip
+    files:
+      - README.md
+      - LICENSE
 
 checksum:
   name_template: 'checksums.txt'
@@ -56,3 +58,19 @@ release:
     name: sgrep
   draft: false
   prerelease: auto
+
+# Homebrew tap
+brews:
+  - name: sgrep
+    repository:
+      owner: XiaoConstantine
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/XiaoConstantine/sgrep"
+    description: "Semantic grep - AI-powered code search using embeddings"
+    license: "Apache-2.0"
+    install: |
+      bin.install "sgrep"
+    test: |
+      system "#{bin}/sgrep", "--version"

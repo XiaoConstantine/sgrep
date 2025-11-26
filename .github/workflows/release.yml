@@ -9,27 +9,178 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  release-linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.23'
           cache: true
-      
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc
+
       - name: Run tests
-        run: go test -v ./...
-      
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
+        run: go test -short -v ./...
+
+      - name: Build Linux binary
+        env:
+          CGO_ENABLED: 1
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          go build -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${GITHUB_SHA} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o dist/sgrep-linux-amd64 ./cmd/sgrep
+          cd dist && tar -czvf sgrep_Linux_x86_64.tar.gz sgrep-linux-amd64 && rm sgrep-linux-amd64
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
         with:
-          distribution: goreleaser
-          version: latest
-          args: release --clean
+          name: dist-linux
+          path: dist/
+
+  release-darwin:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-13
+            arch: amd64
+            artifact_arch: x86_64
+          - runner: macos-14
+            arch: arm64
+            artifact_arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Run tests
+        run: go test -short -v ./...
+
+      - name: Build Darwin binary
+        env:
+          CGO_ENABLED: 1
+          GOOS: darwin
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          go build -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${GITHUB_SHA} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o dist/sgrep-darwin-${{ matrix.arch }} ./cmd/sgrep
+          cd dist && tar -czvf sgrep_Darwin_${{ matrix.artifact_arch }}.tar.gz sgrep-darwin-${{ matrix.arch }} && rm sgrep-darwin-${{ matrix.arch }}
+
+      - name: Upload Darwin artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-darwin-${{ matrix.arch }}
+          path: dist/
+
+  publish:
+    needs: [release-linux, release-darwin]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz > checksums.txt
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get the previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -n "$PREV_TAG" ]; then
+            echo "## Changes since ${PREV_TAG}" > CHANGELOG.md
+            git log ${PREV_TAG}..HEAD --pretty=format:"- %s" >> CHANGELOG.md
+          else
+            echo "## Initial Release" > CHANGELOG.md
+            git log --pretty=format:"- %s" >> CHANGELOG.md
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: CHANGELOG.md
+          files: |
+            dist/*.tar.gz
+            dist/checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update Homebrew tap
+        if: ${{ !contains(github.ref, '-') }}  # Skip pre-releases
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "HOMEBREW_TAP_TOKEN not set, skipping Homebrew update"
+            exit 0
+          fi
+
+          VERSION=${GITHUB_REF#refs/tags/v}
+          SHA256_DARWIN_ARM64=$(grep "Darwin_arm64" dist/checksums.txt | cut -d' ' -f1)
+          SHA256_DARWIN_AMD64=$(grep "Darwin_x86_64" dist/checksums.txt | cut -d' ' -f1)
+          SHA256_LINUX_AMD64=$(grep "Linux_x86_64" dist/checksums.txt | cut -d' ' -f1)
+
+          # Clone the tap repo
+          git clone https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/XiaoConstantine/homebrew-tap.git
+          cd homebrew-tap
+          mkdir -p Formula
+
+          cat > Formula/sgrep.rb << EOF
+          class Sgrep < Formula
+            desc "Semantic grep - AI-powered code search using embeddings"
+            homepage "https://github.com/XiaoConstantine/sgrep"
+            version "${VERSION}"
+            license "Apache-2.0"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/XiaoConstantine/sgrep/releases/download/v${VERSION}/sgrep_Darwin_arm64.tar.gz"
+                sha256 "${SHA256_DARWIN_ARM64}"
+              else
+                url "https://github.com/XiaoConstantine/sgrep/releases/download/v${VERSION}/sgrep_Darwin_x86_64.tar.gz"
+                sha256 "${SHA256_DARWIN_AMD64}"
+              end
+            end
+
+            on_linux do
+              url "https://github.com/XiaoConstantine/sgrep/releases/download/v${VERSION}/sgrep_Linux_x86_64.tar.gz"
+              sha256 "${SHA256_LINUX_AMD64}"
+            end
+
+            def install
+              bin.install Dir["sgrep-*"].first => "sgrep"
+            end
+
+            test do
+              system "#{bin}/sgrep", "--version"
+            end
+          end
+          EOF
+
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add Formula/sgrep.rb
+          git commit -m "Update sgrep to ${VERSION}" || echo "No changes to commit"
+          git push
