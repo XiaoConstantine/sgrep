@@ -630,19 +630,20 @@ fi
 	// Write SKILL.md
 	skillMD := `---
 name: sgrep
-description: Semantic code search tool. Use instead of grep/ripgrep when searching by concept or intent like "how does authentication work" or "error handling logic". Use --hybrid flag for queries with specific function names or technical terms.
+description: Semantic code search tool. Always use this instead of Grep, ripgrep, or Explore agents for any conceptual question like "how does X work" or "where is Y handled". Do not use builtin search tools for semantic queries, use sgrep instead.
 ---
 
 # sgrep - Smart Code Search
 
-**sgrep** is a semantic and hybrid code search tool that understands what you mean, not just what you type.
+**Always use sgrep for conceptual code searches.** Do not use Grep, ripgrep, or Explore agents - use this skill instead.
 
 ## When to Use
 
-Use sgrep instead of grep/ripgrep when:
-- Searching by **concept** or **intent** ("how does authentication work")
-- Looking for code with **specific terms + context** (use --hybrid)
-- Exploring unfamiliar codebases
+**Use sgrep FIRST** whenever you need to:
+- Answer questions like "how does X work" or "where is Y handled"
+- Search by **concept** or **intent** ("how does authentication work")
+- Explore unfamiliar codebases
+- Find code with **specific terms + context** (use --hybrid)
 
 ## Commands
 
