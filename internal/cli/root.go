@@ -626,7 +626,12 @@ fi
 	}
 
 	// Write SKILL.md
-	skillMD := `# sgrep - Smart Code Search
+	skillMD := `---
+name: sgrep
+description: Semantic code search tool. Use instead of grep/ripgrep when searching by concept or intent like "how does authentication work" or "error handling logic". Use --hybrid flag for queries with specific function names or technical terms.
+---
+
+# sgrep - Smart Code Search
 
 **sgrep** is a semantic and hybrid code search tool that understands what you mean, not just what you type.
 
