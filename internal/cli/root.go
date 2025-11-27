@@ -73,6 +73,7 @@ func init() {
 	rootCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(setupCmd)
 	rootCmd.AddCommand(serverCmd)
+	rootCmd.AddCommand(installClaudeCodeCmd)
 }
 
 func runSearch(cmd *cobra.Command, args []string) error {
@@ -493,4 +494,196 @@ var serverStatusCmd = &cobra.Command{
 
 		return nil
 	},
+}
+
+// Install Claude Code command
+var installClaudeCodeCmd = &cobra.Command{
+	Use:   "install-claude-code",
+	Short: "Install sgrep plugin for Claude Code",
+	Long: `Installs the sgrep plugin for Claude Code.
+
+This creates the plugin in ~/.claude/plugins/sgrep with:
+- Auto-indexing on session start
+- Watch mode for live index updates
+- Skill documentation for Claude
+
+After installation, restart Claude Code to activate the plugin.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return installClaudeCodePlugin()
+	},
+}
+
+func installClaudeCodePlugin() error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	pluginDir := filepath.Join(homeDir, ".claude", "plugins", "sgrep")
+
+	// Create plugin directory structure
+	dirs := []string{
+		pluginDir,
+		filepath.Join(pluginDir, ".claude-plugin"),
+		filepath.Join(pluginDir, "hooks"),
+		filepath.Join(pluginDir, "skills", "sgrep"),
+	}
+
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("failed to create directory %s: %w", dir, err)
+		}
+	}
+
+	// Write plugin.json
+	pluginJSON := `{
+  "name": "sgrep",
+  "description": "Smart semantic + hybrid code search",
+  "version": "0.1.0",
+  "author": {
+    "name": "Xiao Cui"
+  },
+  "hooks": "./hooks/hook.json"
+}
+`
+	if err := os.WriteFile(filepath.Join(pluginDir, ".claude-plugin", "plugin.json"), []byte(pluginJSON), 0644); err != nil {
+		return fmt.Errorf("failed to write plugin.json: %w", err)
+	}
+
+	// Write hook.json
+	hookJSON := `{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/sgrep_start.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/sgrep_stop.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
+`
+	if err := os.WriteFile(filepath.Join(pluginDir, "hooks", "hook.json"), []byte(hookJSON), 0644); err != nil {
+		return fmt.Errorf("failed to write hook.json: %w", err)
+	}
+
+	// Write sgrep_start.sh
+	startScript := `#!/bin/bash
+# Start sgrep indexing and watch for the current project
+
+# Check if sgrep is installed
+if ! command -v sgrep &> /dev/null; then
+    echo "sgrep not found. Install with: brew tap XiaoConstantine/tap && brew install sgrep"
+    exit 0
+fi
+
+# Get the project root
+PROJECT_ROOT="${CLAUDE_PROJECT_ROOT:-$(pwd)}"
+
+# Check if already indexed, if not index first
+if ! sgrep status &> /dev/null; then
+    echo "sgrep: Indexing $PROJECT_ROOT..."
+    sgrep index "$PROJECT_ROOT" &> /dev/null
+fi
+
+# Start watch mode in background (if not already running)
+if ! pgrep -f "sgrep watch" > /dev/null; then
+    nohup sgrep watch "$PROJECT_ROOT" &> /dev/null &
+    echo "sgrep: Watch mode started"
+fi
+`
+	if err := os.WriteFile(filepath.Join(pluginDir, "hooks", "sgrep_start.sh"), []byte(startScript), 0755); err != nil {
+		return fmt.Errorf("failed to write sgrep_start.sh: %w", err)
+	}
+
+	// Write sgrep_stop.sh
+	stopScript := `#!/bin/bash
+# Stop sgrep watch mode
+
+if pgrep -f "sgrep watch" > /dev/null; then
+    pkill -f "sgrep watch"
+    echo "sgrep: Watch mode stopped"
+fi
+`
+	if err := os.WriteFile(filepath.Join(pluginDir, "hooks", "sgrep_stop.sh"), []byte(stopScript), 0755); err != nil {
+		return fmt.Errorf("failed to write sgrep_stop.sh: %w", err)
+	}
+
+	// Write SKILL.md
+	skillMD := `# sgrep - Smart Code Search
+
+**sgrep** is a semantic and hybrid code search tool that understands what you mean, not just what you type.
+
+## When to Use
+
+Use sgrep instead of grep/ripgrep when:
+- Searching by **concept** or **intent** ("how does authentication work")
+- Looking for code with **specific terms + context** (use --hybrid)
+- Exploring unfamiliar codebases
+
+## Commands
+
+` + "```" + `bash
+# Semantic search (understands intent)
+sgrep "error handling logic"
+sgrep "database connection pooling"
+
+# Hybrid search (semantic + exact term matching)
+sgrep --hybrid "JWT token validation"
+sgrep --hybrid "OAuth2 refresh"
+
+# With code context
+sgrep -c "authentication middleware"
+
+# JSON output
+sgrep --json "rate limiting"
+` + "```" + `
+
+## Semantic vs Hybrid
+
+| Mode | Best For | Example |
+|------|----------|---------|
+| Default | Conceptual queries | "how does caching work" |
+| --hybrid | Queries with specific terms | "parseConfig function" |
+
+Use --hybrid when your query contains function names, API names, or technical terms.
+
+## Search Hierarchy
+
+1. **sgrep** → Find files by semantic intent
+2. **sgrep --hybrid** → Find files by intent + specific terms
+3. **ast-grep** → Match structural patterns
+4. **ripgrep** → Exact text search
+`
+	if err := os.WriteFile(filepath.Join(pluginDir, "skills", "sgrep", "SKILL.md"), []byte(skillMD), 0644); err != nil {
+		return fmt.Errorf("failed to write SKILL.md: %w", err)
+	}
+
+	fmt.Println("✓ sgrep plugin installed for Claude Code")
+	fmt.Printf("  Location: %s\n", pluginDir)
+	fmt.Println()
+	fmt.Println("Restart Claude Code to activate the plugin.")
+	fmt.Println()
+	fmt.Println("The plugin will automatically:")
+	fmt.Println("  • Index your project on session start")
+	fmt.Println("  • Keep the index updated via watch mode")
+	fmt.Println("  • Provide the 'sgrep' skill to Claude")
+
+	return nil
 }
