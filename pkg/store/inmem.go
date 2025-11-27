@@ -541,3 +541,251 @@ func (s *InMemStore) DeleteByPath(ctx context.Context, filePath string) error {
 func (s *InMemStore) Close() error {
 	return s.db.Close()
 }
+
+// EnsureFTS5 checks if FTS5 table exists and populates it from existing documents.
+func (s *InMemStore) EnsureFTS5() error {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='documents_fts'`).Scan(&count)
+	if err != nil {
+		return err
+	}
+
+	if count == 0 {
+		// Create FTS5 virtual table
+		_, err = s.db.Exec(`
+			CREATE VIRTUAL TABLE documents_fts USING fts5(
+				content,
+				filepath,
+				content='documents',
+				content_rowid='rowid'
+			)
+		`)
+		if err != nil {
+			return fmt.Errorf("create FTS5 table: %w", err)
+		}
+
+		// Create sync triggers
+		triggers := []string{
+			`CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
+				INSERT INTO documents_fts(rowid, content, filepath)
+				VALUES (NEW.rowid, NEW.content, NEW.filepath);
+			END`,
+			`CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
+				INSERT INTO documents_fts(documents_fts, rowid, content, filepath)
+				VALUES ('delete', OLD.rowid, OLD.content, OLD.filepath);
+			END`,
+			`CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
+				INSERT INTO documents_fts(documents_fts, rowid, content, filepath)
+				VALUES ('delete', OLD.rowid, OLD.content, OLD.filepath);
+				INSERT INTO documents_fts(rowid, content, filepath)
+				VALUES (NEW.rowid, NEW.content, NEW.filepath);
+			END`,
+		}
+		for _, t := range triggers {
+			if _, err := s.db.Exec(t); err != nil {
+				if !strings.Contains(err.Error(), "already exists") {
+					return fmt.Errorf("create trigger: %w", err)
+				}
+			}
+		}
+	}
+
+	// Check if FTS5 has data
+	var ftsCount int
+	err = s.db.QueryRow(`SELECT COUNT(*) FROM documents_fts`).Scan(&ftsCount)
+	if err != nil {
+		return err
+	}
+
+	var docCount int
+	err = s.db.QueryRow(`SELECT COUNT(*) FROM documents`).Scan(&docCount)
+	if err != nil {
+		return err
+	}
+
+	// If documents exist but FTS5 is empty, populate it
+	if docCount > 0 && ftsCount == 0 {
+		_, err = s.db.Exec(`
+			INSERT INTO documents_fts(rowid, content, filepath)
+			SELECT rowid, content, filepath FROM documents
+		`)
+		if err != nil {
+			return fmt.Errorf("populate FTS5: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// HybridSearch combines in-memory vector search with FTS5 BM25 for hybrid ranking.
+func (s *InMemStore) HybridSearch(ctx context.Context, embedding []float32, queryTerms string, limit int, threshold float64, semanticWeight, bm25Weight float64) ([]*Document, []float64, error) {
+	// If no query terms, fall back to semantic-only search
+	if queryTerms == "" {
+		return s.Search(ctx, embedding, limit, threshold)
+	}
+
+	// Step 1: Get semantic results from in-memory search
+	fetchLimit := limit * 5
+	if fetchLimit < 50 {
+		fetchLimit = 50
+	}
+
+	s.mu.RLock()
+	vectors := s.vectors
+	docIDs := s.docIDs
+	s.mu.RUnlock()
+
+	n := len(vectors)
+	if n == 0 {
+		return nil, nil, nil
+	}
+
+	// Get semantic candidates
+	var semanticCandidates []searchResult
+	if n < 1000 {
+		// Sequential for small datasets
+		distances := make([]float64, n)
+		util.L2DistanceBatch(embedding, vectors, distances)
+
+		for i := 0; i < n; i++ {
+			if distances[i] <= threshold {
+				semanticCandidates = append(semanticCandidates, searchResult{
+					id:       docIDs[i],
+					distance: distances[i],
+					idx:      i,
+				})
+			}
+		}
+	} else {
+		// Parallel for large datasets
+		docs, dists, err := s.searchParallel(ctx, embedding, vectors, docIDs, fetchLimit, threshold)
+		if err != nil {
+			return nil, nil, err
+		}
+		for i, doc := range docs {
+			semanticCandidates = append(semanticCandidates, searchResult{
+				id:       doc.ID,
+				distance: dists[i],
+			})
+		}
+	}
+
+	if len(semanticCandidates) == 0 {
+		return nil, nil, nil
+	}
+
+	// Sort by distance
+	sort.Slice(semanticCandidates, func(i, j int) bool {
+		return semanticCandidates[i].distance < semanticCandidates[j].distance
+	})
+
+	// Limit candidates
+	if len(semanticCandidates) > fetchLimit {
+		semanticCandidates = semanticCandidates[:fetchLimit]
+	}
+
+	// Step 2: Get BM25 scores from FTS5
+	bm25Scores := make(map[string]float64)
+	bm25Query := `
+		SELECT d.id, bm25(documents_fts) AS score
+		FROM documents_fts f
+		JOIN documents d ON d.rowid = f.rowid
+		WHERE documents_fts MATCH ?
+	`
+	rows, err := s.db.QueryContext(ctx, bm25Query, queryTerms)
+	if err != nil {
+		// If FTS5 query fails, fall back to semantic-only
+		if strings.Contains(err.Error(), "fts5") {
+			return s.Search(ctx, embedding, limit, threshold)
+		}
+		return nil, nil, fmt.Errorf("BM25 query failed: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var id string
+		var score float64
+		if err := rows.Scan(&id, &score); err != nil {
+			continue
+		}
+		bm25Scores[id] = score
+	}
+
+	// Step 3: Compute hybrid scores
+	type hybridResult struct {
+		id          string
+		hybridScore float64
+	}
+
+	var hybridResults []hybridResult
+	for _, sr := range semanticCandidates {
+		bm25 := bm25Scores[sr.id] // Will be 0 if not found (no BM25 match)
+		hybrid := (semanticWeight * sr.distance) + (bm25Weight * bm25)
+		hybridResults = append(hybridResults, hybridResult{
+			id:          sr.id,
+			hybridScore: hybrid,
+		})
+	}
+
+	// Sort by hybrid score (lower is better)
+	sort.Slice(hybridResults, func(i, j int) bool {
+		return hybridResults[i].hybridScore < hybridResults[j].hybridScore
+	})
+
+	// Limit results
+	if len(hybridResults) > limit {
+		hybridResults = hybridResults[:limit]
+	}
+
+	// Step 4: Load documents
+	if len(hybridResults) == 0 {
+		return nil, nil, nil
+	}
+
+	placeholders := make([]string, len(hybridResults))
+	args := make([]interface{}, len(hybridResults))
+	for i, hr := range hybridResults {
+		placeholders[i] = "?"
+		args[i] = hr.id
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, filepath, content, start_line, end_line, metadata, is_test
+		FROM documents
+		WHERE id IN (%s)
+	`, strings.Join(placeholders, ","))
+
+	docRows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = docRows.Close() }()
+
+	docsByID := make(map[string]*Document, len(hybridResults))
+	for docRows.Next() {
+		var doc Document
+		var metadataStr string
+		var isTest int
+		if err := docRows.Scan(&doc.ID, &doc.FilePath, &doc.Content,
+			&doc.StartLine, &doc.EndLine, &metadataStr, &isTest); err != nil {
+			return nil, nil, err
+		}
+		if metadataStr != "" {
+			_ = json.Unmarshal([]byte(metadataStr), &doc.Metadata)
+		}
+		doc.IsTest = isTest == 1
+		docsByID[doc.ID] = &doc
+	}
+
+	// Return in hybrid score order
+	docs := make([]*Document, 0, len(hybridResults))
+	scores := make([]float64, 0, len(hybridResults))
+	for _, hr := range hybridResults {
+		if d, ok := docsByID[hr.id]; ok {
+			docs = append(docs, d)
+			scores = append(scores, hr.hybridScore)
+		}
+	}
+
+	return docs, scores, nil
+}

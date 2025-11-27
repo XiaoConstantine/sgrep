@@ -307,6 +307,240 @@ func TestClose(t *testing.T) {
 	}
 }
 
+// FTS5 and Hybrid Search Tests
+
+func TestEnsureFTS5_CreatesTable(t *testing.T) {
+	s := newStore(t)
+	defer func() { _ = s.Close() }()
+
+	// Ensure FTS5 creates the table
+	if err := s.EnsureFTS5(); err != nil {
+		t.Fatalf("EnsureFTS5 failed: %v", err)
+	}
+
+	// Verify table exists
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='documents_fts'`).Scan(&count)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Error("FTS5 table not created")
+	}
+}
+
+func TestEnsureFTS5_Idempotent(t *testing.T) {
+	s := newStore(t)
+	defer func() { _ = s.Close() }()
+
+	// Call twice - should not error
+	if err := s.EnsureFTS5(); err != nil {
+		t.Fatalf("first EnsureFTS5 failed: %v", err)
+	}
+	if err := s.EnsureFTS5(); err != nil {
+		t.Fatalf("second EnsureFTS5 failed: %v", err)
+	}
+}
+
+func TestEnsureFTS5_PopulatesFromExistingDocs(t *testing.T) {
+	s := newStore(t)
+	defer func() { _ = s.Close() }()
+
+	// Store documents first
+	docs := []*Document{
+		{ID: "d1", FilePath: "/auth.go", Content: "authentication middleware", Embedding: rndVec(768)},
+		{ID: "d2", FilePath: "/handler.go", Content: "error handling code", Embedding: rndVec(768)},
+	}
+	if err := s.StoreBatch(context.Background(), docs); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now ensure FTS5 - should populate from existing docs
+	if err := s.EnsureFTS5(); err != nil {
+		t.Fatalf("EnsureFTS5 failed: %v", err)
+	}
+
+	// Verify FTS5 has the documents
+	var ftsCount int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM documents_fts`).Scan(&ftsCount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ftsCount != 2 {
+		t.Errorf("FTS5 should have 2 docs, got %d", ftsCount)
+	}
+}
+
+func TestHybridSearch_FallbackToSemantic_NoTerms(t *testing.T) {
+	s := newStore(t)
+	defer func() { _ = s.Close() }()
+
+	base := rndVec(768)
+	docs := []*Document{
+		{ID: "d1", FilePath: "/auth.go", Content: "authentication", Embedding: base},
+	}
+	_ = s.StoreBatch(context.Background(), docs)
+	_ = s.EnsureFTS5()
+
+	// Empty query terms should fall back to semantic search
+	results, dists, err := s.HybridSearch(context.Background(), base, "", 10, 5.0, 0.6, 0.4)
+	if err != nil {
+		t.Fatalf("HybridSearch failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("expected 1 result, got %d", len(results))
+	}
+	if len(dists) != 1 {
+		t.Errorf("expected 1 distance, got %d", len(dists))
+	}
+}
+
+func TestHybridSearch_Empty(t *testing.T) {
+	s := newStore(t)
+	defer func() { _ = s.Close() }()
+	_ = s.EnsureFTS5()
+
+	results, dists, err := s.HybridSearch(context.Background(), rndVec(768), "test", 10, 5.0, 0.6, 0.4)
+	if err != nil {
+		t.Fatalf("HybridSearch failed: %v", err)
+	}
+	if len(results) != 0 || len(dists) != 0 {
+		t.Error("should return empty for empty store")
+	}
+}
+
+func TestHybridSearch_CombinesScores(t *testing.T) {
+	s := newStore(t)
+	defer func() { _ = s.Close() }()
+
+	// Create docs with known embeddings
+	base := make([]float32, 768)
+	base[0] = 1.0
+
+	// Doc with exact term match but slightly worse embedding
+	doc1Emb := make([]float32, 768)
+	doc1Emb[0] = 1.1
+
+	// Doc with no term match but better embedding
+	doc2Emb := make([]float32, 768)
+	doc2Emb[0] = 1.0
+
+	docs := []*Document{
+		{ID: "d1", FilePath: "/auth.go", Content: "authentication middleware handler", Embedding: doc1Emb},
+		{ID: "d2", FilePath: "/other.go", Content: "some other code", Embedding: doc2Emb},
+	}
+	if err := s.StoreBatch(context.Background(), docs); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnsureFTS5(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Search for "authentication" - should find d1 with BM25 boost
+	results, _, err := s.HybridSearch(context.Background(), base, "authentication", 10, 5.0, 0.6, 0.4)
+	if err != nil {
+		t.Fatalf("HybridSearch failed: %v", err)
+	}
+
+	if len(results) == 0 {
+		t.Fatal("expected results")
+	}
+
+	// Verify we got results
+	found := false
+	for _, r := range results {
+		if r.ID == "d1" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected to find doc with matching term")
+	}
+}
+
+func TestHybridSearch_RespectsLimit(t *testing.T) {
+	s := newStore(t)
+	defer func() { _ = s.Close() }()
+
+	base := rndVec(768)
+	docs := make([]*Document, 20)
+	for i := range docs {
+		e := make([]float32, 768)
+		copy(e, base)
+		e[0] += float32(i) * 0.01
+		docs[i] = &Document{
+			ID:        itoa(i),
+			FilePath:  "/f" + itoa(i) + ".go",
+			Content:   "test content " + itoa(i),
+			Embedding: e,
+		}
+	}
+	_ = s.StoreBatch(context.Background(), docs)
+	_ = s.EnsureFTS5()
+
+	results, _, err := s.HybridSearch(context.Background(), base, "test", 5, 10.0, 0.6, 0.4)
+	if err != nil {
+		t.Fatalf("HybridSearch failed: %v", err)
+	}
+	if len(results) > 5 {
+		t.Errorf("expected at most 5 results, got %d", len(results))
+	}
+}
+
+func TestHybridSearch_RespectsThreshold(t *testing.T) {
+	s := newStore(t)
+	defer func() { _ = s.Close() }()
+
+	near := make([]float32, 768)
+	near[0] = 1.0
+	far := make([]float32, 768)
+	far[0] = 100.0
+
+	docs := []*Document{
+		{ID: "near", FilePath: "/near.go", Content: "authentication near", Embedding: near},
+		{ID: "far", FilePath: "/far.go", Content: "authentication far", Embedding: far},
+	}
+	_ = s.StoreBatch(context.Background(), docs)
+	_ = s.EnsureFTS5()
+
+	query := make([]float32, 768)
+	// Strict threshold should only return near doc
+	results, _, err := s.HybridSearch(context.Background(), query, "authentication", 10, 5.0, 0.6, 0.4)
+	if err != nil {
+		t.Fatalf("HybridSearch failed: %v", err)
+	}
+
+	for _, r := range results {
+		if r.ID == "far" {
+			t.Error("far doc should be filtered by threshold")
+		}
+	}
+}
+
+func TestHybridSearch_CustomWeights(t *testing.T) {
+	s := newStore(t)
+	defer func() { _ = s.Close() }()
+
+	base := make([]float32, 768)
+	base[0] = 1.0
+
+	docs := []*Document{
+		{ID: "d1", FilePath: "/auth.go", Content: "authentication handler", Embedding: base},
+	}
+	_ = s.StoreBatch(context.Background(), docs)
+	_ = s.EnsureFTS5()
+
+	// Test with different weight combinations
+	_, _, err1 := s.HybridSearch(context.Background(), base, "authentication", 10, 5.0, 0.8, 0.2)
+	_, _, err2 := s.HybridSearch(context.Background(), base, "authentication", 10, 5.0, 0.2, 0.8)
+	_, _, err3 := s.HybridSearch(context.Background(), base, "authentication", 10, 5.0, 0.5, 0.5)
+
+	if err1 != nil || err2 != nil || err3 != nil {
+		t.Errorf("HybridSearch with custom weights failed: %v, %v, %v", err1, err2, err3)
+	}
+}
+
 // Benchmarks
 
 func BenchmarkSearch_100(b *testing.B) {

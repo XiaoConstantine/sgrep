@@ -20,6 +20,7 @@ type Storer interface {
 	Store(ctx context.Context, doc *Document) error
 	StoreBatch(ctx context.Context, docs []*Document) error
 	Search(ctx context.Context, embedding []float32, limit int, threshold float64) ([]*Document, []float64, error)
+	HybridSearch(ctx context.Context, embedding []float32, queryTerms string, limit int, threshold float64, semanticWeight, bm25Weight float64) ([]*Document, []float64, error)
 	Stats(ctx context.Context) (*Stats, error)
 	DeleteByPath(ctx context.Context, filepath string) error
 	Close() error
@@ -128,6 +129,102 @@ func (s *Store) init() error {
 	for _, q := range queries {
 		if _, err := s.db.Exec(q); err != nil {
 			return fmt.Errorf("failed to init schema: %w", err)
+		}
+	}
+
+	// Initialize FTS5 for hybrid search (BM25)
+	if err := s.initFTS5(); err != nil {
+		return fmt.Errorf("failed to init FTS5: %w", err)
+	}
+
+	return nil
+}
+
+// initFTS5 creates the FTS5 virtual table and sync triggers for BM25 search.
+func (s *Store) initFTS5() error {
+	// Create FTS5 virtual table
+	_, err := s.db.Exec(`
+		CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
+			content,
+			filepath,
+			content='documents',
+			content_rowid='rowid'
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("create FTS5 table: %w", err)
+	}
+
+	// Create triggers to keep FTS5 in sync with documents table
+	triggers := []string{
+		// After insert trigger
+		`CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
+			INSERT INTO documents_fts(rowid, content, filepath)
+			VALUES (NEW.rowid, NEW.content, NEW.filepath);
+		END`,
+		// After delete trigger
+		`CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
+			INSERT INTO documents_fts(documents_fts, rowid, content, filepath)
+			VALUES ('delete', OLD.rowid, OLD.content, OLD.filepath);
+		END`,
+		// After update trigger
+		`CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
+			INSERT INTO documents_fts(documents_fts, rowid, content, filepath)
+			VALUES ('delete', OLD.rowid, OLD.content, OLD.filepath);
+			INSERT INTO documents_fts(rowid, content, filepath)
+			VALUES (NEW.rowid, NEW.content, NEW.filepath);
+		END`,
+	}
+
+	for _, t := range triggers {
+		if _, err := s.db.Exec(t); err != nil {
+			// Ignore "already exists" errors for triggers
+			if !strings.Contains(err.Error(), "already exists") {
+				return fmt.Errorf("create trigger: %w", err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// EnsureFTS5 checks if FTS5 table exists and populates it from existing documents.
+// Call this on store open to handle migration of existing indexes.
+func (s *Store) EnsureFTS5() error {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='documents_fts'`).Scan(&count)
+	if err != nil {
+		return err
+	}
+
+	if count == 0 {
+		// FTS5 table doesn't exist, init it
+		if err := s.initFTS5(); err != nil {
+			return err
+		}
+	}
+
+	// Check if FTS5 has data
+	var ftsCount int
+	err = s.db.QueryRow(`SELECT COUNT(*) FROM documents_fts`).Scan(&ftsCount)
+	if err != nil {
+		return err
+	}
+
+	var docCount int
+	err = s.db.QueryRow(`SELECT COUNT(*) FROM documents`).Scan(&docCount)
+	if err != nil {
+		return err
+	}
+
+	// If documents exist but FTS5 is empty, populate it
+	if docCount > 0 && ftsCount == 0 {
+		_, err = s.db.Exec(`
+			INSERT INTO documents_fts(rowid, content, filepath)
+			SELECT rowid, content, filepath FROM documents
+		`)
+		if err != nil {
+			return fmt.Errorf("populate FTS5: %w", err)
 		}
 	}
 
@@ -371,6 +468,96 @@ func (s *Store) Stats(ctx context.Context) (*Stats, error) {
 	}
 
 	return &stats, nil
+}
+
+// HybridSearch combines semantic (vector) search with lexical (BM25) search.
+// It fetches candidates from both sources and combines scores using weights.
+func (s *Store) HybridSearch(ctx context.Context, embedding []float32, queryTerms string, limit int, threshold float64, semanticWeight, bm25Weight float64) ([]*Document, []float64, error) {
+	blob, err := sqlite_vec.SerializeFloat32(embedding)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Fetch more candidates for re-ranking
+	fetchLimit := limit * 5
+	if fetchLimit < 50 {
+		fetchLimit = 50
+	}
+
+	// If no query terms, fall back to semantic-only search
+	if queryTerms == "" {
+		return s.Search(ctx, embedding, limit, threshold)
+	}
+
+	// Hybrid query: combine vector distance with BM25 score
+	// Note: Both distance and bm25() return lower-is-better values
+	query := `
+		WITH semantic AS (
+			SELECT doc_id, distance
+			FROM vec_embeddings
+			WHERE embedding MATCH ?
+			ORDER BY distance
+			LIMIT ?
+		),
+		lexical AS (
+			SELECT d.id as doc_id, bm25(documents_fts) AS bm25_score
+			FROM documents_fts f
+			JOIN documents d ON d.rowid = f.rowid
+			WHERE documents_fts MATCH ?
+		)
+		SELECT
+			d.id, d.filepath, d.content, d.start_line, d.end_line, d.metadata, d.is_test,
+			s.distance AS semantic_dist,
+			COALESCE(l.bm25_score, 0) AS bm25_score,
+			(? * s.distance) + (? * COALESCE(l.bm25_score, 0)) AS hybrid_score
+		FROM documents d
+		JOIN semantic s ON d.id = s.doc_id
+		LEFT JOIN lexical l ON d.id = l.doc_id
+		WHERE s.distance < ?
+		ORDER BY hybrid_score
+		LIMIT ?
+	`
+
+	rows, err := s.db.QueryContext(ctx, query,
+		blob, fetchLimit,       // semantic params
+		queryTerms,             // lexical params
+		semanticWeight, bm25Weight, // score weights
+		threshold, limit,       // filter and limit
+	)
+	if err != nil {
+		// If FTS5 query fails (e.g., syntax error), fall back to semantic-only
+		if strings.Contains(err.Error(), "fts5") {
+			return s.Search(ctx, embedding, limit, threshold)
+		}
+		return nil, nil, fmt.Errorf("hybrid search failed: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var docs []*Document
+	var scores []float64
+
+	for rows.Next() {
+		var doc Document
+		var metadataStr string
+		var isTest int
+		var semanticDist, bm25Score, hybridScore float64
+
+		if err := rows.Scan(&doc.ID, &doc.FilePath, &doc.Content,
+			&doc.StartLine, &doc.EndLine, &metadataStr, &isTest,
+			&semanticDist, &bm25Score, &hybridScore); err != nil {
+			return nil, nil, err
+		}
+
+		if metadataStr != "" {
+			_ = json.Unmarshal([]byte(metadataStr), &doc.Metadata)
+		}
+		doc.IsTest = isTest == 1
+
+		docs = append(docs, &doc)
+		scores = append(scores, hybridScore)
+	}
+
+	return docs, scores, nil
 }
 
 // Close closes the store.

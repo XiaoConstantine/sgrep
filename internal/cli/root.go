@@ -18,13 +18,16 @@ import (
 
 var (
 	// Global flags
-	limit        int
-	showContext  bool
-	jsonOutput   bool
-	quiet        bool
-	threshold    float64
-	includeTests bool
-	allChunks    bool
+	limit          int
+	showContext    bool
+	jsonOutput     bool
+	quiet          bool
+	threshold      float64
+	includeTests   bool
+	allChunks      bool
+	hybridSearch   bool
+	semanticWeight float64
+	bm25Weight     float64
 
 	// Index flags
 	indexWorkers int
@@ -58,6 +61,9 @@ func init() {
 	rootCmd.Flags().Float64Var(&threshold, "threshold", 1.5, "Similarity threshold (L2 distance, lower is more similar)")
 	rootCmd.Flags().BoolVarP(&includeTests, "include-tests", "t", false, "Include test files in results")
 	rootCmd.Flags().BoolVar(&allChunks, "all-chunks", false, "Show all matching chunks (disable deduplication)")
+	rootCmd.Flags().BoolVar(&hybridSearch, "hybrid", false, "Enable hybrid search (semantic + BM25)")
+	rootCmd.Flags().Float64Var(&semanticWeight, "semantic-weight", 0.6, "Weight for semantic score in hybrid mode")
+	rootCmd.Flags().Float64Var(&bm25Weight, "bm25-weight", 0.4, "Weight for BM25 score in hybrid mode")
 
 	// Add subcommands
 	rootCmd.AddCommand(indexCmd)
@@ -90,12 +96,22 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 	defer func() { _ = s.Close() }()
 
+	// Ensure FTS5 index exists for hybrid search
+	if hybridSearch {
+		if err := s.EnsureFTS5(); err != nil {
+			return fmt.Errorf("failed to initialize FTS5 for hybrid search: %w", err)
+		}
+	}
+
 	// Build search options
 	opts := search.DefaultSearchOptions()
 	opts.Limit = limit
 	opts.Threshold = threshold
 	opts.IncludeTests = includeTests
 	opts.Deduplicate = !allChunks
+	opts.UseHybrid = hybridSearch
+	opts.SemanticWeight = semanticWeight
+	opts.BM25Weight = bm25Weight
 
 	// Search
 	searcher := search.New(s)

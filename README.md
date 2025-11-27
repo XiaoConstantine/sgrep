@@ -1,12 +1,12 @@
-# sgrep - Semantic Grep for Code
+# sgrep - Smart Grep for Code
 
-**Semantic code search that complements `ripgrep` and `ast-grep`.**
+**Semantic + hybrid code search that complements `ripgrep` and `ast-grep`.**
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  ripgrep (rg)     │  ast-grep (sg)    │  sgrep              │
 │  ─────────────    │  ──────────────   │  ──────             │
-│  Exact text/regex │  AST patterns     │  Semantic intent    │
+│  Exact text/regex │  AST patterns     │  Semantic + hybrid  │
 │  "findUser"       │  $fn($args)       │  "auth validation"  │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -49,7 +49,16 @@ go install github.com/XiaoConstantine/sgrep/cmd/sgrep@latest
 ```bash
 git clone https://github.com/XiaoConstantine/sgrep.git
 cd sgrep
-go build -o sgrep ./cmd/sgrep
+
+# Standard build (semantic search only)
+make build
+
+# Build with hybrid search support (semantic + BM25)
+make build-hybrid
+
+# Or manually:
+# go build -o sgrep ./cmd/sgrep
+# CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" go build -o sgrep ./cmd/sgrep
 ```
 
 **Requirements**: llama.cpp (for the embedding server)
@@ -78,11 +87,35 @@ sgrep "error handling for database connections"
 sgrep "JWT token validation logic"
 sgrep "how are API rate limits implemented"
 
+# Hybrid search (semantic + BM25) - better for exact term matching
+sgrep --hybrid "authentication middleware"
+sgrep --hybrid "JWT token" --semantic-weight 0.5 --bm25-weight 0.5
+
 # Watch mode (background indexing)
 sgrep watch .
 ```
 
 The embedding server starts automatically when needed and stays running as a daemon.
+
+## Hybrid Search
+
+Hybrid search combines **semantic understanding** with **lexical matching (BM25)** for improved accuracy. This helps when:
+- Searching for specific technical terms (e.g., "JWT", "OAuth", "mutex")
+- The query contains exact function/variable names
+- Semantic search alone misses exact keyword matches
+
+```bash
+# Default: semantic-only search
+sgrep "authentication"
+
+# Hybrid: semantic (60%) + BM25 (40%) - default weights
+sgrep --hybrid "authentication"
+
+# Custom weights: more emphasis on exact matches
+sgrep --hybrid --semantic-weight 0.4 --bm25-weight 0.6 "parseAST"
+```
+
+**Note**: Hybrid search requires building with FTS5 support (see [From Source](#from-source)). The FTS5 index is created automatically on first hybrid search - no re-indexing needed.
 
 ## Agent-Optimized Output
 
@@ -180,6 +213,9 @@ Use `sgrep list` to see all indexed repositories.
 | `--threshold F` | L2 distance threshold (default: 1.5, lower = stricter) |
 | `-t, --include-tests` | Include test files in results (excluded by default) |
 | `--all-chunks` | Show all matching chunks (disable deduplication) |
+| `--hybrid` | Enable hybrid search (semantic + BM25) |
+| `--semantic-weight F` | Weight for semantic score in hybrid mode (default: 0.6) |
+| `--bm25-weight F` | Weight for BM25 score in hybrid mode (default: 0.4) |
 
 ## Configuration
 
@@ -219,6 +255,34 @@ SGREP_DIMS=768                         # Vector dimensions
 │  Total: ~30ms (vs 2800ms with sqlite-vec KNN)               │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+### Hybrid Search Architecture
+
+When `--hybrid` is enabled, sgrep combines semantic and lexical search:
+
+```
+Query: "authentication middleware"
+         ↓
+  ┌──────────────────────────────────────────────────────┐
+  │                                                      │
+  │  ┌─────────────┐         ┌─────────────┐           │
+  │  │  Semantic   │         │    BM25     │           │
+  │  │  (Vectors)  │         │   (FTS5)    │           │
+  │  │    60%      │         │    40%      │           │
+  │  └──────┬──────┘         └──────┬──────┘           │
+  │         │                       │                   │
+  │         └───────┬───────────────┘                   │
+  │                 ↓                                   │
+  │         ┌─────────────┐                            │
+  │         │   Hybrid    │                            │
+  │         │   Ranking   │                            │
+  │         └─────────────┘                            │
+  │                                                      │
+  └──────────────────────────────────────────────────────┘
+```
+
+- **Semantic**: Understands intent ("auth" matches "authentication", "login", "session")
+- **BM25**: Exact term matching with TF-IDF weighting (boosts exact "authentication" matches)
 
 ## Performance
 

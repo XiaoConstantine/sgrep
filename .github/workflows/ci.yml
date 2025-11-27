@@ -23,8 +23,15 @@ jobs:
       
       - name: Build
         run: go build -v ./...
-      
-      - name: Test
+
+      - name: Build with hybrid search (FTS5)
+        env:
+          CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
+        run: go build -v ./...
+
+      - name: Test (with FTS5 for hybrid search)
+        env:
+          CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
         run: go test -v -short -race -coverprofile=coverage.txt -covermode=atomic ./...
       
       - name: Upload coverage
@@ -72,10 +79,11 @@ jobs:
           go-version: '1.23'
           cache: true
       
-      - name: Build binary
+      - name: Build binary (with hybrid search)
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
         run: go build -o sgrep-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }} ./cmd/sgrep
 
       - name: Upload artifact

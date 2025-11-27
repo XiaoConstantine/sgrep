@@ -70,6 +70,11 @@ func (m *mockStore) DeleteByPath(ctx context.Context, filepath string) error {
 	return nil
 }
 
+func (m *mockStore) HybridSearch(ctx context.Context, embedding []float32, queryTerms string, limit int, threshold float64, semanticWeight, bm25Weight float64) ([]*store.Document, []float64, error) {
+	// For mock, just delegate to Search
+	return m.Search(ctx, embedding, limit, threshold)
+}
+
 func (m *mockStore) Close() error {
 	return nil
 }

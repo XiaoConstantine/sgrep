@@ -25,21 +25,27 @@ type Result struct {
 
 // SearchOptions configures search behavior.
 type SearchOptions struct {
-	Limit        int
-	Threshold    float64
-	IncludeTests bool    // Include test files in results (default: false)
-	Deduplicate  bool    // Deduplicate results by file (default: true)
-	BoostImpl    float64 // Boost factor for implementation files (default: 0.85, lower = better ranking)
+	Limit          int
+	Threshold      float64
+	IncludeTests   bool    // Include test files in results (default: false)
+	Deduplicate    bool    // Deduplicate results by file (default: true)
+	BoostImpl      float64 // Boost factor for implementation files (default: 0.85, lower = better ranking)
+	UseHybrid      bool    // Enable hybrid search combining semantic + BM25 (default: false)
+	SemanticWeight float64 // Weight for semantic score in hybrid mode (default: 0.6)
+	BM25Weight     float64 // Weight for BM25 score in hybrid mode (default: 0.4)
 }
 
 // DefaultSearchOptions returns sensible default options.
 func DefaultSearchOptions() SearchOptions {
 	return SearchOptions{
-		Limit:        10,
-		Threshold:    1.5,
-		IncludeTests: false,
-		Deduplicate:  true,
-		BoostImpl:    0.85, // Implementation files get 15% score boost (lower L2 = better)
+		Limit:          10,
+		Threshold:      1.5,
+		IncludeTests:   false,
+		Deduplicate:    true,
+		BoostImpl:      0.85, // Implementation files get 15% score boost (lower L2 = better)
+		UseHybrid:      false,
+		SemanticWeight: 0.6,
+		BM25Weight:     0.4,
 	}
 }
 
@@ -149,14 +155,24 @@ func (s *Searcher) SearchWithOptions(ctx context.Context, query string, opts Sea
 		return nil, err
 	}
 
+	var docs []*store.Document
+	var distances []float64
+
 	// Request more results than limit to allow for filtering
 	fetchLimit := opts.Limit * 3
 	if !opts.IncludeTests {
 		fetchLimit = opts.Limit * 5 // Need more results when filtering tests
 	}
 
-	// Search store (parallel partitioned search with slabs)
-	docs, distances, err := s.store.Search(ctx, queryEmb, fetchLimit, opts.Threshold)
+	if opts.UseHybrid {
+		// Hybrid search: combine semantic + BM25
+		queryTerms := ExtractSearchTerms(query)
+		docs, distances, err = s.store.HybridSearch(ctx, queryEmb, queryTerms,
+			fetchLimit, opts.Threshold, opts.SemanticWeight, opts.BM25Weight)
+	} else {
+		// Semantic-only search
+		docs, distances, err = s.store.Search(ctx, queryEmb, fetchLimit, opts.Threshold)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +187,8 @@ func (s *Searcher) SearchWithOptions(ctx context.Context, query string, opts Sea
 
 		score := distances[i]
 		// Apply boost to implementation files (lower score = better)
-		if !doc.IsTest && opts.BoostImpl > 0 && opts.BoostImpl < 1.0 {
+		// Skip boost in hybrid mode since BM25 already has its own ranking
+		if !opts.UseHybrid && !doc.IsTest && opts.BoostImpl > 0 && opts.BoostImpl < 1.0 {
 			score *= opts.BoostImpl
 		}
 
@@ -244,8 +261,9 @@ func (s *Searcher) cacheKey(query string, limit int, threshold float64) string {
 // cacheKeyWithOpts generates a unique key for query + all options.
 func (s *Searcher) cacheKeyWithOpts(query string, opts SearchOptions) string {
 	h := sha256.New()
-	_, _ = fmt.Fprintf(h, "%s:%d:%.4f:%v:%v:%.4f",
-		query, opts.Limit, opts.Threshold, opts.IncludeTests, opts.Deduplicate, opts.BoostImpl)
+	_, _ = fmt.Fprintf(h, "%s:%d:%.4f:%v:%v:%.4f:%v:%.4f:%.4f",
+		query, opts.Limit, opts.Threshold, opts.IncludeTests, opts.Deduplicate, opts.BoostImpl,
+		opts.UseHybrid, opts.SemanticWeight, opts.BM25Weight)
 	return hex.EncodeToString(h.Sum(nil)[:8])
 }
 
