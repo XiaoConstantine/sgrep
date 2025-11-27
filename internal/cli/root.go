@@ -520,13 +520,15 @@ func installClaudeCodePlugin() error {
 	}
 
 	pluginDir := filepath.Join(homeDir, ".claude", "plugins", "sgrep")
+	skillsDir := filepath.Join(homeDir, ".claude", "skills", "sgrep")
 
-	// Create plugin directory structure
+	// Create plugin directory structure AND global skills directory
 	dirs := []string{
 		pluginDir,
 		filepath.Join(pluginDir, ".claude-plugin"),
 		filepath.Join(pluginDir, "hooks"),
 		filepath.Join(pluginDir, "skills", "sgrep"),
+		skillsDir, // Global skills directory for Claude Code discovery
 	}
 
 	for _, dir := range dirs {
@@ -680,8 +682,14 @@ Use --hybrid when your query contains function names, API names, or technical te
 		return fmt.Errorf("failed to write SKILL.md: %w", err)
 	}
 
+	// Also write to global skills directory for Claude Code discovery
+	if err := os.WriteFile(filepath.Join(skillsDir, "SKILL.md"), []byte(skillMD), 0644); err != nil {
+		return fmt.Errorf("failed to write global SKILL.md: %w", err)
+	}
+
 	fmt.Println("✓ sgrep plugin installed for Claude Code")
-	fmt.Printf("  Location: %s\n", pluginDir)
+	fmt.Printf("  Plugin: %s\n", pluginDir)
+	fmt.Printf("  Skill:  %s\n", skillsDir)
 	fmt.Println()
 	fmt.Println("Restart Claude Code to activate the plugin.")
 	fmt.Println()
