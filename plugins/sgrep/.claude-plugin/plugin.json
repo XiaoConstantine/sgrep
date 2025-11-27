@@ -1,0 +1,9 @@
+{
+  "name": "sgrep",
+  "description": "Smart semantic + hybrid code search for local repositories",
+  "version": "0.1.0",
+  "author": {
+    "name": "Xiao Cui"
+  },
+  "hooks": "./hooks/hook.json"
+}

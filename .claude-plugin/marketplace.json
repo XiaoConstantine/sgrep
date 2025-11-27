@@ -1,0 +1,20 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "sgrep",
+  "owner": {
+    "name": "XiaoConstantine",
+    "email": "constantine124@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "sgrep",
+      "source": "./plugins/sgrep",
+      "description": "Smart semantic + hybrid code search",
+      "version": "0.1.0",
+      "author": {
+        "name": "Xiao Cui"
+      },
+      "skills": ["./skills/sgrep"]
+    }
+  ]
+}
