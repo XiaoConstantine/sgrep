@@ -201,6 +201,22 @@ Use `sgrep list` to see all indexed repositories.
 | `sgrep server start` | Manually start embedding server |
 | `sgrep server stop` | Stop embedding server |
 | `sgrep server status` | Show server status |
+| `sgrep install-claude-code` | Install Claude Code plugin |
+
+## Claude Code Integration
+
+Install the sgrep plugin for Claude Code with one command:
+
+```bash
+sgrep install-claude-code
+```
+
+This creates a plugin at `~/.claude/plugins/sgrep` that:
+- **Auto-indexes** your project when Claude Code starts
+- **Watch mode** keeps the index updated as you code
+- **Skill documentation** teaches Claude when to use sgrep vs ripgrep
+
+After installation, restart Claude Code to activate. The plugin works automatically—Claude will use sgrep for semantic searches like "how does authentication work" while using ripgrep for exact matches.
 
 ## Flags
 
