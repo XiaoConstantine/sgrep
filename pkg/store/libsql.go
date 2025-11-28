@@ -1,5 +1,5 @@
-//go:build libsql
-// +build libsql
+//go:build !sqlite_vec
+// +build !sqlite_vec
 
 package store
 

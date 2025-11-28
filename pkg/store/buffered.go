@@ -1,3 +1,6 @@
+//go:build sqlite_vec
+// +build sqlite_vec
+
 package store
 
 import (
@@ -18,15 +21,9 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-const (
-	// vec0ChunkSize is the optimal batch size for sqlite-vec.
-	// vec0 allocates chunks of 1024 vectors; batching inserts fills chunks efficiently.
-	vec0ChunkSize = 1024
-
-	// inMemoryThreshold is the max vector count for in-memory search.
-	// Above this, we use sqlite-vec's native KNN to avoid memory bloat.
-	inMemoryThreshold = 50000
-)
+// vec0ChunkSize is the optimal batch size for sqlite-vec.
+// vec0 allocates chunks of 1024 vectors; batching inserts fills chunks efficiently.
+const vec0ChunkSize = 1024
 
 // BufferedStore is a storage backend optimized for sqlite-vec's chunk architecture.
 // It buffers writes to batch 1024 vectors per chunk, and uses adaptive search

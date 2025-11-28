@@ -92,7 +92,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 
 	// Open store with adaptive search mode
-	s, err := store.OpenBuffered(indexPath)
+	s, err := store.OpenForSearch(indexPath)
 	if err != nil {
 		return fmt.Errorf("failed to open index: %w", err)
 	}
@@ -100,7 +100,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 
 	// Ensure FTS5 index exists for hybrid search
 	if hybridSearch {
-		if err := s.EnsureFTS5(); err != nil {
+		if err := store.EnsureFTS5IfNeeded(s); err != nil {
 			return fmt.Errorf("failed to initialize FTS5 for hybrid search: %w", err)
 		}
 	}
@@ -280,7 +280,7 @@ var statusCmd = &cobra.Command{
 			return nil
 		}
 
-		s, err := store.OpenInMem(indexPath)
+		s, err := store.OpenForStats(indexPath)
 		if err != nil {
 			return err
 		}

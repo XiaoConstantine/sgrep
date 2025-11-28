@@ -1,3 +1,6 @@
+//go:build sqlite_vec
+// +build sqlite_vec
+
 package store
 
 import (
@@ -320,15 +323,6 @@ func TestBufferedStore_Persistence(t *testing.T) {
 	if len(docs) != 1 {
 		t.Errorf("expected 1 result, got %d", len(docs))
 	}
-}
-
-// makeTestEmbedding creates a test embedding with consistent values
-func makeTestEmbedding(dims int, value float32) []float32 {
-	vec := make([]float32, dims)
-	for i := range vec {
-		vec[i] = value
-	}
-	return vec
 }
 
 func TestBufferedStore_LargeChunkBatch(t *testing.T) {

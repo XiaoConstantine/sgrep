@@ -1,9 +1,11 @@
+//go:build sqlite_vec
+// +build sqlite_vec
+
 package store
 
 import (
 	"context"
 	"math"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"sync"
@@ -686,24 +688,6 @@ func benchStore(b *testing.B, n int) *InMemStore {
 func benchStoreEmpty(b *testing.B) *InMemStore {
 	s, _ := OpenInMem(filepath.Join(b.TempDir(), "test.db"))
 	return s
-}
-
-func rndVec(n int) []float32 {
-	v := make([]float32, n)
-	for i := range v {
-		v[i] = rand.Float32()
-	}
-	return v
-}
-
-func itoa(n int) string {
-	if n < 0 {
-		return "-" + itoa(-n)
-	}
-	if n < 10 {
-		return string(rune('0' + n))
-	}
-	return itoa(n/10) + string(rune('0'+n%10))
 }
 
 func init() {

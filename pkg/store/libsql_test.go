@@ -1,5 +1,5 @@
-//go:build libsql
-// +build libsql
+//go:build !sqlite_vec
+// +build !sqlite_vec
 
 package store
 
@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLibSQLStore_Basic(t *testing.T) {
@@ -235,7 +236,12 @@ func TestLibSQLStore_Persistence(t *testing.T) {
 	if err := s.Store(ctx, doc); err != nil {
 		t.Fatalf("Store failed: %v", err)
 	}
-	_ = s.Close()
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	// Small delay to ensure file is released
+	time.Sleep(100 * time.Millisecond)
 
 	// Reopen and verify
 	s2, err := OpenLibSQL(dbPath)
