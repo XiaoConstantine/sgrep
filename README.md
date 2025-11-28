@@ -50,15 +50,11 @@ go install github.com/XiaoConstantine/sgrep/cmd/sgrep@latest
 git clone https://github.com/XiaoConstantine/sgrep.git
 cd sgrep
 
-# Standard build (semantic search only)
-make build
+# Default build (uses libSQL with DiskANN vector search)
+go build -o sgrep ./cmd/sgrep
 
-# Build with hybrid search support (semantic + BM25)
-make build-hybrid
-
-# Or manually:
-# go build -o sgrep ./cmd/sgrep
-# CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" go build -o sgrep ./cmd/sgrep
+# Alternative: sqlite-vec backend
+go build -tags=sqlite_vec -o sgrep ./cmd/sgrep
 ```
 
 **Requirements**: llama.cpp (for the embedding server)
@@ -177,7 +173,7 @@ All data is stored in `~/.sgrep/`:
 │   └── nomic-embed-text-v1.5.Q8_0.gguf   # Embedding model (~130MB)
 ├── repos/
 │   ├── a1b2c3/              # Hash of /path/to/repo1
-│   │   ├── index.db         # SQLite + vectors
+│   │   ├── index.db         # libSQL database with DiskANN vectors
 │   │   └── metadata.json    # Repo path, index time
 │   └── d4e5f6/              # Hash of /path/to/repo2
 │       └── ...
@@ -186,6 +182,21 @@ All data is stored in `~/.sgrep/`:
 ```
 
 Use `sgrep list` to see all indexed repositories.
+
+## Storage Backends
+
+sgrep supports two vector storage backends:
+
+| Backend | Build Command | Storage Efficiency | Best For |
+|---------|--------------|-------------------|----------|
+| **libSQL** (default) | `go build ./cmd/sgrep` | ~5-10 KB/vector | Large repos, production |
+| sqlite-vec | `go build -tags=sqlite_vec ./cmd/sgrep` | ~780 KB/vector | Development, compatibility |
+
+**libSQL advantages:**
+- Uses DiskANN for approximate nearest neighbor search
+- 93-177x more space-efficient than sqlite-vec
+- Native F32_BLOB column type for vectors
+- Compress neighbors option for index compression
 
 ## Commands
 
@@ -248,8 +259,10 @@ SGREP_DIMS=768                         # Vector dimensions
 1. **Setup**: `sgrep setup` downloads the embedding model and verifies llama-server
 2. **Indexing**: Files are chunked using AST-aware splitting (Go, TS, Python) or size-based fallback
 3. **Embedding**: Each chunk is embedded via llama.cpp (local, $0 cost, auto-started)
-4. **Storage**: Vectors stored in SQLite, loaded into memory for fast search
-5. **Search**: Query embedded → in-memory L2 search → load matching documents
+4. **Storage**: Vectors stored in libSQL with DiskANN indexing
+5. **Search**: Query embedded → DiskANN approximate nearest neighbor → load matching documents
+
+**Smart skip for large repos**: When indexing repos with >1000 files, sgrep automatically filters out test files, generated code (*.pb.go, *.generated.go), and vendored directories to speed up indexing.
 
 ## Architecture
 
@@ -260,15 +273,15 @@ SGREP_DIMS=768                         # Vector dimensions
 │  Query: "error handling"                                     │
 │         ↓                                                    │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐      │
-│  │ llama.cpp   │───▶│ In-Memory   │───▶│   SQLite    │      │
-│  │ Embedding   │    │ L2 Search   │    │  Documents  │      │
-│  │   (~15ms)   │    │   (~2ms)    │    │   (~5ms)    │      │
+│  │ llama.cpp   │───▶│  DiskANN    │───▶│   libSQL    │      │
+│  │ Embedding   │    │   Search    │    │  Documents  │      │
+│  │   (~15ms)   │    │   (~5ms)    │    │   (~5ms)    │      │
 │  └─────────────┘    └─────────────┘    └─────────────┘      │
 │       ▲                                                      │
-│       │ Auto-started by sgrep                               │
-│       │ (daemon mode, PID tracked)                          │
+│       │ Auto-started by sgrep (16 parallel slots)           │
+│       │ (daemon mode, continuous batching)                  │
 │                                                              │
-│  Total: ~30ms (vs 2800ms with sqlite-vec KNN)               │
+│  Total: ~30ms                                                │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -310,14 +323,12 @@ Benchmarked on maestro codebase (102 files, 1572 chunks, 768-dim vectors):
 | Token usage | **57% less** | baseline |
 | Attempts needed | 1 | 3-7 |
 
-**Why in-memory search?**
+**Embedding server optimization:**
 
-sqlite-vec's KNN queries are slow (~2.9s for 1.5K vectors) due to SQLite's fragmented storage. We load vectors into memory on startup and compute L2 distance in Go, achieving **88x faster** search:
-
-- Vector load: ~95ms (once on startup)
-- Embedding: ~15ms (HTTP to llama.cpp)
-- L2 search: ~2ms (in-memory)
-- Doc fetch: ~5ms (SQLite by ID)
+The llama.cpp server is configured for maximum throughput:
+- 16 parallel slots with continuous batching (`-cb`)
+- Dynamic thread count based on CPU cores
+- GPU acceleration (Metal on Mac, CUDA on Linux)
 
 ## Chunk Size Limits
 
