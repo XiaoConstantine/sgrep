@@ -585,10 +585,12 @@ func TestHybridSearch_RespectsThreshold(t *testing.T) {
 		t.Skip("FTS5 not available in this SQLite build")
 	}
 
+	// Create vectors with different directions (for cosine distance)
 	near := make([]float32, 768)
-	near[0] = 1.0
+	near[0] = 1.0 // Same direction as query
+
 	far := make([]float32, 768)
-	far[0] = 100.0
+	far[0] = -1.0 // Opposite direction (cosine distance ~2)
 
 	docs := []*Document{
 		{ID: "near", FilePath: "/near.go", Content: "authentication near", Embedding: near},
@@ -598,8 +600,10 @@ func TestHybridSearch_RespectsThreshold(t *testing.T) {
 	_ = s.EnsureFTS5()
 
 	query := make([]float32, 768)
-	// Strict threshold should only return near doc
-	results, _, err := s.HybridSearch(context.Background(), query, "authentication", 10, 5.0, 0.6, 0.4)
+	query[0] = 1.0 // Same direction as "near"
+
+	// Strict threshold (0.5) should only return near doc (cosine distance ~0)
+	results, _, err := s.HybridSearch(context.Background(), query, "authentication", 10, 0.5, 0.6, 0.4)
 	if err != nil {
 		t.Fatalf("HybridSearch failed: %v", err)
 	}
