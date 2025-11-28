@@ -1,3 +1,6 @@
+//go:build sqlite_vec
+// +build sqlite_vec
+
 package main
 
 import (

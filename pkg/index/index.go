@@ -867,9 +867,5 @@ func (idx *Indexer) shouldSmartSkip(path string) bool {
 		".svg": true, ".png": true, ".jpg": true, ".gif": true,
 		".wasm": true, ".map": true,
 	}
-	if skipExts[ext] {
-		return true
-	}
-
-	return false
+	return skipExts[ext]
 }
