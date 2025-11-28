@@ -309,9 +309,63 @@ func TestClose(t *testing.T) {
 
 // FTS5 and Hybrid Search Tests
 
+// hasFTS5 checks if FTS5 is available in the SQLite build.
+func hasFTS5(s *InMemStore) bool {
+	_, err := s.db.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS _fts5_test USING fts5(content)`)
+	if err != nil {
+		return false
+	}
+	_, _ = s.db.Exec(`DROP TABLE IF EXISTS _fts5_test`)
+	return true
+}
+
+func TestHasFTS5_ReturnsConsistently(t *testing.T) {
+	s := newStore(t)
+	defer func() { _ = s.Close() }()
+
+	// hasFTS5 should return consistent results
+	result1 := hasFTS5(s)
+	result2 := hasFTS5(s)
+	if result1 != result2 {
+		t.Error("hasFTS5 should return consistent results")
+	}
+}
+
+func TestHasFTS5_CleansUpTestTable(t *testing.T) {
+	s := newStore(t)
+	defer func() { _ = s.Close() }()
+
+	_ = hasFTS5(s)
+
+	// Verify the test table was cleaned up
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='_fts5_test'`).Scan(&count)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Error("hasFTS5 should clean up _fts5_test table")
+	}
+}
+
+func TestEnsureFTS5_GracefulDegradation(t *testing.T) {
+	s := newStore(t)
+	defer func() { _ = s.Close() }()
+
+	// EnsureFTS5 should not error even when FTS5 is unavailable
+	err := s.EnsureFTS5()
+	if err != nil {
+		t.Errorf("EnsureFTS5 should gracefully handle missing FTS5: %v", err)
+	}
+}
+
 func TestEnsureFTS5_CreatesTable(t *testing.T) {
 	s := newStore(t)
 	defer func() { _ = s.Close() }()
+
+	if !hasFTS5(s) {
+		t.Skip("FTS5 not available in this SQLite build")
+	}
 
 	// Ensure FTS5 creates the table
 	if err := s.EnsureFTS5(); err != nil {
@@ -333,6 +387,10 @@ func TestEnsureFTS5_Idempotent(t *testing.T) {
 	s := newStore(t)
 	defer func() { _ = s.Close() }()
 
+	if !hasFTS5(s) {
+		t.Skip("FTS5 not available in this SQLite build")
+	}
+
 	// Call twice - should not error
 	if err := s.EnsureFTS5(); err != nil {
 		t.Fatalf("first EnsureFTS5 failed: %v", err)
@@ -345,6 +403,10 @@ func TestEnsureFTS5_Idempotent(t *testing.T) {
 func TestEnsureFTS5_PopulatesFromExistingDocs(t *testing.T) {
 	s := newStore(t)
 	defer func() { _ = s.Close() }()
+
+	if !hasFTS5(s) {
+		t.Skip("FTS5 not available in this SQLite build")
+	}
 
 	// Store documents first
 	docs := []*Document{
@@ -375,6 +437,10 @@ func TestHybridSearch_FallbackToSemantic_NoTerms(t *testing.T) {
 	s := newStore(t)
 	defer func() { _ = s.Close() }()
 
+	if !hasFTS5(s) {
+		t.Skip("FTS5 not available in this SQLite build")
+	}
+
 	base := rndVec(768)
 	docs := []*Document{
 		{ID: "d1", FilePath: "/auth.go", Content: "authentication", Embedding: base},
@@ -398,6 +464,11 @@ func TestHybridSearch_FallbackToSemantic_NoTerms(t *testing.T) {
 func TestHybridSearch_Empty(t *testing.T) {
 	s := newStore(t)
 	defer func() { _ = s.Close() }()
+
+	if !hasFTS5(s) {
+		t.Skip("FTS5 not available in this SQLite build")
+	}
+
 	_ = s.EnsureFTS5()
 
 	results, dists, err := s.HybridSearch(context.Background(), rndVec(768), "test", 10, 5.0, 0.6, 0.4)
@@ -412,6 +483,10 @@ func TestHybridSearch_Empty(t *testing.T) {
 func TestHybridSearch_CombinesScores(t *testing.T) {
 	s := newStore(t)
 	defer func() { _ = s.Close() }()
+
+	if !hasFTS5(s) {
+		t.Skip("FTS5 not available in this SQLite build")
+	}
 
 	// Create docs with known embeddings
 	base := make([]float32, 768)
@@ -463,6 +538,10 @@ func TestHybridSearch_RespectsLimit(t *testing.T) {
 	s := newStore(t)
 	defer func() { _ = s.Close() }()
 
+	if !hasFTS5(s) {
+		t.Skip("FTS5 not available in this SQLite build")
+	}
+
 	base := rndVec(768)
 	docs := make([]*Document, 20)
 	for i := range docs {
@@ -491,6 +570,10 @@ func TestHybridSearch_RespectsLimit(t *testing.T) {
 func TestHybridSearch_RespectsThreshold(t *testing.T) {
 	s := newStore(t)
 	defer func() { _ = s.Close() }()
+
+	if !hasFTS5(s) {
+		t.Skip("FTS5 not available in this SQLite build")
+	}
 
 	near := make([]float32, 768)
 	near[0] = 1.0
@@ -521,6 +604,10 @@ func TestHybridSearch_RespectsThreshold(t *testing.T) {
 func TestHybridSearch_CustomWeights(t *testing.T) {
 	s := newStore(t)
 	defer func() { _ = s.Close() }()
+
+	if !hasFTS5(s) {
+		t.Skip("FTS5 not available in this SQLite build")
+	}
 
 	base := make([]float32, 768)
 	base[0] = 1.0

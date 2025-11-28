@@ -23,8 +23,9 @@ import (
 type InMemStore struct {
 	db        *sql.DB
 	dims      int
+	quantize  QuantizationMode
 	mu        sync.RWMutex
-	vectors   [][]float32 // All embeddings in memory
+	vectors   [][]float32 // All embeddings in memory (always float32 for search)
 	docIDs    []string    // Corresponding document IDs
 	docsCache map[string]*Document
 
@@ -33,8 +34,18 @@ type InMemStore struct {
 	partitions int
 }
 
+// InMemStoreOption configures an InMemStore.
+type InMemStoreOption func(*InMemStore)
+
+// WithInMemQuantization sets the quantization mode for persistent storage.
+func WithInMemQuantization(mode QuantizationMode) InMemStoreOption {
+	return func(s *InMemStore) {
+		s.quantize = mode
+	}
+}
+
 // OpenInMem opens a store with in-memory search capability.
-func OpenInMem(path string) (*InMemStore, error) {
+func OpenInMem(path string, opts ...InMemStoreOption) (*InMemStore, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create directory: %w", err)
@@ -61,9 +72,14 @@ func OpenInMem(path string) (*InMemStore, error) {
 	s := &InMemStore{
 		db:         db,
 		dims:       dims,
+		quantize:   QuantizeNone,
 		docsCache:  make(map[string]*Document),
 		partitions: partitions,
 		slabPool:   util.NewSlabPool(partitions, 10000, dims), // 10k docs per partition max
+	}
+
+	for _, opt := range opts {
+		opt(s)
 	}
 
 	if err := s.init(); err != nil {
@@ -93,6 +109,9 @@ func (s *InMemStore) init() error {
 		}
 	}
 
+	// Determine vector column type based on quantization mode
+	vecColDef := s.vectorColumnDef()
+
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS documents (
 			id TEXT PRIMARY KEY,
@@ -106,9 +125,9 @@ func (s *InMemStore) init() error {
 		)`,
 		fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS vec_embeddings USING vec0(
 			rowid INTEGER PRIMARY KEY,
-			embedding float[%d] distance_metric=l2,
+			%s,
 			doc_id TEXT PARTITION KEY
-		)`, s.dims),
+		)`, vecColDef),
 		`CREATE INDEX IF NOT EXISTS idx_documents_filepath ON documents(filepath)`,
 		`CREATE INDEX IF NOT EXISTS idx_documents_is_test ON documents(is_test)`,
 	}
@@ -120,6 +139,18 @@ func (s *InMemStore) init() error {
 	}
 
 	return nil
+}
+
+// vectorColumnDef returns the vec0 column definition based on quantization mode.
+func (s *InMemStore) vectorColumnDef() string {
+	switch s.quantize {
+	case QuantizeInt8:
+		return fmt.Sprintf("embedding int8[%d] distance_metric=l2", s.dims)
+	case QuantizeBinary:
+		return fmt.Sprintf("embedding bit[%d] distance_metric=hamming", s.dims)
+	default:
+		return fmt.Sprintf("embedding float[%d] distance_metric=l2", s.dims)
+	}
 }
 
 func (s *InMemStore) loadVectors() error {
@@ -136,7 +167,7 @@ func (s *InMemStore) loadVectors() error {
 			return err
 		}
 
-		vec := deserializeFloat32(blob)
+		vec := s.deserializeToFloat32(blob)
 		if vec == nil {
 			continue
 		}
@@ -148,7 +179,19 @@ func (s *InMemStore) loadVectors() error {
 	return nil
 }
 
-// deserializeFloat32 converts raw bytes back to float32 slice.
+// deserializeToFloat32 converts stored bytes back to float32 based on quantization mode.
+func (s *InMemStore) deserializeToFloat32(blob []byte) []float32 {
+	switch s.quantize {
+	case QuantizeInt8:
+		return deserializeInt8ToFloat32(blob)
+	case QuantizeBinary:
+		return deserializeBinaryToFloat32(blob, s.dims)
+	default:
+		return deserializeFloat32(blob)
+	}
+}
+
+// deserializeFloat32 converts raw float32 bytes back to float32 slice.
 func deserializeFloat32(blob []byte) []float32 {
 	if len(blob)%4 != 0 {
 		return nil
@@ -158,6 +201,30 @@ func deserializeFloat32(blob []byte) []float32 {
 	for i := 0; i < n; i++ {
 		bits := uint32(blob[i*4]) | uint32(blob[i*4+1])<<8 | uint32(blob[i*4+2])<<16 | uint32(blob[i*4+3])<<24
 		vec[i] = math.Float32frombits(bits)
+	}
+	return vec
+}
+
+// deserializeInt8ToFloat32 converts int8 bytes to float32 (scale from [-128,127] to [-1,1]).
+func deserializeInt8ToFloat32(blob []byte) []float32 {
+	vec := make([]float32, len(blob))
+	for i, b := range blob {
+		vec[i] = float32(int8(b)) / 127.0
+	}
+	return vec
+}
+
+// deserializeBinaryToFloat32 converts bit vector to float32 (-1.0 for 0, 1.0 for 1).
+func deserializeBinaryToFloat32(blob []byte, dims int) []float32 {
+	vec := make([]float32, dims)
+	for i := 0; i < dims; i++ {
+		byteIdx := i / 8
+		bitIdx := uint(7 - (i % 8))
+		if byteIdx < len(blob) && (blob[byteIdx]&(1<<bitIdx)) != 0 {
+			vec[i] = 1.0
+		} else {
+			vec[i] = -1.0
+		}
 	}
 	return vec
 }
@@ -184,14 +251,13 @@ func (s *InMemStore) Store(ctx context.Context, doc *Document) error {
 		return fmt.Errorf("failed to insert document: %w", err)
 	}
 
-	blob, err := sqlite_vec.SerializeFloat32(doc.Embedding)
+	blob, err := s.serializeEmbedding(doc.Embedding)
 	if err != nil {
 		return fmt.Errorf("failed to serialize embedding: %w", err)
 	}
 
-	_, err = tx.ExecContext(ctx,
-		`INSERT OR REPLACE INTO vec_embeddings (embedding, doc_id) VALUES (?, ?)`,
-		blob, doc.ID)
+	vecSQL := s.vectorInsertSQL()
+	_, err = tx.ExecContext(ctx, vecSQL, blob, doc.ID)
 	if err != nil {
 		return fmt.Errorf("failed to insert embedding: %w", err)
 	}
@@ -207,6 +273,31 @@ func (s *InMemStore) Store(ctx context.Context, doc *Document) error {
 	s.mu.Unlock()
 
 	return nil
+}
+
+// serializeEmbedding converts a float32 embedding to bytes based on quantization mode.
+func (s *InMemStore) serializeEmbedding(embedding []float32) ([]byte, error) {
+	switch s.quantize {
+	case QuantizeInt8:
+		int8Vec := QuantizeToInt8Unit(embedding)
+		return SerializeInt8(int8Vec), nil
+	case QuantizeBinary:
+		return QuantizeToBinary(embedding), nil
+	default:
+		return sqlite_vec.SerializeFloat32(embedding)
+	}
+}
+
+// vectorInsertSQL returns the INSERT statement with appropriate vec wrapper.
+func (s *InMemStore) vectorInsertSQL() string {
+	switch s.quantize {
+	case QuantizeInt8:
+		return `INSERT OR REPLACE INTO vec_embeddings (embedding, doc_id) VALUES (vec_int8(?), ?)`
+	case QuantizeBinary:
+		return `INSERT OR REPLACE INTO vec_embeddings (embedding, doc_id) VALUES (vec_bit(?), ?)`
+	default:
+		return `INSERT OR REPLACE INTO vec_embeddings (embedding, doc_id) VALUES (?, ?)`
+	}
 }
 
 // StoreBatch saves multiple documents.
@@ -229,8 +320,9 @@ func (s *InMemStore) StoreBatch(ctx context.Context, docs []*Document) error {
 	}
 	defer func() { _ = docStmt.Close() }()
 
-	vecStmt, err := tx.PrepareContext(ctx,
-		`INSERT OR REPLACE INTO vec_embeddings (embedding, doc_id) VALUES (?, ?)`)
+	// Use appropriate SQL wrapper for vector type
+	vecSQL := s.vectorInsertSQL()
+	vecStmt, err := tx.PrepareContext(ctx, vecSQL)
 	if err != nil {
 		return err
 	}
@@ -252,7 +344,7 @@ func (s *InMemStore) StoreBatch(ctx context.Context, docs []*Document) error {
 			return fmt.Errorf("failed to insert document %s: %w", doc.ID, err)
 		}
 
-		blob, err := sqlite_vec.SerializeFloat32(doc.Embedding)
+		blob, err := s.serializeEmbedding(doc.Embedding)
 		if err != nil {
 			return fmt.Errorf("failed to serialize embedding: %w", err)
 		}
@@ -543,6 +635,7 @@ func (s *InMemStore) Close() error {
 }
 
 // EnsureFTS5 checks if FTS5 table exists and populates it from existing documents.
+// Returns nil if FTS5 is not available (graceful degradation).
 func (s *InMemStore) EnsureFTS5() error {
 	var count int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='documents_fts'`).Scan(&count)
@@ -561,6 +654,10 @@ func (s *InMemStore) EnsureFTS5() error {
 			)
 		`)
 		if err != nil {
+			// FTS5 might not be available in some SQLite builds
+			if strings.Contains(err.Error(), "no such module: fts5") {
+				return nil // Gracefully skip FTS5
+			}
 			return fmt.Errorf("create FTS5 table: %w", err)
 		}
 
