@@ -23,8 +23,9 @@ import (
 
 // IndexConfig holds indexer configuration.
 type IndexConfig struct {
-	Workers          int // Number of parallel workers (default: 2 * NumCPU, capped at 16)
-	EmbedConcurrency int // Concurrent embedding requests per batch (default: 8)
+	Workers          int                    // Number of parallel workers (default: 2 * NumCPU, capped at 16)
+	EmbedConcurrency int                    // Concurrent embedding requests per batch (default: 8)
+	Quantization     store.QuantizationMode // Vector quantization mode (none, int8, binary)
 }
 
 // DefaultIndexConfig returns sensible defaults for indexing.
@@ -39,6 +40,7 @@ func DefaultIndexConfig() *IndexConfig {
 	return &IndexConfig{
 		Workers:          workers,
 		EmbedConcurrency: 8,
+		Quantization:     store.QuantizeInt8, // Default to int8 for 4x storage savings
 	}
 }
 
@@ -88,9 +90,9 @@ func NewWithConfig(path string, cfg *IndexConfig) (*Indexer, error) {
 		return nil, err
 	}
 
-	// Open store (use in-memory search for speed)
+	// Open store with buffered writes and adaptive search
 	dbPath := filepath.Join(repoDir, "index.db")
-	s, err := store.OpenInMem(dbPath)
+	s, err := store.OpenBuffered(dbPath, store.WithBufferedQuantization(cfg.Quantization))
 	if err != nil {
 		return nil, err
 	}
@@ -250,6 +252,11 @@ func (idx *Indexer) Index(ctx context.Context) error {
 	close(docChan)
 	// Wait for writer to finish
 	writerWg.Wait()
+
+	// Flush any remaining buffered embeddings
+	if err := store.FlushIfNeeded(ctx, idx.store); err != nil {
+		return fmt.Errorf("failed to flush embeddings: %w", err)
+	}
 
 	elapsed := time.Since(startTime)
 	fmt.Printf("\rIndexed %d files in %v (%d errors)\n",

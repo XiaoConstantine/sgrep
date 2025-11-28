@@ -30,7 +30,8 @@ var (
 	bm25Weight     float64
 
 	// Index flags
-	indexWorkers int
+	indexWorkers     int
+	indexQuantize    string
 )
 
 func Execute() error {
@@ -90,8 +91,8 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no index found. Run 'sgrep index .' first")
 	}
 
-	// Open store (use in-memory for fast search)
-	s, err := store.OpenInMem(indexPath)
+	// Open store with adaptive search mode
+	s, err := store.OpenBuffered(indexPath)
 	if err != nil {
 		return fmt.Errorf("failed to open index: %w", err)
 	}
@@ -225,6 +226,9 @@ var indexCmd = &cobra.Command{
 		if indexWorkers > 0 {
 			cfg.Workers = indexWorkers
 		}
+		if indexQuantize != "" {
+			cfg.Quantization = store.ParseQuantizationMode(indexQuantize)
+		}
 
 		ctx := context.Background()
 		indexer, err := index.NewWithConfig(path, cfg)
@@ -240,6 +244,7 @@ var indexCmd = &cobra.Command{
 func init() {
 	// Add index-specific flags
 	indexCmd.Flags().IntVar(&indexWorkers, "workers", 0, "Number of parallel workers (default: 2x CPU cores, max 16)")
+	indexCmd.Flags().StringVar(&indexQuantize, "quantize", "int8", "Quantization mode: none (4x size), int8 (1x size), binary (0.125x size)")
 }
 
 // Watch command

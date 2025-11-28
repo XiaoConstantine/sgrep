@@ -26,6 +26,19 @@ type Storer interface {
 	Close() error
 }
 
+// Flusher is an optional interface for stores that buffer writes.
+type Flusher interface {
+	Flush(ctx context.Context) error
+}
+
+// FlushIfNeeded flushes the store if it implements Flusher.
+func FlushIfNeeded(ctx context.Context, s Storer) error {
+	if f, ok := s.(Flusher); ok {
+		return f.Flush(ctx)
+	}
+	return nil
+}
+
 // Document represents an indexed code chunk.
 type Document struct {
 	ID        string
@@ -47,12 +60,23 @@ type Stats struct {
 
 // Store is the vector storage backend.
 type Store struct {
-	db   *sql.DB
-	dims int
+	db       *sql.DB
+	dims     int
+	quantize QuantizationMode
+}
+
+// StoreOption configures a Store.
+type StoreOption func(*Store)
+
+// WithQuantization sets the quantization mode for embeddings.
+func WithQuantization(mode QuantizationMode) StoreOption {
+	return func(s *Store) {
+		s.quantize = mode
+	}
 }
 
 // Open opens or creates a store at the given path.
-func Open(path string) (*Store, error) {
+func Open(path string, opts ...StoreOption) (*Store, error) {
 	// Ensure parent directory exists
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -66,7 +90,10 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	s := &Store{db: db, dims: getDims()}
+	s := &Store{db: db, dims: getDims(), quantize: QuantizeNone}
+	for _, opt := range opts {
+		opt(s)
+	}
 
 	if err := s.init(); err != nil {
 		_ = db.Close()
@@ -86,6 +113,48 @@ func getDims() int {
 	return defaultDims
 }
 
+// vectorColumnDef returns the vec0 column definition based on quantization mode.
+func (s *Store) vectorColumnDef() string {
+	switch s.quantize {
+	case QuantizeInt8:
+		return fmt.Sprintf("embedding int8[%d] distance_metric=l2", s.dims)
+	case QuantizeBinary:
+		return fmt.Sprintf("embedding bit[%d] distance_metric=hamming", s.dims)
+	default:
+		return fmt.Sprintf("embedding float[%d] distance_metric=l2", s.dims)
+	}
+}
+
+// serializeEmbedding converts a float32 embedding to bytes based on quantization mode.
+func (s *Store) serializeEmbedding(embedding []float32) ([]byte, error) {
+	switch s.quantize {
+	case QuantizeInt8:
+		int8Vec := QuantizeToInt8Unit(embedding)
+		return SerializeInt8(int8Vec), nil
+	case QuantizeBinary:
+		return QuantizeToBinary(embedding), nil
+	default:
+		return sqlite_vec.SerializeFloat32(embedding)
+	}
+}
+
+// QuantizationMode returns the current quantization mode.
+func (s *Store) QuantizationMode() QuantizationMode {
+	return s.quantize
+}
+
+// vectorInsertSQL returns the INSERT statement with appropriate vec wrapper.
+func (s *Store) vectorInsertSQL() string {
+	switch s.quantize {
+	case QuantizeInt8:
+		return `INSERT OR REPLACE INTO vec_embeddings (embedding, doc_id) VALUES (vec_int8(?), ?)`
+	case QuantizeBinary:
+		return `INSERT OR REPLACE INTO vec_embeddings (embedding, doc_id) VALUES (vec_bit(?), ?)`
+	default:
+		return `INSERT OR REPLACE INTO vec_embeddings (embedding, doc_id) VALUES (?, ?)`
+	}
+}
+
 func (s *Store) init() error {
 	// Performance PRAGMAs - critical for sqlite-vec performance
 	pragmas := []string{
@@ -102,6 +171,9 @@ func (s *Store) init() error {
 		}
 	}
 
+	// Determine vector column type based on quantization mode
+	vecColDef := s.vectorColumnDef()
+
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS documents (
 			id TEXT PRIMARY KEY,
@@ -115,9 +187,9 @@ func (s *Store) init() error {
 		)`,
 		fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS vec_embeddings USING vec0(
 			rowid INTEGER PRIMARY KEY,
-			embedding float[%d] distance_metric=l2,
+			%s,
 			doc_id TEXT PARTITION KEY
-		)`, s.dims),
+		)`, vecColDef),
 		`CREATE INDEX IF NOT EXISTS idx_documents_filepath ON documents(filepath)`,
 		`CREATE INDEX IF NOT EXISTS idx_documents_is_test ON documents(is_test)`,
 		`CREATE TABLE IF NOT EXISTS metadata (
@@ -254,15 +326,14 @@ func (s *Store) Store(ctx context.Context, doc *Document) error {
 		return fmt.Errorf("failed to insert document: %w", err)
 	}
 
-	// Insert embedding
-	blob, err := sqlite_vec.SerializeFloat32(doc.Embedding)
+	// Insert embedding using quantization-aware serialization
+	blob, err := s.serializeEmbedding(doc.Embedding)
 	if err != nil {
 		return fmt.Errorf("failed to serialize embedding: %w", err)
 	}
 
-	_, err = tx.ExecContext(ctx,
-		`INSERT OR REPLACE INTO vec_embeddings (embedding, doc_id) VALUES (?, ?)`,
-		blob, doc.ID)
+	vecSQL := s.vectorInsertSQL()
+	_, err = tx.ExecContext(ctx, vecSQL, blob, doc.ID)
 	if err != nil {
 		return fmt.Errorf("failed to insert embedding: %w", err)
 	}
@@ -290,8 +361,8 @@ func (s *Store) StoreBatch(ctx context.Context, docs []*Document) error {
 	}
 	defer func() { _ = docStmt.Close() }()
 
-	vecStmt, err := tx.PrepareContext(ctx,
-		`INSERT OR REPLACE INTO vec_embeddings (embedding, doc_id) VALUES (?, ?)`)
+	vecSQL := s.vectorInsertSQL()
+	vecStmt, err := tx.PrepareContext(ctx, vecSQL)
 	if err != nil {
 		return err
 	}
@@ -310,7 +381,7 @@ func (s *Store) StoreBatch(ctx context.Context, docs []*Document) error {
 			return fmt.Errorf("failed to insert document %s: %w", doc.ID, err)
 		}
 
-		blob, err := sqlite_vec.SerializeFloat32(doc.Embedding)
+		blob, err := s.serializeEmbedding(doc.Embedding)
 		if err != nil {
 			return fmt.Errorf("failed to serialize embedding: %w", err)
 		}
@@ -327,7 +398,7 @@ func (s *Store) StoreBatch(ctx context.Context, docs []*Document) error {
 // Search finds similar documents to the query embedding.
 // Uses two-phase search: KNN first, then load documents.
 func (s *Store) Search(ctx context.Context, embedding []float32, limit int, threshold float64) ([]*Document, []float64, error) {
-	blob, err := sqlite_vec.SerializeFloat32(embedding)
+	blob, err := s.serializeEmbedding(embedding)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -473,7 +544,7 @@ func (s *Store) Stats(ctx context.Context) (*Stats, error) {
 // HybridSearch combines semantic (vector) search with lexical (BM25) search.
 // It fetches candidates from both sources and combines scores using weights.
 func (s *Store) HybridSearch(ctx context.Context, embedding []float32, queryTerms string, limit int, threshold float64, semanticWeight, bm25Weight float64) ([]*Document, []float64, error) {
-	blob, err := sqlite_vec.SerializeFloat32(embedding)
+	blob, err := s.serializeEmbedding(embedding)
 	if err != nil {
 		return nil, nil, err
 	}
