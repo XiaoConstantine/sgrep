@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -41,7 +40,6 @@ type BufferedStore struct {
 	// Write buffer for batching vec0 inserts
 	writeMu     sync.Mutex
 	writeBuffer []bufferedDoc
-	pendingDocs []*Document // Documents waiting for their embeddings to be flushed
 
 	// Search mode
 	searchMode  searchModeType
@@ -1036,16 +1034,4 @@ func (s *BufferedStore) Close() error {
 	return s.db.Close()
 }
 
-// Helper to deserialize float32 from bytes
-func deserializeFloat32Buffered(blob []byte) []float32 {
-	if len(blob)%4 != 0 {
-		return nil
-	}
-	n := len(blob) / 4
-	vec := make([]float32, n)
-	for i := 0; i < n; i++ {
-		bits := uint32(blob[i*4]) | uint32(blob[i*4+1])<<8 | uint32(blob[i*4+2])<<16 | uint32(blob[i*4+3])<<24
-		vec[i] = math.Float32frombits(bits)
-	}
-	return vec
-}
+

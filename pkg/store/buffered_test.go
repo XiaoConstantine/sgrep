@@ -16,7 +16,7 @@ func TestBufferedStore_Basic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenBuffered failed: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	// Store a document
 	ctx := context.Background()
@@ -63,7 +63,7 @@ func TestBufferedStore_BatchFlush(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenBuffered failed: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	ctx := context.Background()
 
@@ -118,7 +118,7 @@ func TestBufferedStore_SearchModes(t *testing.T) {
 	if s.SearchMode() != "in-memory" {
 		t.Errorf("expected in-memory mode, got %s", s.SearchMode())
 	}
-	s.Close()
+	_ = s.Close()
 
 	// Test sqlite mode
 	s2, err := OpenBuffered(dbPath, WithSearchMode(searchModeSQLite))
@@ -129,7 +129,7 @@ func TestBufferedStore_SearchModes(t *testing.T) {
 	if s2.SearchMode() != "sqlite-vec" {
 		t.Errorf("expected sqlite-vec mode, got %s", s2.SearchMode())
 	}
-	s2.Close()
+	_ = s2.Close()
 }
 
 func TestBufferedStore_Quantization(t *testing.T) {
@@ -153,7 +153,7 @@ func TestBufferedStore_Quantization(t *testing.T) {
 			if err != nil {
 				t.Fatalf("OpenBuffered failed: %v", err)
 			}
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 
 			ctx := context.Background()
 			doc := &Document{
@@ -194,7 +194,7 @@ func TestBufferedStore_DeleteByPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenBuffered failed: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	ctx := context.Background()
 
@@ -232,7 +232,7 @@ func TestBufferedStore_Stats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenBuffered failed: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	ctx := context.Background()
 
@@ -298,14 +298,14 @@ func TestBufferedStore_Persistence(t *testing.T) {
 		t.Fatalf("Flush failed: %v", err)
 	}
 
-	s.Close()
+	_ = s.Close()
 
 	// Reopen and verify data persisted
 	s2, err := OpenBuffered(dbPath)
 	if err != nil {
 		t.Fatalf("Reopen failed: %v", err)
 	}
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 
 	if s2.VectorCount() != 1 {
 		t.Errorf("expected 1 vector after reopen, got %d", s2.VectorCount())
@@ -343,7 +343,7 @@ func TestBufferedStore_LargeChunkBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenBuffered failed: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	ctx := context.Background()
 
