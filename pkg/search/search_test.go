@@ -408,8 +408,8 @@ func TestDefaultSearchOptions(t *testing.T) {
 	if opts.Limit != 10 {
 		t.Errorf("expected Limit 10, got %d", opts.Limit)
 	}
-	if opts.Threshold != 1.5 {
-		t.Errorf("expected Threshold 1.5, got %f", opts.Threshold)
+	if opts.Threshold != 0.65 {
+		t.Errorf("expected Threshold 0.65, got %f", opts.Threshold)
 	}
 	if opts.IncludeTests != false {
 		t.Error("expected IncludeTests false")
@@ -417,7 +417,7 @@ func TestDefaultSearchOptions(t *testing.T) {
 	if opts.Deduplicate != true {
 		t.Error("expected Deduplicate true")
 	}
-	if opts.BoostImpl != 0.85 {
+	if opts.BoostImpl != 0.92 {
 		t.Errorf("expected BoostImpl 0.85, got %f", opts.BoostImpl)
 	}
 }

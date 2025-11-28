@@ -254,7 +254,10 @@ func (s *InMemStore) Store(ctx context.Context, doc *Document) error {
 		return fmt.Errorf("failed to insert document: %w", err)
 	}
 
-	blob, err := s.serializeEmbedding(doc.Embedding)
+	// Normalize embedding for fast cosine distance via dot product
+	normalizedEmb := util.NormalizeVectorCopy(doc.Embedding)
+
+	blob, err := s.serializeEmbedding(normalizedEmb)
 	if err != nil {
 		return fmt.Errorf("failed to serialize embedding: %w", err)
 	}
@@ -269,10 +272,10 @@ func (s *InMemStore) Store(ctx context.Context, doc *Document) error {
 		return err
 	}
 
-	// Update in-memory cache
+	// Update in-memory cache with normalized vector
 	s.mu.Lock()
 	s.docIDs = append(s.docIDs, doc.ID)
-	s.vectors = append(s.vectors, doc.Embedding)
+	s.vectors = append(s.vectors, normalizedEmb)
 	s.mu.Unlock()
 
 	return nil
@@ -347,7 +350,10 @@ func (s *InMemStore) StoreBatch(ctx context.Context, docs []*Document) error {
 			return fmt.Errorf("failed to insert document %s: %w", doc.ID, err)
 		}
 
-		blob, err := s.serializeEmbedding(doc.Embedding)
+		// Normalize embedding for fast cosine distance via dot product
+		normalizedEmb := util.NormalizeVectorCopy(doc.Embedding)
+
+		blob, err := s.serializeEmbedding(normalizedEmb)
 		if err != nil {
 			return fmt.Errorf("failed to serialize embedding: %w", err)
 		}
@@ -358,7 +364,7 @@ func (s *InMemStore) StoreBatch(ctx context.Context, docs []*Document) error {
 		}
 
 		newIDs = append(newIDs, doc.ID)
-		newVecs = append(newVecs, doc.Embedding)
+		newVecs = append(newVecs, normalizedEmb)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -386,7 +392,7 @@ type partialResult struct {
 	results   []searchResult
 }
 
-// Search finds similar documents using parallel partitioned in-memory L2 search.
+// Search finds similar documents using parallel partitioned in-memory search.
 // Uses fzf-inspired patterns: pre-allocated slabs, partitioned parallelism.
 func (s *InMemStore) Search(ctx context.Context, embedding []float32, limit int, threshold float64) ([]*Document, []float64, error) {
 	s.mu.RLock()
@@ -399,13 +405,16 @@ func (s *InMemStore) Search(ctx context.Context, embedding []float32, limit int,
 		return nil, nil, nil
 	}
 
+	// Normalize query for dot product distance (stored vectors are pre-normalized)
+	queryNorm := util.NormalizeVectorCopy(embedding)
+
 	// For small datasets, use simple sequential search
 	if n < 1000 {
-		return s.searchSequential(ctx, embedding, vectors, docIDs, limit, threshold)
+		return s.searchSequential(ctx, queryNorm, vectors, docIDs, limit, threshold)
 	}
 
 	// Parallel partitioned search for larger datasets
-	return s.searchParallel(ctx, embedding, vectors, docIDs, limit, threshold)
+	return s.searchParallel(ctx, queryNorm, vectors, docIDs, limit, threshold)
 }
 
 // searchSequential is the simple path for small datasets.
@@ -417,8 +426,8 @@ func (s *InMemStore) searchSequential(ctx context.Context, embedding []float32, 
 	distances := make([]float64, n)
 	indices := make([]int, n)
 
-	// Compute all distances
-	util.L2DistanceBatch(embedding, vectors, distances)
+	// Fast dot product distance (both query and stored vectors are pre-normalized)
+	util.DotProductDistanceBatch(embedding, vectors, distances)
 
 	// Get top-k indices
 	topK := util.TopKIndices(distances, indices, limit*2) // Get more than needed for threshold filter
@@ -480,8 +489,8 @@ func (s *InMemStore) searchParallel(ctx context.Context, embedding []float32, ve
 			partitionSize := end - start
 			distances := slab.Distances(partitionSize)
 
-			// Compute distances for this partition
-			util.L2DistanceBatch(embedding, vectors[start:end], distances)
+			// Fast dot product distance (both query and stored vectors are pre-normalized)
+			util.DotProductDistanceBatch(embedding, vectors[start:end], distances)
 
 			// Collect results under threshold
 			var results []searchResult

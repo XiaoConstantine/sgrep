@@ -93,6 +93,68 @@ func TestSlabPool_Get(t *testing.T) {
 	}
 }
 
+func TestCosineDistance(t *testing.T) {
+	tests := []struct {
+		name     string
+		a        []float32
+		b        []float32
+		expected float64
+	}{
+		{
+			name:     "identical vectors",
+			a:        []float32{1, 0, 0},
+			b:        []float32{1, 0, 0},
+			expected: 0.0,
+		},
+		{
+			name:     "orthogonal vectors",
+			a:        []float32{1, 0, 0},
+			b:        []float32{0, 1, 0},
+			expected: 1.0,
+		},
+		{
+			name:     "opposite vectors",
+			a:        []float32{1, 0, 0},
+			b:        []float32{-1, 0, 0},
+			expected: 2.0,
+		},
+		{
+			name:     "similar vectors",
+			a:        []float32{1, 1, 0},
+			b:        []float32{1, 0, 0},
+			expected: 1.0 - 1.0/1.4142135623730951, // 1 - 1/sqrt(2)
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CosineDistance(tt.a, tt.b)
+			if math.Abs(got-tt.expected) > 1e-6 {
+				t.Errorf("CosineDistance() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestCosineDistanceBatch(t *testing.T) {
+	query := []float32{1, 0, 0}
+	vectors := [][]float32{
+		{1, 0, 0},  // identical
+		{0, 1, 0},  // orthogonal
+		{-1, 0, 0}, // opposite
+	}
+	distances := make([]float64, 3)
+
+	CosineDistanceBatch(query, vectors, distances)
+
+	expected := []float64{0.0, 1.0, 2.0}
+	for i, exp := range expected {
+		if math.Abs(distances[i]-exp) > 1e-6 {
+			t.Errorf("CosineDistanceBatch[%d] = %v, want %v", i, distances[i], exp)
+		}
+	}
+}
+
 func TestL2DistanceSlab(t *testing.T) {
 	tests := []struct {
 		name     string

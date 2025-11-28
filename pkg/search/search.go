@@ -39,10 +39,10 @@ type SearchOptions struct {
 func DefaultSearchOptions() SearchOptions {
 	return SearchOptions{
 		Limit:          10,
-		Threshold:      1.5,
+		Threshold:      0.65, // Cosine distance threshold (0 = identical, 2 = opposite)
 		IncludeTests:   false,
 		Deduplicate:    true,
-		BoostImpl:      0.85, // Implementation files get 15% score boost (lower L2 = better)
+		BoostImpl:      0.92, // Implementation files get 8% score boost (lower distance = better)
 		UseHybrid:      false,
 		SemanticWeight: 0.6,
 		BM25Weight:     0.4,

@@ -1,0 +1,143 @@
+{
+  "name": "sgrep-core-eval",
+  "description": "Core evaluation dataset for sgrep semantic code search quality",
+  "corpus": "maestro",
+  "corpus_hash": "",
+  "queries": [
+    {
+      "query": "embedding generation",
+      "category": "conceptual",
+      "judgments": [
+        {"file": "multi_vector_embedding.go", "rel": 2},
+        {"file": "embedding_router.go", "rel": 2},
+        {"file": "embedding_cache.go", "rel": 2},
+        {"file": "embedding_options.go", "rel": 1}
+      ],
+      "grep_patterns": ["embedding", "Embedding", "embed", "vector"]
+    },
+    {
+      "query": "validate code reviews",
+      "category": "conceptual",
+      "judgments": [
+        {"file": "review_processor.go", "rel": 2},
+        {"file": "review.go", "rel": 2},
+        {"file": "consensus_validation_processor.go", "rel": 2},
+        {"file": "enhanced_review_processor.go", "rel": 1}
+      ],
+      "grep_patterns": ["review", "Review", "validate", "Validate", "validation"]
+    },
+    {
+      "query": "fetch pull request from github",
+      "category": "api",
+      "judgments": [
+        {"file": "github_tool.go", "rel": 2},
+        {"file": "review.go", "rel": 1}
+      ],
+      "grep_patterns": ["github", "GitHub", "pull", "PR", "fetch", "request"]
+    },
+    {
+      "query": "store and retrieve vectors",
+      "category": "conceptual",
+      "judgments": [
+        {"file": "rag.go", "rel": 2},
+        {"file": "embedding_router.go", "rel": 1},
+        {"file": "enhanced_memory_manager.go", "rel": 1}
+      ],
+      "grep_patterns": ["vector", "Vector", "store", "Store", "retrieve", "embedding"]
+    },
+    {
+      "query": "parse go source code into functions",
+      "category": "api",
+      "judgments": [
+        {"file": "chunk.go", "rel": 2},
+        {"file": "context_extractor.go", "rel": 2}
+      ],
+      "grep_patterns": ["parse", "Parse", "chunk", "Chunk", "function", "ast", "go/parser"]
+    },
+    {
+      "query": "coordinate multiple ai agents",
+      "category": "conceptual",
+      "judgments": [
+        {"file": "agentic_orchestrator.go", "rel": 2},
+        {"file": "agent_spawner.go", "rel": 2},
+        {"file": "unified_react_agent.go", "rel": 2},
+        {"file": "search_planner.go", "rel": 1}
+      ],
+      "grep_patterns": ["agent", "Agent", "orchestrat", "spawn", "coordinate"]
+    },
+    {
+      "query": "manage claude sessions",
+      "category": "api",
+      "judgments": [
+        {"file": "claude_session_manager.go", "rel": 2},
+        {"file": "claude_coordinator.go", "rel": 2}
+      ],
+      "grep_patterns": ["claude", "Claude", "session", "Session", "manage"]
+    },
+    {
+      "query": "calculate text similarity",
+      "category": "conceptual",
+      "judgments": [
+        {"file": "similarity_utils.go", "rel": 2},
+        {"file": "result_aggregator.go", "rel": 2},
+        {"file": "multi_vector_embedding.go", "rel": 1},
+        {"file": "evaluation_metrics.go", "rel": 1}
+      ],
+      "grep_patterns": ["similar", "Similar", "distance", "cosine", "text"]
+    },
+    {
+      "query": "process review comments",
+      "category": "conceptual",
+      "judgments": [
+        {"file": "comment_processor.go", "rel": 2},
+        {"file": "comment_refinement_processor.go", "rel": 2},
+        {"file": "review.go", "rel": 1},
+        {"file": "review_processor.go", "rel": 1}
+      ],
+      "grep_patterns": ["comment", "Comment", "review", "process", "Process"]
+    },
+    {
+      "query": "search code semantically",
+      "category": "conceptual",
+      "judgments": [
+        {"file": "search_agent.go", "rel": 2},
+        {"file": "simple_search.go", "rel": 2},
+        {"file": "rag.go", "rel": 2},
+        {"file": "indexer.go", "rel": 1}
+      ],
+      "grep_patterns": ["search", "Search", "semantic", "query", "find"]
+    },
+    {
+      "query": "error handling",
+      "category": "edge_case",
+      "judgments": [],
+      "grep_patterns": ["error", "Error", "err", "handle", "Handle"]
+    },
+    {
+      "query": "auth",
+      "category": "edge_case",
+      "judgments": [],
+      "grep_patterns": ["auth", "Auth", "token", "Token"]
+    },
+    {
+      "query": "How does the caching work?",
+      "category": "conceptual",
+      "judgments": [
+        {"file": "embedding_cache.go", "rel": 2}
+      ],
+      "grep_patterns": ["cache", "Cache", "ttl", "expire"]
+    },
+    {
+      "query": "rate limiting implementation",
+      "category": "architecture",
+      "judgments": [],
+      "grep_patterns": ["rate", "limit", "throttle", "RateLimit"]
+    },
+    {
+      "query": "configure logging settings",
+      "category": "api",
+      "judgments": [],
+      "grep_patterns": ["log", "Log", "logger", "Logger", "config"]
+    }
+  ]
+}

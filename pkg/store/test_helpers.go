@@ -23,7 +23,7 @@ func itoa(n int) string {
 }
 
 // rndVec generates a random vector of size n.
-func rndVec(n int) []float32 {
+func rndVec(n int) []float32 { //nolint:unused // Reserved for test use
 	v := make([]float32, n)
 	for i := range v {
 		v[i] = rand.Float32()

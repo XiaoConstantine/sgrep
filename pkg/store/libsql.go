@@ -324,7 +324,9 @@ func (s *LibSQLStore) Store(ctx context.Context, doc *Document) error {
 		isTest = 1
 	}
 
-	vecStr := formatVectorString(doc.Embedding)
+	// Normalize embedding for fast cosine distance via dot product
+	normalizedEmb := util.NormalizeVectorCopy(doc.Embedding)
+	vecStr := formatVectorString(normalizedEmb)
 
 	_, err := s.db.ExecContext(ctx,
 		`INSERT OR REPLACE INTO documents (id, filepath, content, start_line, end_line, metadata, is_test, embedding)
@@ -336,12 +338,12 @@ func (s *LibSQLStore) Store(ctx context.Context, doc *Document) error {
 
 	atomic.AddInt64(&s.vectorCount, 1)
 
-	// Update in-memory cache if using it
+	// Update in-memory cache if using it (store normalized vector)
 	count := atomic.LoadInt64(&s.vectorCount)
 	if count < inMemoryThreshold {
 		s.memMu.Lock()
 		s.docIDs = append(s.docIDs, doc.ID)
-		s.vectors = append(s.vectors, doc.Embedding)
+		s.vectors = append(s.vectors, normalizedEmb)
 		s.memMu.Unlock()
 	}
 
@@ -374,7 +376,9 @@ func (s *LibSQLStore) StoreBatch(ctx context.Context, docs []*Document) error {
 		if doc.IsTest {
 			isTest = 1
 		}
-		vecStr := formatVectorString(doc.Embedding)
+		// Normalize embedding for fast cosine distance via dot product
+		normalizedEmb := util.NormalizeVectorCopy(doc.Embedding)
+		vecStr := formatVectorString(normalizedEmb)
 
 		_, err = stmt.ExecContext(ctx, doc.ID, doc.FilePath, doc.Content, doc.StartLine, doc.EndLine, string(metadata), isTest, vecStr)
 		if err != nil {
@@ -401,13 +405,16 @@ func (s *LibSQLStore) StoreBatch(ctx context.Context, docs []*Document) error {
 func (s *LibSQLStore) Search(ctx context.Context, embedding []float32, limit int, threshold float64) ([]*Document, []float64, error) {
 	count := atomic.LoadInt64(&s.vectorCount)
 
+	// Normalize query for dot product distance (stored vectors are pre-normalized)
+	queryNorm := util.NormalizeVectorCopy(embedding)
+
 	// Use in-memory search for small datasets
 	if count < inMemoryThreshold && count > 0 {
-		return s.searchInMemory(ctx, embedding, limit, threshold)
+		return s.searchInMemory(ctx, queryNorm, limit, threshold)
 	}
 
 	// Use libSQL's vector_top_k with DiskANN index
-	return s.searchWithIndex(ctx, embedding, limit, threshold)
+	return s.searchWithIndex(ctx, queryNorm, limit, threshold)
 }
 
 func (s *LibSQLStore) searchInMemory(ctx context.Context, embedding []float32, limit int, threshold float64) ([]*Document, []float64, error) {
@@ -421,9 +428,9 @@ func (s *LibSQLStore) searchInMemory(ctx context.Context, embedding []float32, l
 		return nil, nil, nil
 	}
 
-	// Calculate distances
+	// Fast dot product distance (both query and stored vectors are pre-normalized)
 	distances := make([]float64, n)
-	util.L2DistanceBatch(embedding, vectors, distances)
+	util.DotProductDistanceBatch(embedding, vectors, distances)
 
 	// Collect results under threshold
 	var results []searchResultItem

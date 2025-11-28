@@ -330,11 +330,14 @@ func (s *BufferedStore) Store(ctx context.Context, doc *Document) error {
 		return fmt.Errorf("failed to insert document: %w", err)
 	}
 
-	// Buffer the embedding
+	// Normalize embedding for fast cosine distance via dot product
+	normalizedEmb := util.NormalizeVectorCopy(doc.Embedding)
+
+	// Buffer the normalized embedding
 	s.writeMu.Lock()
 	s.writeBuffer = append(s.writeBuffer, bufferedDoc{
 		docID:     doc.ID,
-		embedding: doc.Embedding,
+		embedding: normalizedEmb,
 	})
 
 	// Flush if buffer is full
@@ -387,12 +390,14 @@ func (s *BufferedStore) StoreBatch(ctx context.Context, docs []*Document) error 
 		return err
 	}
 
-	// Buffer embeddings
+	// Buffer normalized embeddings
 	s.writeMu.Lock()
 	for _, doc := range docs {
+		// Normalize embedding for fast cosine distance via dot product
+		normalizedEmb := util.NormalizeVectorCopy(doc.Embedding)
 		s.writeBuffer = append(s.writeBuffer, bufferedDoc{
 			docID:     doc.ID,
-			embedding: doc.Embedding,
+			embedding: normalizedEmb,
 		})
 	}
 
@@ -522,13 +527,16 @@ func (s *BufferedStore) Search(ctx context.Context, embedding []float32, limit i
 		return nil, nil, err
 	}
 
+	// Normalize query for dot product distance (stored vectors are pre-normalized)
+	queryNorm := util.NormalizeVectorCopy(embedding)
+
 	if s.searchMode == searchModeInMemory {
-		return s.searchInMemory(ctx, embedding, limit, threshold)
+		return s.searchInMemory(ctx, queryNorm, limit, threshold)
 	}
-	return s.searchSQLite(ctx, embedding, limit, threshold)
+	return s.searchSQLite(ctx, queryNorm, limit, threshold)
 }
 
-// searchInMemory performs brute-force L2 search on in-memory vectors.
+// searchInMemory performs brute-force dot product search on pre-normalized in-memory vectors.
 func (s *BufferedStore) searchInMemory(ctx context.Context, embedding []float32, limit int, threshold float64) ([]*Document, []float64, error) {
 	s.memMu.RLock()
 	vectors := s.vectors
@@ -540,9 +548,9 @@ func (s *BufferedStore) searchInMemory(ctx context.Context, embedding []float32,
 		return nil, nil, nil
 	}
 
-	// Compute distances
+	// Fast dot product distance (both query and stored vectors are pre-normalized)
 	distances := make([]float64, n)
-	util.L2DistanceBatch(embedding, vectors, distances)
+	util.DotProductDistanceBatch(embedding, vectors, distances)
 
 	// Find top-k
 	var results []inMemResult

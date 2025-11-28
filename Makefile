@@ -1,4 +1,5 @@
-.PHONY: build build-hybrid test test-short test-hybrid clean install
+.PHONY: build build-hybrid test test-short test-hybrid clean install \
+	bench bench-quick bench-baseline bench-compare bench-profile bench-quality build-bench
 
 # Default build (semantic search only)
 build:
@@ -39,3 +40,33 @@ install:
 # Install with hybrid search support
 install-hybrid:
 	CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" go install ./cmd/sgrep
+
+# ============ Benchmarks ============
+
+# Run performance benchmarks
+bench:
+	go test ./... -run=^$$ -bench=. -benchmem -tags=sqlite_vec 2>&1 | tee bench.log
+
+# Run quick benchmarks (skip large tests)
+bench-quick:
+	go test ./... -run=^$$ -bench=. -benchmem -tags=sqlite_vec -short
+
+# Run benchmarks and save as baseline
+bench-baseline:
+	./scripts/perf_bench.sh --save
+
+# Run benchmarks and compare to baseline
+bench-compare:
+	./scripts/perf_bench.sh
+
+# Run benchmarks with CPU/memory profiling
+bench-profile:
+	./scripts/perf_bench.sh --profile
+
+# Run quality evaluation
+bench-quality:
+	go run ./cmd/sgrep-bench quality -codebase . -dataset bench/quality/dataset.json
+
+# Build benchmark CLI
+build-bench:
+	go build -o sgrep-bench ./cmd/sgrep-bench

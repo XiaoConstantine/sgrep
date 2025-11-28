@@ -22,42 +22,41 @@ const (
 )
 
 func BenchmarkVectorOperations(b *testing.B) {
-	b.Run("L2Distance_768dims", func(b *testing.B) {
-		a := randomVec(benchDims)
-		b2 := randomVec(benchDims)
-		scratch := make([]float32, benchDims)
+	b.Run("DotProductDistance_768dims", func(b *testing.B) {
+		a := util.NormalizeVectorCopy(randomVec(benchDims))
+		b2 := util.NormalizeVectorCopy(randomVec(benchDims))
 
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			util.L2DistanceSlab(a, b2, scratch)
+			util.DotProductDistance(a, b2)
 		}
 	})
 
-	b.Run("L2DistanceBatch_1000_768dims", func(b *testing.B) {
-		query := randomVec(benchDims)
+	b.Run("DotProductDistanceBatch_1000_768dims", func(b *testing.B) {
+		query := util.NormalizeVectorCopy(randomVec(benchDims))
 		vectors := make([][]float32, 1000)
 		for i := range vectors {
-			vectors[i] = randomVec(benchDims)
+			vectors[i] = util.NormalizeVectorCopy(randomVec(benchDims))
 		}
 		distances := make([]float64, 1000)
 
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			util.L2DistanceBatch(query, vectors, distances)
+			util.DotProductDistanceBatch(query, vectors, distances)
 		}
 	})
 
-	b.Run("L2DistanceBatch_10000_768dims", func(b *testing.B) {
-		query := randomVec(benchDims)
+	b.Run("DotProductDistanceBatch_10000_768dims", func(b *testing.B) {
+		query := util.NormalizeVectorCopy(randomVec(benchDims))
 		vectors := make([][]float32, 10000)
 		for i := range vectors {
-			vectors[i] = randomVec(benchDims)
+			vectors[i] = util.NormalizeVectorCopy(randomVec(benchDims))
 		}
 		distances := make([]float64, 10000)
 
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			util.L2DistanceBatch(query, vectors, distances)
+			util.DotProductDistanceBatch(query, vectors, distances)
 		}
 	})
 
