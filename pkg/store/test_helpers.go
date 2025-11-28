@@ -1,7 +1,6 @@
-//go:build !sqlite_vec
-// +build !sqlite_vec
-
 package store
+
+import "math/rand"
 
 // makeTestEmbedding creates a test embedding with consistent values.
 func makeTestEmbedding(dims int, value float32) []float32 {
@@ -21,4 +20,13 @@ func itoa(n int) string {
 		return string(rune('0' + n))
 	}
 	return itoa(n/10) + string(rune('0'+n%10))
+}
+
+// rndVec generates a random vector of size n.
+func rndVec(n int) []float32 {
+	v := make([]float32, n)
+	for i := range v {
+		v[i] = rand.Float32()
+	}
+	return v
 }
