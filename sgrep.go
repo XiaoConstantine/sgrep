@@ -41,15 +41,15 @@ type Client struct {
 
 // Options configures the sgrep client.
 type Options struct {
-	// Threshold is the similarity threshold (L2 distance). Lower is more similar.
-	// Default: 1.5
+	// Threshold is the similarity threshold (cosine distance, range 0-2).
+	// 0 = identical, 2 = opposite. Default: 0.65
 	Threshold float64
 }
 
 // DefaultOptions returns sensible defaults.
 func DefaultOptions() Options {
 	return Options{
-		Threshold: 1.5,
+		Threshold: 0.65,
 	}
 }
 
@@ -75,11 +75,11 @@ func (c *Client) Index(ctx context.Context) error {
 // Search finds code matching the semantic query.
 // Returns up to limit results sorted by relevance.
 func (c *Client) Search(ctx context.Context, query string, limit int) ([]Result, error) {
-	return c.SearchWithThreshold(ctx, query, limit, 1.5)
+	return c.SearchWithThreshold(ctx, query, limit, 0.65)
 }
 
 // SearchWithThreshold finds code with a custom similarity threshold.
-// Lower threshold means more similar matches.
+// Uses cosine distance (0 = identical, 2 = opposite). Lower threshold = stricter matching.
 func (c *Client) SearchWithThreshold(ctx context.Context, query string, limit int, threshold float64) ([]Result, error) {
 	if c.searcher == nil {
 		s, err := c.indexer.Store()

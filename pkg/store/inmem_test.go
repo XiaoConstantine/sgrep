@@ -149,18 +149,26 @@ func TestSearch_Threshold(t *testing.T) {
 	s := newStore(t)
 	defer func() { _ = s.Close() }()
 
+	// Create vectors with different directions (for cosine distance)
+	// near: points in same direction as query (cosine distance ~0)
 	near := make([]float32, 768)
 	near[0] = 1.0
+
+	// far: points in opposite direction (cosine distance ~2)
 	far := make([]float32, 768)
-	far[0] = 100.0
+	far[0] = -1.0
 
 	_ = s.Store(context.Background(), &Document{ID: "near", FilePath: "/f", Content: "x", Embedding: near})
 	_ = s.Store(context.Background(), &Document{ID: "far", FilePath: "/f", Content: "x", Embedding: far})
 
+	// Query in same direction as "near"
 	query := make([]float32, 768)
-	results, _, _ := s.Search(context.Background(), query, 10, 5.0)
+	query[0] = 1.0
+
+	// Threshold 0.5 should only match "near" (cosine distance ~0), not "far" (cosine distance ~2)
+	results, _, _ := s.Search(context.Background(), query, 10, 0.5)
 	if len(results) != 1 || results[0].ID != "near" {
-		t.Error("threshold not working")
+		t.Errorf("threshold not working: got %d results", len(results))
 	}
 }
 
