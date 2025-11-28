@@ -26,7 +26,11 @@ type IndexConfig struct {
 	Workers          int                    // Number of parallel workers (default: 2 * NumCPU, capped at 16)
 	EmbedConcurrency int                    // Concurrent embedding requests per batch (default: 8)
 	Quantization     store.QuantizationMode // Vector quantization mode (none, int8, binary)
+	SmartSkip        bool                   // Enable smart skipping for large repos (default: true)
 }
+
+// Large repo threshold - above this we enable smart skipping
+const largeRepoThreshold = 1000
 
 // DefaultIndexConfig returns sensible defaults for indexing.
 func DefaultIndexConfig() *IndexConfig {
@@ -34,13 +38,24 @@ func DefaultIndexConfig() *IndexConfig {
 	if workers < 4 {
 		workers = 4
 	}
-	if workers > 16 {
-		workers = 16
+	if workers > 32 {
+		workers = 32
 	}
+
+	// Match embed concurrency to server parallel slots
+	embedConcurrency := runtime.NumCPU() / 2
+	if embedConcurrency < 4 {
+		embedConcurrency = 4
+	}
+	if embedConcurrency > 16 {
+		embedConcurrency = 16
+	}
+
 	return &IndexConfig{
 		Workers:          workers,
-		EmbedConcurrency: 8,
+		EmbedConcurrency: embedConcurrency,
 		Quantization:     store.QuantizeInt8, // Default to int8 for 4x storage savings
+		SmartSkip:        true,               // Enable smart skipping for large repos
 	}
 }
 
@@ -90,9 +105,9 @@ func NewWithConfig(path string, cfg *IndexConfig) (*Indexer, error) {
 		return nil, err
 	}
 
-	// Open store with buffered writes and adaptive search
+	// Open store with appropriate backend (sqlite-vec or libsql based on build tags)
 	dbPath := filepath.Join(repoDir, "index.db")
-	s, err := store.OpenBuffered(dbPath, store.WithBufferedQuantization(cfg.Quantization))
+	s, err := store.OpenDefault(dbPath, cfg.Quantization)
 	if err != nil {
 		return nil, err
 	}
@@ -191,6 +206,16 @@ func (idx *Indexer) Index(ctx context.Context) error {
 		return err
 	}
 
+	// Smart skip for large repos
+	if idx.indexCfg.SmartSkip && len(files) > largeRepoThreshold {
+		originalCount := len(files)
+		files = idx.smartFilter(files)
+		skipped := originalCount - len(files)
+		if skipped > 0 {
+			fmt.Printf("Smart skip: filtered %d files (tests, generated, vendored)\n", skipped)
+		}
+	}
+
 	fmt.Printf("Found %d files to index\n", len(files))
 
 	// Process files with worker pool using configured worker count
@@ -265,8 +290,9 @@ func (idx *Indexer) Index(ctx context.Context) error {
 	return nil
 }
 
-// maxEmbedTokens is the safe limit for embedding input (leaving buffer under 1500 limit)
-const maxEmbedTokens = 1400
+// maxEmbedTokens is the safe limit for embedding input.
+// Server context per slot is 2048, use 1500 to leave large buffer for token estimation variance.
+const maxEmbedTokens = 1500
 
 // prepareFile reads, chunks, and embeds a file, returning documents ready for storage.
 // This does NOT write to the database - that's handled by the single writer goroutine.
@@ -411,8 +437,8 @@ func (idx *Indexer) embedBatchWithRetry(ctx context.Context, texts []string, max
 	var wg sync.WaitGroup
 	var firstErr error
 
-	// Use semaphore for concurrency control (same as EmbedBatch)
-	sem := make(chan struct{}, 8)
+	// Use semaphore for concurrency control (matches EmbedConcurrency config)
+	sem := make(chan struct{}, idx.indexCfg.EmbedConcurrency)
 
 	for i, text := range texts {
 		wg.Add(1)
@@ -770,6 +796,79 @@ func isTestFile(path string) bool {
 			strings.HasSuffix(dir, string(filepath.Separator)+td) {
 			return true
 		}
+	}
+
+	return false
+}
+
+// smartFilter filters files for large repos to speed up indexing.
+// It removes test files, generated files, and low-value content.
+func (idx *Indexer) smartFilter(files []string) []string {
+	result := make([]string, 0, len(files)/2)
+
+	for _, path := range files {
+		if idx.shouldSmartSkip(path) {
+			continue
+		}
+		result = append(result, path)
+	}
+
+	return result
+}
+
+// shouldSmartSkip returns true if a file should be skipped in smart mode.
+func (idx *Indexer) shouldSmartSkip(path string) bool {
+	relPath, _ := filepath.Rel(idx.rootPath, path)
+	base := filepath.Base(path)
+	ext := strings.ToLower(filepath.Ext(path))
+
+	// Skip test files
+	if strings.HasSuffix(base, "_test.go") ||
+		strings.HasSuffix(base, ".test.js") ||
+		strings.HasSuffix(base, ".test.ts") ||
+		strings.HasSuffix(base, ".test.tsx") ||
+		strings.HasSuffix(base, ".spec.js") ||
+		strings.HasSuffix(base, ".spec.ts") ||
+		strings.HasSuffix(base, "_test.py") ||
+		strings.HasSuffix(base, "_test.rs") {
+		return true
+	}
+
+	// Skip generated files
+	if strings.HasSuffix(base, ".pb.go") ||
+		strings.HasSuffix(base, ".pb.gw.go") ||
+		strings.HasSuffix(base, ".generated.go") ||
+		strings.HasSuffix(base, ".gen.go") ||
+		strings.HasSuffix(base, ".mock.go") ||
+		strings.HasSuffix(base, "_mock.go") ||
+		strings.HasSuffix(base, "_string.go") ||
+		strings.HasSuffix(base, "_enumer.go") ||
+		strings.HasSuffix(base, ".d.ts") {
+		return true
+	}
+
+	// Skip vendored/third-party directories
+	skipDirs := []string{
+		"vendor/", "third_party/", "thirdparty/", "external/",
+		"testdata/", "test_data/", "fixtures/", "mocks/",
+		"c-deps/", "docs/", "examples/", "benchmarks/",
+	}
+	for _, dir := range skipDirs {
+		if strings.Contains(relPath, dir) {
+			return true
+		}
+	}
+
+	// Skip non-essential file types
+	skipExts := map[string]bool{
+		".md": true, ".txt": true, ".rst": true,
+		".json": true, ".yaml": true, ".yml": true, ".toml": true,
+		".sql": true, ".csv": true,
+		".svg": true, ".png": true, ".jpg": true, ".gif": true,
+		".wasm": true, ".map": true,
+	}
+	if skipExts[ext] {
+		return true
 	}
 
 	return false

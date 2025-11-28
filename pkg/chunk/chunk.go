@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	defaultMaxTokens    = 1000 // Conservative limit to stay under 2048 with description prefix
+	defaultMaxTokens    = 1200 // Conservative limit to stay under 2048 slot context
 	defaultContextLines = 10
 	defaultOverlap      = 3
 )
@@ -453,8 +453,17 @@ func formatType(expr ast.Expr) string {
 // EstimateTokens estimates the number of tokens in text using word count * 1.3.
 // This is a conservative estimate for code with special characters.
 func EstimateTokens(text string) int {
+	// For code, chars/4 is more accurate than word-based estimation
+	// because code has many symbols that tokenize separately (brackets, operators, etc.)
+	// Use the more conservative estimate
+	charBased := len(text) / 4
 	words := len(strings.Fields(text))
-	return int(float64(words) * 1.3)
+	wordBased := int(float64(words) * 1.3)
+
+	if charBased > wordBased {
+		return charBased
+	}
+	return wordBased
 }
 
 // estimateTokens is an internal alias for EstimateTokens.

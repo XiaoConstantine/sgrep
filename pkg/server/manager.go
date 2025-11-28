@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"syscall"
 	"time"
@@ -94,17 +95,40 @@ func (m *Manager) Start() error {
 		return fmt.Errorf("failed to open log file: %w", err)
 	}
 
+	// Calculate optimal settings based on CPU
+	// Reference: https://github.com/ggml-org/llama.cpp/discussions/4130
+	numCPU := runtime.NumCPU()
+
+	// Threads: use most CPUs for embedding workload
+	threads := numCPU
+	if threads > 16 {
+		threads = 16
+	}
+
+	// Parallel slots: for Apple Silicon 16GB, 8-16 is optimal
+	// Formula: n_slot_ctx = n_ctx / parallel (each slot gets portion of context)
+	// We want 2048 tokens per slot for our chunk sizes
+	parallelSlots := 16 // Start aggressive for embeddings
+	if numCPU < 8 {
+		parallelSlots = 8
+	}
+
+	// Context size: 2048 tokens per slot
+	contextSize := parallelSlots * 2048
+
 	// Build command with GPU support if available
 	args := []string{
 		"-m", modelPath,
 		"--embedding",
 		"--port", strconv.Itoa(m.port),
 		"--host", m.host,
-		"-c", "2048",  // context size
-		"-b", "2048",  // logical batch size
-		"-ub", "2048", // physical batch size (must match -b for embeddings)
-		"--threads", "4",
-		"-ngl", "99", // Use GPU (Metal on Mac, CUDA on Linux) - offload all layers
+		"-c", strconv.Itoa(contextSize),
+		"-b", "2048",  // batch size (match typical input)
+		"-ub", "2048", // microbatch (equal to -b for embeddings)
+		"--threads", strconv.Itoa(threads),
+		"-ngl", "99",  // Use GPU (Metal on Mac, CUDA on Linux) - offload all layers
+		"-np", strconv.Itoa(parallelSlots),
+		"-cb", // Continuous batching - CRITICAL for parallel to work!
 	}
 
 	cmd := exec.Command(llamaPath, args...)
