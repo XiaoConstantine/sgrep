@@ -8,7 +8,19 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          # Linux: use sqlite-vec (go-libsql doesn't have Linux prebuilts)
+          - os: ubuntu-latest
+            backend: sqlite_vec
+            tags: "-tags=sqlite_vec"
+          # macOS: use libSQL (default, has prebuilt binaries)
+          - os: macos-latest
+            backend: libsql
+            tags: ""
+    
     steps:
       - uses: actions/checkout@v4
       
@@ -21,18 +33,18 @@ jobs:
       - name: Install dependencies
         run: go mod download
       
-      - name: Build
-        run: go build -v ./...
+      - name: Build (${{ matrix.backend }})
+        run: go build ${{ matrix.tags }} -v ./...
 
-      - name: Build with hybrid search (FTS5)
+      - name: Build with FTS5 (${{ matrix.backend }})
         env:
           CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
-        run: go build -v ./...
+        run: go build ${{ matrix.tags }} -v ./...
 
-      - name: Test (with FTS5 for hybrid search)
+      - name: Test (${{ matrix.backend }})
         env:
           CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
-        run: go test -v -short -race -coverprofile=coverage.txt -covermode=atomic ./...
+        run: go test ${{ matrix.tags }} -v -short -race -coverprofile=coverage.txt -covermode=atomic ./...
       
       - name: Upload coverage
         uses: codecov/codecov-action@v4
@@ -55,20 +67,23 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           version: latest
-          args: --timeout=5m
+          args: --timeout=5m --build-tags=sqlite_vec
 
   build:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
         include:
+          # Linux: sqlite-vec backend
           - os: ubuntu-latest
             goos: linux
             goarch: amd64
+            tags: "-tags=sqlite_vec"
+          # macOS: libSQL backend (default)
           - os: macos-latest
             goos: darwin
             goarch: arm64
+            tags: ""
     
     steps:
       - uses: actions/checkout@v4
@@ -79,12 +94,10 @@ jobs:
           go-version: '1.23'
           cache: true
       
-      - name: Build binary (with hybrid search)
+      - name: Build binary
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
           CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
-        run: go build -o sgrep-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }} ./cmd/sgrep
+        run: go build ${{ matrix.tags }} -o sgrep-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/sgrep
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
