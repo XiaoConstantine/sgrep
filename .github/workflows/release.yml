@@ -28,7 +28,7 @@ jobs:
       - name: Run tests (with FTS5 for hybrid search)
         env:
           CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
-        run: go test -short -v ./...
+        run: go test -tags=sqlite_vec -short -v ./...
 
       - name: Build Linux binary (with hybrid search)
         env:
@@ -38,7 +38,7 @@ jobs:
           GOARCH: amd64
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
-          go build -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${GITHUB_SHA} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o dist/sgrep-linux-amd64 ./cmd/sgrep
+          go build -tags=sqlite_vec -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${GITHUB_SHA} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o dist/sgrep-linux-amd64 ./cmd/sgrep
           cd dist && tar -czvf sgrep_Linux_x86_64.tar.gz sgrep-linux-amd64 && rm sgrep-linux-amd64
 
       - name: Upload Linux artifacts
@@ -51,12 +51,16 @@ jobs:
     strategy:
       matrix:
         include:
+          # macOS Intel: use sqlite_vec (go-libsql lacks x86_64 prebuilts)
           - runner: macos-13
             arch: amd64
             artifact_arch: x86_64
+            tags: "-tags=sqlite_vec"
+          # macOS ARM: use libSQL (default, has prebuilt binaries)
           - runner: macos-14
             arch: arm64
             artifact_arch: arm64
+            tags: ""
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -72,7 +76,7 @@ jobs:
       - name: Run tests (with FTS5 for hybrid search)
         env:
           CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
-        run: go test -short -v ./...
+        run: go test ${{ matrix.tags }} -short -v ./...
 
       - name: Build Darwin binary (with hybrid search)
         env:
@@ -82,7 +86,7 @@ jobs:
           GOARCH: ${{ matrix.arch }}
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
-          go build -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${GITHUB_SHA} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o dist/sgrep-darwin-${{ matrix.arch }} ./cmd/sgrep
+          go build ${{ matrix.tags }} -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${GITHUB_SHA} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o dist/sgrep-darwin-${{ matrix.arch }} ./cmd/sgrep
           cd dist && tar -czvf sgrep_Darwin_${{ matrix.artifact_arch }}.tar.gz sgrep-darwin-${{ matrix.arch }} && rm sgrep-darwin-${{ matrix.arch }}
 
       - name: Upload Darwin artifacts
