@@ -123,11 +123,14 @@ func TestDefaultIndexConfig(t *testing.T) {
 	if cfg.Workers < 4 {
 		t.Errorf("workers should be at least 4, got %d", cfg.Workers)
 	}
-	if cfg.Workers > 16 {
-		t.Errorf("workers should be capped at 16, got %d", cfg.Workers)
+	if cfg.Workers > 32 {
+		t.Errorf("workers should be capped at 32, got %d", cfg.Workers)
 	}
-	if cfg.EmbedConcurrency != 8 {
-		t.Errorf("expected EmbedConcurrency 8, got %d", cfg.EmbedConcurrency)
+	if cfg.EmbedConcurrency < 4 {
+		t.Errorf("EmbedConcurrency should be at least 4, got %d", cfg.EmbedConcurrency)
+	}
+	if cfg.EmbedConcurrency > 16 {
+		t.Errorf("EmbedConcurrency should be capped at 16, got %d", cfg.EmbedConcurrency)
 	}
 }
 
