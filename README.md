@@ -387,37 +387,6 @@ For more control, use the `pkg/` subpackages directly:
 - `pkg/store` - Vector storage
 - `pkg/chunk` - Code chunking with AST awareness
 
-## Testing
-
-Run the test suite:
-
-```bash
-# Quick tests (skips slow integration tests)
-go test -short ./...
-
-# Full test suite with race detection
-go test -race ./...
-
-# Run tests with coverage
-go test -short -cover ./...
-```
-
-**Test patterns used:**
-- `httptest.NewServer` for mocking llama.cpp embedding server
-- `t.TempDir()` for isolated database paths
-- Mock `Storer` interface for search tests without real embeddings
-- `-race` flag to detect concurrent access issues
-
-**Current coverage:**
-| Package | Coverage |
-|---------|----------|
-| pkg/index | 25% |
-| pkg/server | 58% |
-| pkg/store | 46% |
-| pkg/search | 95% |
-
-Note: Lower coverage in index/server is expected—they require a running llama-server for full integration testing.
-
 ## License
 
 Apache-2.0
