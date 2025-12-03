@@ -168,10 +168,10 @@ func TestSearcher_Search_WithResults(t *testing.T) {
 	if results[0].FilePath != "/test.go" {
 		t.Errorf("expected first result filepath /test.go, got %s", results[0].FilePath)
 	}
-	// Score is boosted by BoostImpl factor (0.85) for non-test files: 0.5 * 0.85 = 0.425
-	expectedScore := 0.5 * 0.85
+	// Score is boosted by BoostImpl factor (0.92) for non-test files: 0.5 * 0.92 = 0.46
+	expectedScore := 0.5 * 0.92
 	if results[0].Score != expectedScore {
-		t.Errorf("expected score %f (0.5 * 0.85 boost), got %f", expectedScore, results[0].Score)
+		t.Errorf("expected score %f (0.5 * 0.92 boost), got %f", expectedScore, results[0].Score)
 	}
 }
 

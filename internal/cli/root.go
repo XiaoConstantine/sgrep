@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/XiaoConstantine/sgrep/pkg/search"
 	"github.com/XiaoConstantine/sgrep/pkg/server"
 	"github.com/XiaoConstantine/sgrep/pkg/store"
+	"github.com/XiaoConstantine/sgrep/pkg/util"
 	"github.com/spf13/cobra"
 )
 
@@ -30,8 +32,12 @@ var (
 	bm25Weight     float64
 
 	// Index flags
-	indexWorkers     int
-	indexQuantize    string
+	indexWorkers  int
+	indexQuantize string
+
+	// Debug flags
+	debugLevel   int    // 0=off, 1=summary, 2=detailed (set via -d count)
+	debugLogFile string // optional log file path
 )
 
 func Execute() error {
@@ -49,17 +55,45 @@ Designed to complement ripgrep (exact text) and ast-grep (AST patterns):
   - sgrep: "user authentication" → semantic intent
 
 Optimized for coding agents (Amp, Claude Code) with minimal token output.`,
-	Args: cobra.MaximumNArgs(1),
-	RunE: runSearch,
+	Args:              cobra.MaximumNArgs(1),
+	PersistentPreRunE: setupDebug,
+	RunE:              runSearch,
+}
+
+// setupDebug configures debug output based on flags.
+func setupDebug(cmd *cobra.Command, args []string) error {
+	// Set debug level
+	util.SetDebugLevel(util.DebugLevel(debugLevel))
+
+	// Set up debug writer
+	var writer io.Writer = os.Stderr
+	if debugLogFile != "" {
+		f, err := os.OpenFile(debugLogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return fmt.Errorf("failed to open debug log file: %w", err)
+		}
+		// Note: We don't close this file - it stays open for the duration of the command
+		// This is acceptable for CLI tools
+		writer = io.MultiWriter(os.Stderr, f)
+	}
+	util.SetDebugWriter(writer)
+
+	return nil
 }
 
 func init() {
+	// Debug flags (persistent - available to all commands)
+	rootCmd.PersistentFlags().CountVarP(&debugLevel, "debug", "d",
+		"Debug level: -d (summary timing), -dd (detailed per-operation timing)")
+	rootCmd.PersistentFlags().StringVar(&debugLogFile, "debug-log", "",
+		"Write debug output to file (in addition to stderr)")
+
 	// Search flags
 	rootCmd.Flags().IntVarP(&limit, "limit", "n", 10, "Maximum number of results")
 	rootCmd.Flags().BoolVarP(&showContext, "context", "c", false, "Show code context")
 	rootCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON (for agents)")
 	rootCmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "Minimal output (paths only)")
-	rootCmd.Flags().Float64Var(&threshold, "threshold", 1.5, "Similarity threshold (L2 distance, lower is more similar)")
+	rootCmd.Flags().Float64Var(&threshold, "threshold", 1.5, "Similarity threshold (cosine distance, lower is more similar)")
 	rootCmd.Flags().BoolVarP(&includeTests, "include-tests", "t", false, "Include test files in results")
 	rootCmd.Flags().BoolVar(&allChunks, "all-chunks", false, "Show all matching chunks (disable deduplication)")
 	rootCmd.Flags().BoolVar(&hybridSearch, "hybrid", false, "Enable hybrid search (semantic + BM25)")

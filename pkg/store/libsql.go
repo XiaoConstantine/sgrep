@@ -392,11 +392,9 @@ func (s *LibSQLStore) StoreBatch(ctx context.Context, docs []*Document) error {
 
 	atomic.AddInt64(&s.vectorCount, int64(len(docs)))
 
-	// Reload in-memory cache if applicable
-	count := atomic.LoadInt64(&s.vectorCount)
-	if count < inMemoryThreshold {
-		return s.loadVectorsToMemory()
-	}
+	// Note: Skip in-memory cache reload during bulk indexing for performance.
+	// The cache will be loaded on first search if needed.
+	// Previously this reloaded ALL vectors after EVERY batch, causing O(n²) behavior.
 
 	return nil
 }
@@ -422,6 +420,18 @@ func (s *LibSQLStore) searchInMemory(ctx context.Context, embedding []float32, l
 	vectors := s.vectors
 	docIDs := s.docIDs
 	s.memMu.RUnlock()
+
+	// Lazy load vectors if cache is empty but we have data
+	if len(vectors) == 0 {
+		if err := s.loadVectorsToMemory(); err != nil {
+			// Fall back to index search on error
+			return s.searchWithIndex(ctx, embedding, limit, threshold)
+		}
+		s.memMu.RLock()
+		vectors = s.vectors
+		docIDs = s.docIDs
+		s.memMu.RUnlock()
+	}
 
 	n := len(vectors)
 	if n == 0 {

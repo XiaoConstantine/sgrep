@@ -9,7 +9,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,13 +17,15 @@ import (
 	"github.com/XiaoConstantine/sgrep/pkg/chunk"
 	"github.com/XiaoConstantine/sgrep/pkg/embed"
 	"github.com/XiaoConstantine/sgrep/pkg/store"
+	"github.com/XiaoConstantine/sgrep/pkg/util"
 	"github.com/fsnotify/fsnotify"
 )
 
 // IndexConfig holds indexer configuration.
 type IndexConfig struct {
-	Workers          int                    // Number of parallel workers (default: 2 * NumCPU, capped at 16)
+	Workers          int                    // Number of parallel file readers (default: 16)
 	EmbedConcurrency int                    // Concurrent embedding requests per batch (default: 8)
+	EmbedBatchSize   int                    // Number of chunks to batch for embedding (default: 64)
 	Quantization     store.QuantizationMode // Vector quantization mode (none, int8, binary)
 	SmartSkip        bool                   // Enable smart skipping for large repos (default: true)
 }
@@ -34,26 +35,21 @@ const largeRepoThreshold = 1000
 
 // DefaultIndexConfig returns sensible defaults for indexing.
 func DefaultIndexConfig() *IndexConfig {
-	workers := runtime.NumCPU() * 2
-	if workers < 4 {
-		workers = 4
-	}
-	if workers > 32 {
-		workers = 32
-	}
+	// Workers = parallel file readers (CPU-bound: read + chunk)
+	// These don't make HTTP requests, so we can have more
+	workers := 16
 
-	// Match embed concurrency to server parallel slots
-	embedConcurrency := runtime.NumCPU() / 2
-	if embedConcurrency < 4 {
-		embedConcurrency = 4
-	}
-	if embedConcurrency > 16 {
-		embedConcurrency = 16
-	}
+	// Embed concurrency - only used in fallback path when batch API fails
+	embedConcurrency := 8
+
+	// Batch size for embedding - llama.cpp server has 16 parallel slots
+	// Larger batches = better GPU/CPU utilization, fewer HTTP round trips
+	embedBatchSize := 128
 
 	return &IndexConfig{
 		Workers:          workers,
 		EmbedConcurrency: embedConcurrency,
+		EmbedBatchSize:   embedBatchSize,
 		Quantization:     store.QuantizeInt8, // Default to int8 for 4x storage savings
 		SmartSkip:        true,               // Enable smart skipping for large repos
 	}
@@ -163,12 +159,26 @@ func writeRepoMetadata(repoDir, repoPath string) error {
 	return os.WriteFile(filepath.Join(repoDir, "metadata.json"), data, 0644)
 }
 
+// chunkItem holds a chunk pending embedding, along with metadata to reconstruct the document.
+type chunkItem struct {
+	filePath   string
+	chunkIndex int
+	text       string // Text to embed (description + content)
+	chunk      chunk.Chunk
+	isTest     bool
+}
+
 // Index indexes all files in the root path.
 func (idx *Indexer) Index(ctx context.Context) error {
 	startTime := time.Now()
+	debugLevel := util.GetDebugLevel()
+	stats := util.NewTimingStats(debugLevel)
+
 	fmt.Printf("Indexing %s...\n", idx.rootPath)
+	util.Debugf(util.DebugSummary, "Indexing %s", idx.rootPath)
 
 	// Collect files
+	collectTimer := util.NewTimer("file_collection")
 	var files []string
 	var skippedDirs, skippedFiles, nonCode int
 	err := filepath.WalkDir(idx.rootPath, func(path string, d fs.DirEntry, err error) error {
@@ -200,6 +210,9 @@ func (idx *Indexer) Index(ctx context.Context) error {
 
 		return nil
 	})
+	collectDuration := collectTimer.Stop()
+	stats.RecordStage("file_collection", collectDuration, int64(len(files)))
+	util.Debugf(util.DebugSummary, "File collection: %d files in %v", len(files), collectDuration.Round(time.Millisecond))
 
 	fmt.Printf("Skipped: %d dirs, %d files, %d non-code\n", skippedDirs, skippedFiles, nonCode)
 	if err != nil {
@@ -208,53 +221,172 @@ func (idx *Indexer) Index(ctx context.Context) error {
 
 	// Smart skip for large repos
 	if idx.indexCfg.SmartSkip && len(files) > largeRepoThreshold {
+		filterTimer := util.NewTimer("smart_filter")
 		originalCount := len(files)
 		files = idx.smartFilter(files)
 		skipped := originalCount - len(files)
+		filterDuration := filterTimer.Stop()
+		stats.RecordStage("smart_filter", filterDuration, int64(skipped))
 		if skipped > 0 {
 			fmt.Printf("Smart skip: filtered %d files (tests, generated, vendored)\n", skipped)
+			util.Debugf(util.DebugSummary, "Smart filter: skipped %d files in %v", skipped, filterDuration.Round(time.Millisecond))
 		}
 	}
 
 	fmt.Printf("Found %d files to index\n", len(files))
 
-	// Process files with worker pool using configured worker count
+	// === Three-stage pipeline with global batching ===
+	// Stage 1: File readers (parallel) - read files and chunk them
+	// Stage 2: Embedding batcher (single goroutine) - collect chunks and batch embed
+	// Stage 3: DB writer (single goroutine) - write documents to SQLite
+
 	numWorkers := idx.indexCfg.Workers
+	batchSize := idx.indexCfg.EmbedBatchSize
+	if batchSize == 0 {
+		batchSize = 64
+	}
 
 	fileChan := make(chan string, len(files))
-	// Channel for documents ready to be stored (decouples embedding from DB writes)
-	docChan := make(chan []*store.Document, numWorkers*2)
-	var wg sync.WaitGroup
+	chunkChan := make(chan []chunkItem, numWorkers*2)   // Chunks from file readers
+	docChan := make(chan []*store.Document, 256)        // Documents ready for storage (large buffer)
+
+	var readerWg sync.WaitGroup
+	var batcherWg sync.WaitGroup
 	var writerWg sync.WaitGroup
 
-	// Start single DB writer goroutine - serializes all writes, eliminates lock contention
+	// Stage 3: Single DB writer goroutine
+	// Note: This goroutine exits when docChan is closed (done after embedWg.Wait())
 	writerWg.Add(1)
 	go func() {
 		defer writerWg.Done()
 		for docs := range docChan {
+			writeTimer := util.NewTimer("db_write")
 			if err := idx.store.StoreBatch(ctx, docs); err != nil {
 				atomic.AddInt64(&idx.errors, 1)
 				fmt.Fprintf(os.Stderr, "Error storing batch: %v\n", err)
 			}
+			writeDuration := writeTimer.Stop()
+			stats.RecordOp("db_write", writeDuration, int64(len(docs)))
 		}
 	}()
 
-	// Start embedding workers - they only do read/chunk/embed, then send to docChan
+	// Stage 2: Single batcher goroutine - collects chunks and batch embeds them
+	batcherWg.Add(1)
+	go func() {
+		defer batcherWg.Done()
+		defer close(docChan) // Close docChan when batcher is done
+
+		var pendingChunks []chunkItem
+
+		for chunks := range chunkChan {
+			pendingChunks = append(pendingChunks, chunks...)
+
+			// Flush when batch is full
+			for len(pendingChunks) >= batchSize {
+				batch := pendingChunks[:batchSize]
+				pendingChunks = pendingChunks[batchSize:]
+
+				texts := make([]string, len(batch))
+				for i, item := range batch {
+					texts[i] = item.text
+				}
+
+				embedTimer := util.NewTimer("embedding")
+				embeddings, err := idx.embedBatchWithRetry(ctx, texts, 3)
+				embedDuration := embedTimer.Stop()
+				stats.RecordOp("embedding", embedDuration, int64(len(texts)))
+
+				if err != nil {
+					atomic.AddInt64(&idx.errors, int64(len(batch)))
+					fmt.Fprintf(os.Stderr, "Batch embedding failed: %v\n", err)
+					continue
+				}
+
+				util.Debugf(util.DebugDetailed, "Embedded %d chunks in %v",
+					len(texts), embedDuration.Round(time.Millisecond))
+
+				docs := make([]*store.Document, len(batch))
+				for i, item := range batch {
+					docs[i] = &store.Document{
+						ID:        fmt.Sprintf("%s:chunk_%d", item.filePath, item.chunkIndex+1),
+						FilePath:  item.filePath,
+						Content:   item.chunk.Content,
+						StartLine: item.chunk.StartLine,
+						EndLine:   item.chunk.EndLine,
+						Embedding: embeddings[i],
+						IsTest:    item.isTest,
+						Metadata: map[string]string{
+							"description": item.chunk.Description,
+						},
+					}
+				}
+				docChan <- docs
+			}
+		}
+
+		// Flush remaining chunks
+		if len(pendingChunks) > 0 {
+			texts := make([]string, len(pendingChunks))
+			for i, item := range pendingChunks {
+				texts[i] = item.text
+			}
+
+			embedTimer := util.NewTimer("embedding")
+			embeddings, err := idx.embedBatchWithRetry(ctx, texts, 3)
+			embedDuration := embedTimer.Stop()
+			stats.RecordOp("embedding", embedDuration, int64(len(texts)))
+
+			if err != nil {
+				atomic.AddInt64(&idx.errors, int64(len(pendingChunks)))
+				fmt.Fprintf(os.Stderr, "Final batch embedding failed: %v\n", err)
+			} else {
+				docs := make([]*store.Document, len(pendingChunks))
+				for i, item := range pendingChunks {
+					docs[i] = &store.Document{
+						ID:        fmt.Sprintf("%s:chunk_%d", item.filePath, item.chunkIndex+1),
+						FilePath:  item.filePath,
+						Content:   item.chunk.Content,
+						StartLine: item.chunk.StartLine,
+						EndLine:   item.chunk.EndLine,
+						Embedding: embeddings[i],
+						IsTest:    item.isTest,
+						Metadata: map[string]string{
+							"description": item.chunk.Description,
+						},
+					}
+				}
+				docChan <- docs
+			}
+		}
+	}()
+
+	// Stage 1: File reader workers - read and chunk files, send to batcher
 	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
+		readerWg.Add(1)
 		go func() {
-			defer wg.Done()
+			defer readerWg.Done()
 			for path := range fileChan {
-				docs, err := idx.prepareFile(ctx, path)
+				readTimer := util.NewTimer("file_read")
+				chunks, err := idx.readAndChunkFile(path)
+				readDuration := readTimer.Stop()
+
 				if err != nil {
 					atomic.AddInt64(&idx.errors, 1)
-					fmt.Fprintf(os.Stderr, "Error indexing %s: %v\n", path, err)
-				} else if len(docs) > 0 {
-					docChan <- docs // Send to writer (non-blocking due to buffered channel)
-					atomic.AddInt64(&idx.processed, 1)
-				} else {
-					atomic.AddInt64(&idx.processed, 1) // Empty file or skipped
+					fmt.Fprintf(os.Stderr, "Error reading %s: %v\n", path, err)
+					continue
 				}
+
+				// Record timing (count = number of chunks produced)
+				chunkCount := int64(len(chunks))
+				if chunkCount == 0 {
+					chunkCount = 1 // Count as 1 operation even if no chunks
+				}
+				stats.RecordOp("file_read", readDuration, chunkCount)
+
+				if len(chunks) > 0 {
+					chunkChan <- chunks
+				}
+				atomic.AddInt64(&idx.processed, 1)
 
 				// Progress
 				processed := atomic.LoadInt64(&idx.processed)
@@ -265,29 +397,87 @@ func (idx *Indexer) Index(ctx context.Context) error {
 		}()
 	}
 
-	// Send files
+	// Send files to workers
 	for _, f := range files {
 		fileChan <- f
 	}
 	close(fileChan)
 
-	// Wait for all embedding workers to finish
-	wg.Wait()
-	// Close doc channel to signal writer to finish
-	close(docChan)
-	// Wait for writer to finish
-	writerWg.Wait()
+	// Wait for pipeline to complete in order
+	readerWg.Wait()
+	close(chunkChan) // Signal batcher that no more chunks coming
+	batcherWg.Wait() // Batcher closes docChan when done
+	writerWg.Wait()  // Writer exits when docChan is closed
 
 	// Flush any remaining buffered embeddings
+	flushTimer := util.NewTimer("flush")
 	if err := store.FlushIfNeeded(ctx, idx.store); err != nil {
 		return fmt.Errorf("failed to flush embeddings: %w", err)
+	}
+	flushDuration := flushTimer.Stop()
+	if flushDuration > time.Millisecond {
+		stats.RecordStage("flush", flushDuration, 1)
 	}
 
 	elapsed := time.Since(startTime)
 	fmt.Printf("\rIndexed %d files in %v (%d errors)\n",
 		idx.processed, elapsed.Round(time.Millisecond), idx.errors)
 
+	// Print debug summary
+	if debugLevel >= util.DebugSummary {
+		stats.PrintSummary()
+	}
+
 	return nil
+}
+
+// readAndChunkFile reads a file and returns chunk items ready for batching.
+// This does NOT call the embedding server - just CPU-bound read and chunk work.
+func (idx *Indexer) readAndChunkFile(path string) ([]chunkItem, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	// Skip empty or very large files
+	if len(content) == 0 || len(content) > 1<<20 { // 1MB limit
+		return nil, nil
+	}
+
+	// Chunk the file
+	relPath, _ := filepath.Rel(idx.rootPath, path)
+	chunks, err := chunk.ChunkFile(relPath, string(content), idx.chunkCfg)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(chunks) == 0 {
+		return nil, nil
+	}
+
+	// Validate and re-chunk any oversized chunks
+	chunks = idx.validateAndRechunk(chunks)
+
+	// Detect if this is a test file
+	isTest := isTestFile(relPath)
+
+	// Build chunk items
+	items := make([]chunkItem, len(chunks))
+	for i, c := range chunks {
+		text := c.Content
+		if c.Description != "" {
+			text = c.Description + "\n\n" + c.Content
+		}
+		items[i] = chunkItem{
+			filePath:   relPath,
+			chunkIndex: i,
+			text:       text,
+			chunk:      c,
+			isTest:     isTest,
+		}
+	}
+
+	return items, nil
 }
 
 // maxEmbedTokens is the safe limit for embedding input.
