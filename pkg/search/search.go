@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"sort"
 	"time"
 
 	"github.com/XiaoConstantine/sgrep/pkg/embed"
+	"github.com/XiaoConstantine/sgrep/pkg/rerank"
 	"github.com/XiaoConstantine/sgrep/pkg/store"
 	"github.com/XiaoConstantine/sgrep/pkg/util"
 )
@@ -33,6 +35,8 @@ type SearchOptions struct {
 	UseHybrid      bool    // Enable hybrid search combining semantic + BM25 (default: false)
 	SemanticWeight float64 // Weight for semantic score in hybrid mode (default: 0.6)
 	BM25Weight     float64 // Weight for BM25 score in hybrid mode (default: 0.4)
+	UseRerank      bool    // Enable reranking stage for better precision (default: false)
+	RerankTopK     int     // Number of candidates to fetch for reranking (default: 50)
 }
 
 // DefaultSearchOptions returns sensible default options.
@@ -46,6 +50,8 @@ func DefaultSearchOptions() SearchOptions {
 		UseHybrid:      false,
 		SemanticWeight: 0.6,
 		BM25Weight:     0.4,
+		UseRerank:      false,
+		RerankTopK:     50, // Fetch 50 candidates for reranking
 	}
 }
 
@@ -59,6 +65,7 @@ type cachedResult struct {
 type Config struct {
 	Store      store.Storer
 	Embedder   *embed.Embedder
+	Reranker   *rerank.Reranker // Optional reranker for two-stage retrieval
 	CacheSize  int
 	CacheTTL   time.Duration
 	EventBox   *util.EventBox
@@ -68,6 +75,7 @@ type Config struct {
 type Searcher struct {
 	store      store.Storer
 	embedder   *embed.Embedder
+	reranker   *rerank.Reranker // Optional reranker for two-stage retrieval
 	queryCache *util.QueryCache // L3 cache: query text → results
 	eventBox   *util.EventBox
 }
@@ -115,6 +123,7 @@ func NewWithConfig(cfg Config) *Searcher {
 	return &Searcher{
 		store:      cfg.Store,
 		embedder:   embedder,
+		reranker:   cfg.Reranker,
 		queryCache: util.NewQueryCache(cacheSize, cacheTTL),
 		eventBox:   cfg.EventBox,
 	}
@@ -140,8 +149,8 @@ func (s *Searcher) SearchWithOptions(ctx context.Context, query string, opts Sea
 		s.eventBox.Set(util.EvtSearchStart, query)
 	}
 
-	util.Debugf(util.DebugSummary, "Search: %q (limit=%d, threshold=%.2f, hybrid=%v)",
-		query, opts.Limit, opts.Threshold, opts.UseHybrid)
+	util.Debugf(util.DebugSummary, "Search: %q (limit=%d, threshold=%.2f, hybrid=%v, rerank=%v)",
+		query, opts.Limit, opts.Threshold, opts.UseHybrid, opts.UseRerank)
 
 	// Generate cache key from query + all options
 	cacheKey := s.cacheKeyWithOpts(query, opts)
@@ -176,6 +185,14 @@ func (s *Searcher) SearchWithOptions(ctx context.Context, query string, opts Sea
 	}
 
 	searchTimer := util.NewTimer("vector_search")
+	// If reranking is enabled, fetch more candidates
+	if opts.UseRerank && s.reranker != nil {
+		fetchLimit = opts.RerankTopK
+		if fetchLimit < opts.Limit*3 {
+			fetchLimit = opts.Limit * 3
+		}
+	}
+
 	if opts.UseHybrid {
 		// Hybrid search: combine semantic + BM25
 		queryTerms := ExtractSearchTerms(query)
@@ -189,6 +206,20 @@ func (s *Searcher) SearchWithOptions(ctx context.Context, query string, opts Sea
 	stats.RecordStage("vector_search", searchDuration, int64(len(docs)))
 	if err != nil {
 		return nil, err
+	}
+
+	// Stage 2: Reranking (if enabled and reranker is available)
+	if opts.UseRerank && s.reranker != nil && len(docs) > 0 {
+		rerankTimer := util.NewTimer("reranking")
+		docs, distances, err = s.rerankResults(ctx, query, docs, distances, opts.Limit)
+		rerankDuration := rerankTimer.Stop()
+		stats.RecordStage("reranking", rerankDuration, int64(len(docs)))
+		if err != nil {
+			// Log warning but don't fail - fall back to vector results
+			fmt.Fprintf(os.Stderr, "reranking failed, using vector results: %v\n", err)
+		} else {
+			util.Debugf(util.DebugDetailed, "Reranked %d docs in %v", len(docs), rerankDuration.Round(time.Millisecond))
+		}
 	}
 
 	// Convert to results with IsTest flag
@@ -286,9 +317,9 @@ func (s *Searcher) cacheKey(query string, limit int, threshold float64) string {
 // cacheKeyWithOpts generates a unique key for query + all options.
 func (s *Searcher) cacheKeyWithOpts(query string, opts SearchOptions) string {
 	h := sha256.New()
-	_, _ = fmt.Fprintf(h, "%s:%d:%.4f:%v:%v:%.4f:%v:%.4f:%.4f",
+	_, _ = fmt.Fprintf(h, "%s:%d:%.4f:%v:%v:%.4f:%v:%.4f:%.4f:%v:%d",
 		query, opts.Limit, opts.Threshold, opts.IncludeTests, opts.Deduplicate, opts.BoostImpl,
-		opts.UseHybrid, opts.SemanticWeight, opts.BM25Weight)
+		opts.UseHybrid, opts.SemanticWeight, opts.BM25Weight, opts.UseRerank, opts.RerankTopK)
 	return hex.EncodeToString(h.Sum(nil)[:8])
 }
 
@@ -300,4 +331,68 @@ func (s *Searcher) ClearCache() {
 // CacheStats returns cache statistics.
 func (s *Searcher) CacheStats() util.CacheStats {
 	return s.queryCache.Stats()
+}
+
+// rerankResults uses the reranker to reorder documents by relevance.
+func (s *Searcher) rerankResults(ctx context.Context, query string, docs []*store.Document, distances []float64, limit int) ([]*store.Document, []float64, error) {
+	if s.reranker == nil {
+		return docs, distances, nil
+	}
+
+	// Prepare document contents for reranking
+	contents := make([]string, len(docs))
+	for i, doc := range docs {
+		contents[i] = doc.Content
+	}
+
+	// Call reranker
+	results, err := s.reranker.Rerank(ctx, query, contents)
+	if err != nil {
+		return docs, distances, err
+	}
+
+	// Reorder docs by rerank score
+	type scoredDoc struct {
+		doc      *store.Document
+		score    float64
+		origDist float64
+	}
+
+	scored := make([]scoredDoc, len(results))
+	for i, r := range results {
+		if r.Index >= 0 && r.Index < len(docs) {
+			scored[i] = scoredDoc{
+				doc:      docs[r.Index],
+				score:    r.Score,
+				origDist: distances[r.Index],
+			}
+		}
+	}
+
+	// Sort by rerank score descending (higher = more relevant)
+	sort.Slice(scored, func(i, j int) bool {
+		return scored[i].score > scored[j].score
+	})
+
+	// Limit results
+	if len(scored) > limit {
+		scored = scored[:limit]
+	}
+
+	// Reconstruct arrays
+	rerankedDocs := make([]*store.Document, len(scored))
+	rerankedDists := make([]float64, len(scored))
+	for i, s := range scored {
+		rerankedDocs[i] = s.doc
+		// Use inverted rerank score as distance (for consistency: lower = better)
+		// Rerank scores are typically 0-1, so 1 - score gives us 0 (best) to 1 (worst)
+		rerankedDists[i] = 1.0 - s.score
+	}
+
+	return rerankedDocs, rerankedDists, nil
+}
+
+// SetReranker sets the reranker for two-stage retrieval.
+func (s *Searcher) SetReranker(r *rerank.Reranker) {
+	s.reranker = r
 }

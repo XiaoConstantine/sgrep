@@ -165,17 +165,24 @@ func (s *TimingStats) Summary() string {
 		return ""
 	}
 
-	// Calculate total time for percentage
+	// Calculate total time for percentage (exclude "total" stage itself)
 	var totalTime time.Duration
-	for _, stats := range s.stages {
-		totalTime += stats.totalDuration
+	for name, stats := range s.stages {
+		if name != "total" {
+			totalTime += stats.totalDuration
+		}
 	}
 
-	// Find bottleneck
+	// If we have a "total" stage, use it as the reference for percentages
+	if totalStats, ok := s.stages["total"]; ok {
+		totalTime = totalStats.totalDuration
+	}
+
+	// Find bottleneck (exclude "total" from bottleneck calculation)
 	var bottleneck string
 	var maxDuration time.Duration
 	for name, stats := range s.stages {
-		if stats.totalDuration > maxDuration {
+		if name != "total" && stats.totalDuration > maxDuration {
 			maxDuration = stats.totalDuration
 			bottleneck = name
 		}
@@ -184,8 +191,15 @@ func (s *TimingStats) Summary() string {
 	// Build summary string
 	result := "Pipeline stages:\n"
 	for _, name := range s.order {
+		// Skip "total" in the stage list - we'll show it separately
+		if name == "total" {
+			continue
+		}
 		stats := s.stages[name]
-		pct := float64(stats.totalDuration) / float64(totalTime) * 100
+		pct := float64(0)
+		if totalTime > 0 {
+			pct = float64(stats.totalDuration) / float64(totalTime) * 100
+		}
 		avg := time.Duration(0)
 		if stats.count > 0 {
 			avg = stats.totalDuration / time.Duration(stats.count)
