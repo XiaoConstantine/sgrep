@@ -131,10 +131,17 @@ func (s *Searcher) Search(ctx context.Context, query string, limit int, threshol
 
 // SearchWithOptions finds code matching the query with full control over search behavior.
 func (s *Searcher) SearchWithOptions(ctx context.Context, query string, opts SearchOptions) ([]Result, error) {
+	debugLevel := util.GetDebugLevel()
+	stats := util.NewTimingStats(debugLevel)
+	totalTimer := util.NewTimer("total_search")
+
 	// Emit search start event
 	if s.eventBox != nil {
 		s.eventBox.Set(util.EvtSearchStart, query)
 	}
+
+	util.Debugf(util.DebugSummary, "Search: %q (limit=%d, threshold=%.2f, hybrid=%v)",
+		query, opts.Limit, opts.Threshold, opts.UseHybrid)
 
 	// Generate cache key from query + all options
 	cacheKey := s.cacheKeyWithOpts(query, opts)
@@ -142,6 +149,7 @@ func (s *Searcher) SearchWithOptions(ctx context.Context, query string, opts Sea
 	// Check L3 cache (query → results)
 	if cached := s.queryCache.Get(cacheKey); cached != nil {
 		if cr, ok := cached.(*cachedResult); ok {
+			util.Debugf(util.DebugSummary, "Cache hit: returning %d cached results", len(cr.results))
 			if s.eventBox != nil {
 				s.eventBox.Set(util.EvtSearchComplete, len(cr.results))
 			}
@@ -150,7 +158,10 @@ func (s *Searcher) SearchWithOptions(ctx context.Context, query string, opts Sea
 	}
 
 	// Generate query embedding (L1 cache in embedder)
+	embedTimer := util.NewTimer("query_embedding")
 	queryEmb, err := s.embedder.Embed(ctx, query)
+	embedDuration := embedTimer.Stop()
+	stats.RecordStage("query_embedding", embedDuration, 1)
 	if err != nil {
 		return nil, err
 	}
@@ -164,6 +175,7 @@ func (s *Searcher) SearchWithOptions(ctx context.Context, query string, opts Sea
 		fetchLimit = opts.Limit * 5 // Need more results when filtering tests
 	}
 
+	searchTimer := util.NewTimer("vector_search")
 	if opts.UseHybrid {
 		// Hybrid search: combine semantic + BM25
 		queryTerms := ExtractSearchTerms(query)
@@ -173,11 +185,14 @@ func (s *Searcher) SearchWithOptions(ctx context.Context, query string, opts Sea
 		// Semantic-only search
 		docs, distances, err = s.store.Search(ctx, queryEmb, fetchLimit, opts.Threshold)
 	}
+	searchDuration := searchTimer.Stop()
+	stats.RecordStage("vector_search", searchDuration, int64(len(docs)))
 	if err != nil {
 		return nil, err
 	}
 
 	// Convert to results with IsTest flag
+	filterTimer := util.NewTimer("filtering")
 	var results []Result
 	for i, doc := range docs {
 		// Filter out test files if not requested
@@ -216,6 +231,8 @@ func (s *Searcher) SearchWithOptions(ctx context.Context, query string, opts Sea
 	if len(results) > opts.Limit {
 		results = results[:opts.Limit]
 	}
+	filterDuration := filterTimer.Stop()
+	stats.RecordStage("filtering", filterDuration, int64(len(results)))
 
 	// Cache results (L3)
 	s.queryCache.Set(cacheKey, &cachedResult{
@@ -226,6 +243,14 @@ func (s *Searcher) SearchWithOptions(ctx context.Context, query string, opts Sea
 	// Emit search complete event
 	if s.eventBox != nil {
 		s.eventBox.Set(util.EvtSearchComplete, len(results))
+	}
+
+	// Print timing summary
+	totalDuration := totalTimer.Stop()
+	stats.RecordStage("total", totalDuration, int64(len(results)))
+	if debugLevel >= util.DebugSummary {
+		stats.PrintSummary()
+		util.Debugf(util.DebugSummary, "Search completed: %d results in %v", len(results), totalDuration.Round(time.Millisecond))
 	}
 
 	return results, nil
