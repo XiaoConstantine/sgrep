@@ -113,6 +113,43 @@ sgrep --hybrid --semantic-weight 0.4 --bm25-weight 0.6 "parseAST"
 
 **Note**: Hybrid search requires building with FTS5 support (see [From Source](#from-source)). The FTS5 index is created automatically on first hybrid search - no re-indexing needed.
 
+## Two-Stage Retrieval with Reranking
+
+For higher precision, sgrep supports **cross-encoder reranking** using a dedicated reranker model:
+
+```bash
+# Enable reranking for better precision
+sgrep --rerank "error handling"
+
+# Combine with hybrid search
+sgrep --rerank --hybrid "authentication middleware"
+```
+
+**How it works:**
+1. **Stage 1**: Fast vector search retrieves top candidates (~30 docs)
+2. **Stage 2**: Cross-encoder reranks candidates using query-document attention
+
+**Setup reranking:**
+```bash
+# Download reranker model (~636MB) and start server
+sgrep setup --with-rerank
+```
+
+The reranker uses BGE-reranker-v2-m3 via llama.cpp, running on a separate port (8081). It provides better precision for complex queries at the cost of ~300-700ms additional latency.
+
+## Document-Level Search
+
+sgrep automatically handles meta-queries about your repository:
+
+```bash
+# These queries use document-level embeddings
+sgrep "what does this repo do"
+sgrep "project overview"
+sgrep "purpose of this codebase"
+```
+
+Document-level embeddings (mean of chunk embeddings per file) are computed during indexing, enabling README.md and other overview files to rank highly for repository-level questions.
+
 ## Agent-Optimized Output
 
 Default output is minimal for token efficiency:
@@ -208,7 +245,8 @@ sgrep supports two vector storage backends:
 | `sgrep list` | List all indexed repos |
 | `sgrep status` | Show index status |
 | `sgrep clear` | Clear index |
-| `sgrep setup` | Download model, verify llama-server |
+| `sgrep setup` | Download embedding model, verify llama-server |
+| `sgrep setup --with-rerank` | Also download reranker model (~636MB) |
 | `sgrep server start` | Manually start embedding server |
 | `sgrep server stop` | Stop embedding server |
 | `sgrep server status` | Show server status |
@@ -243,6 +281,8 @@ After installation, restart Claude Code to activate. The plugin works automatica
 | `--hybrid` | Enable hybrid search (semantic + BM25) |
 | `--semantic-weight F` | Weight for semantic score in hybrid mode (default: 0.6) |
 | `--bm25-weight F` | Weight for BM25 score in hybrid mode (default: 0.4) |
+| `--rerank` | Enable two-stage retrieval with cross-encoder reranking |
+| `-d, --debug` | Show debug timing information |
 
 ## Configuration
 
@@ -277,11 +317,18 @@ SGREP_DIMS=768                         # Vector dimensions
 │  │ Embedding   │    │   Search    │    │  Documents  │      │
 │  │   (~15ms)   │    │   (~5ms)    │    │   (~5ms)    │      │
 │  └─────────────┘    └─────────────┘    └─────────────┘      │
-│       ▲                                                      │
+│       ▲                    │                                 │
+│       │                    ▼ (with --rerank)                 │
+│       │              ┌─────────────┐                         │
+│       │              │Cross-Encoder│                         │
+│       │              │  Reranker   │                         │
+│       │              │ (~300-700ms)│                         │
+│       │              └─────────────┘                         │
+│       │                                                      │
 │       │ Auto-started by sgrep (16 parallel slots)           │
 │       │ (daemon mode, continuous batching)                  │
 │                                                              │
-│  Total: ~30ms                                                │
+│  Total: ~30ms (or ~500ms with reranking)                    │
 └──────────────────────────────────────────────────────────────┘
 ```
 
