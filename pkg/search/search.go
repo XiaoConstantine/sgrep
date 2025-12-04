@@ -374,24 +374,55 @@ func (s *Searcher) SearchWithOptions(ctx context.Context, query string, opts Sea
 	return results, nil
 }
 
-// deduplicateResults keeps only the best result per file.
+// deduplicateResults keeps only the best result per logical file.
+// It uses canonical paths to group duplicates from worktrees, vendored code, etc.
 func deduplicateResults(results []Result) []Result {
-	seen := make(map[string]int) // filepath -> index in dedupedResults
+	seen := make(map[string]int) // canonical path -> index in dedupedResults
 	var dedupedResults []Result
 
 	for _, r := range results {
-		if existingIdx, ok := seen[r.FilePath]; ok {
-			// Keep the one with better (lower) score
-			if r.Score < dedupedResults[existingIdx].Score {
+		canonical := canonicalPath(r.FilePath)
+		if existingIdx, ok := seen[canonical]; ok {
+			existing := dedupedResults[existingIdx]
+			// Keep the one with better (lower) score, or prefer non-worktree path on tie
+			if r.Score < existing.Score ||
+				(r.Score == existing.Score && !isWorktreePath(r.FilePath) && isWorktreePath(existing.FilePath)) {
 				dedupedResults[existingIdx] = r
 			}
 		} else {
-			seen[r.FilePath] = len(dedupedResults)
+			seen[canonical] = len(dedupedResults)
 			dedupedResults = append(dedupedResults, r)
 		}
 	}
 
 	return dedupedResults
+}
+
+// canonicalPath normalizes a file path by stripping worktree prefixes and other
+// duplicate-inducing path components. This allows deduplication of logically
+// equivalent files that appear in multiple locations.
+//
+// Examples:
+//   - ".worktrees/feature-branch/pkg/foo.go" -> "pkg/foo.go"
+//   - "vendor/github.com/x/y/foo.go" -> "vendor/github.com/x/y/foo.go" (kept as-is)
+//   - "pkg/foo.go" -> "pkg/foo.go"
+func canonicalPath(path string) string {
+	// Handle .worktrees/<branch-name>/... pattern
+	// Git worktrees create copies at .worktrees/<name>/<repo-contents>
+	if idx := strings.Index(path, ".worktrees/"); idx >= 0 {
+		rest := path[idx+len(".worktrees/"):]
+		// Find the next slash after the worktree name
+		if slashIdx := strings.Index(rest, "/"); slashIdx >= 0 {
+			return rest[slashIdx+1:]
+		}
+	}
+
+	return path
+}
+
+// isWorktreePath returns true if the path is inside a .worktrees directory.
+func isWorktreePath(path string) bool {
+	return strings.Contains(path, ".worktrees/")
 }
 
 // cacheKey generates a unique key for query + parameters.

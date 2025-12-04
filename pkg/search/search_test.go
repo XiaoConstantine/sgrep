@@ -568,3 +568,151 @@ func TestDeduplicateResults_Empty(t *testing.T) {
 		t.Error("expected empty result for empty input")
 	}
 }
+
+func TestCanonicalPath(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "regular path unchanged",
+			input:    "pkg/search/search.go",
+			expected: "pkg/search/search.go",
+		},
+		{
+			name:     "worktree path normalized",
+			input:    ".worktrees/feature-branch/pkg/search/search.go",
+			expected: "pkg/search/search.go",
+		},
+		{
+			name:     "worktree with hyphen in name",
+			input:    ".worktrees/a2a-integration/pkg/core/signature.go",
+			expected: "pkg/core/signature.go",
+		},
+		{
+			name:     "nested worktree path",
+			input:    "some/prefix/.worktrees/branch/pkg/foo.go",
+			expected: "pkg/foo.go",
+		},
+		{
+			name:     "worktree root file",
+			input:    ".worktrees/main/README.md",
+			expected: "README.md",
+		},
+		{
+			name:     "worktree without trailing path",
+			input:    ".worktrees/branch",
+			expected: ".worktrees/branch",
+		},
+		{
+			name:     "vendor path unchanged",
+			input:    "vendor/github.com/foo/bar/baz.go",
+			expected: "vendor/github.com/foo/bar/baz.go",
+		},
+		{
+			name:     "empty path",
+			input:    "",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := canonicalPath(tt.input)
+			if result != tt.expected {
+				t.Errorf("canonicalPath(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestIsWorktreePath(t *testing.T) {
+	tests := []struct {
+		path     string
+		expected bool
+	}{
+		{"pkg/search/search.go", false},
+		{".worktrees/branch/pkg/foo.go", true},
+		{"some/.worktrees/branch/file.go", true},
+		{"worktrees/not-hidden/file.go", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			result := isWorktreePath(tt.path)
+			if result != tt.expected {
+				t.Errorf("isWorktreePath(%q) = %v, want %v", tt.path, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestDeduplicateResults_Worktrees(t *testing.T) {
+	results := []Result{
+		{FilePath: "pkg/core/signature.go", Score: 0.3},
+		{FilePath: ".worktrees/feature/pkg/core/signature.go", Score: 0.3},
+		{FilePath: ".worktrees/another/pkg/core/signature.go", Score: 0.4},
+		{FilePath: "pkg/other/file.go", Score: 0.5},
+	}
+
+	deduped := deduplicateResults(results)
+
+	if len(deduped) != 2 {
+		t.Errorf("expected 2 deduplicated results, got %d", len(deduped))
+	}
+
+	// Check that we kept the non-worktree path for signature.go
+	var foundSignature bool
+	for _, r := range deduped {
+		if r.FilePath == "pkg/core/signature.go" {
+			foundSignature = true
+		}
+		if isWorktreePath(r.FilePath) && canonicalPath(r.FilePath) == "pkg/core/signature.go" {
+			t.Errorf("should prefer non-worktree path, but got %s", r.FilePath)
+		}
+	}
+
+	if !foundSignature {
+		t.Error("expected to keep pkg/core/signature.go as canonical result")
+	}
+}
+
+func TestDeduplicateResults_WorktreesBetterScore(t *testing.T) {
+	// If worktree has better score, it should be kept
+	results := []Result{
+		{FilePath: "pkg/core/signature.go", Score: 0.5},
+		{FilePath: ".worktrees/feature/pkg/core/signature.go", Score: 0.2}, // Better score
+	}
+
+	deduped := deduplicateResults(results)
+
+	if len(deduped) != 1 {
+		t.Errorf("expected 1 deduplicated result, got %d", len(deduped))
+	}
+
+	// Should keep the worktree version because it has better score
+	if deduped[0].Score != 0.2 {
+		t.Errorf("expected score 0.2 (better score wins), got %f", deduped[0].Score)
+	}
+}
+
+func TestDeduplicateResults_PreferNonWorktreeOnTie(t *testing.T) {
+	// On equal scores, prefer non-worktree path
+	results := []Result{
+		{FilePath: ".worktrees/feature/pkg/foo.go", Score: 0.3},
+		{FilePath: "pkg/foo.go", Score: 0.3}, // Same score, but comes second
+	}
+
+	deduped := deduplicateResults(results)
+
+	if len(deduped) != 1 {
+		t.Errorf("expected 1 deduplicated result, got %d", len(deduped))
+	}
+
+	// Should prefer the non-worktree path
+	if deduped[0].FilePath != "pkg/foo.go" {
+		t.Errorf("expected pkg/foo.go (non-worktree preferred on tie), got %s", deduped[0].FilePath)
+	}
+}
