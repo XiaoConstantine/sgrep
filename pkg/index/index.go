@@ -419,6 +419,17 @@ func (idx *Indexer) Index(ctx context.Context) error {
 		stats.RecordStage("flush", flushDuration, 1)
 	}
 
+	// Compute document-level embeddings (mean of chunk embeddings per file)
+	fileEmbedTimer := util.NewTimer("file_embeddings")
+	fileCount, err := idx.computeFileEmbeddings(ctx)
+	fileEmbedDuration := fileEmbedTimer.Stop()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to compute file embeddings: %v\n", err)
+	} else if fileCount > 0 {
+		stats.RecordStage("file_embeddings", fileEmbedDuration, int64(fileCount))
+		util.Debugf(util.DebugSummary, "Computed %d file embeddings in %v", fileCount, fileEmbedDuration.Round(time.Millisecond))
+	}
+
 	elapsed := time.Since(startTime)
 	fmt.Printf("\rIndexed %d files in %v (%d errors)\n",
 		idx.processed, elapsed.Round(time.Millisecond), idx.errors)
@@ -561,6 +572,141 @@ func (idx *Indexer) indexFile(ctx context.Context, path string) error {
 		return nil
 	}
 	return idx.store.StoreBatch(ctx, docs)
+}
+
+// computeFileEmbeddings computes document-level embeddings by averaging chunk embeddings.
+// This enables document-level search for queries like "what does this repo do".
+func (idx *Indexer) computeFileEmbeddings(ctx context.Context) (int, error) {
+	// Check if store supports file embeddings
+	feStore, ok := idx.store.(store.FileEmbeddingStorer)
+	if !ok {
+		return 0, nil // Store doesn't support file embeddings
+	}
+
+	// Query all documents grouped by filepath
+	// We need to access the database directly since we need embeddings
+	libStore, ok := idx.store.(*store.LibSQLStore)
+	if !ok {
+		return 0, nil // Only LibSQLStore supports this currently
+	}
+
+	// Get list of unique file paths
+	rows, err := libStore.DB().QueryContext(ctx, `
+		SELECT DISTINCT filepath FROM documents
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("query file paths: %w", err)
+	}
+
+	var filePaths []string
+	for rows.Next() {
+		var fp string
+		if err := rows.Scan(&fp); err != nil {
+			continue
+		}
+		filePaths = append(filePaths, fp)
+	}
+	_ = rows.Close()
+
+	if len(filePaths) == 0 {
+		return 0, nil
+	}
+
+	// Batch file embeddings for storage
+	var fileEmbeddings []*store.FileEmbedding
+	const batchSize = 100
+
+	for _, fp := range filePaths {
+		// Get all chunk embeddings for this file
+		embRows, err := libStore.DB().QueryContext(ctx, `
+			SELECT vector_extract(embedding), end_line
+			FROM documents
+			WHERE filepath = ? AND embedding IS NOT NULL
+			ORDER BY start_line
+		`, fp)
+		if err != nil {
+			continue
+		}
+
+		var embeddings [][]float32
+		var maxLine int
+		for embRows.Next() {
+			var vecStr string
+			var endLine int
+			if err := embRows.Scan(&vecStr, &endLine); err != nil {
+				continue
+			}
+			vec := parseVectorString(vecStr)
+			if vec != nil {
+				embeddings = append(embeddings, vec)
+				if endLine > maxLine {
+					maxLine = endLine
+				}
+			}
+		}
+		_ = embRows.Close()
+
+		if len(embeddings) == 0 {
+			continue
+		}
+
+		// Compute mean embedding
+		dims := len(embeddings[0])
+		meanEmb := make([]float32, dims)
+		for _, emb := range embeddings {
+			for i, v := range emb {
+				meanEmb[i] += v
+			}
+		}
+		scale := float32(1.0 / float64(len(embeddings)))
+		for i := range meanEmb {
+			meanEmb[i] *= scale
+		}
+
+		fileEmbeddings = append(fileEmbeddings, &store.FileEmbedding{
+			FilePath:   fp,
+			Embedding:  meanEmb,
+			ChunkCount: len(embeddings),
+			TotalLines: maxLine,
+		})
+
+		// Store in batches
+		if len(fileEmbeddings) >= batchSize {
+			if err := feStore.StoreFileEmbeddingBatch(ctx, fileEmbeddings); err != nil {
+				return 0, fmt.Errorf("store file embeddings: %w", err)
+			}
+			fileEmbeddings = nil
+		}
+	}
+
+	// Store remaining
+	if len(fileEmbeddings) > 0 {
+		if err := feStore.StoreFileEmbeddingBatch(ctx, fileEmbeddings); err != nil {
+			return 0, fmt.Errorf("store file embeddings: %w", err)
+		}
+	}
+
+	return len(filePaths), nil
+}
+
+// parseVectorString parses libSQL's vector string format "[1.0,2.0,3.0]"
+func parseVectorString(s string) []float32 {
+	s = strings.TrimPrefix(s, "[")
+	s = strings.TrimSuffix(s, "]")
+	if s == "" {
+		return nil
+	}
+
+	parts := strings.Split(s, ",")
+	vec := make([]float32, len(parts))
+	for i, p := range parts {
+		var v float64
+		if _, err := fmt.Sscanf(strings.TrimSpace(p), "%f", &v); err != nil {
+			return nil
+		}
+		vec[i] = float32(v)
+	}
+	return vec
 }
 
 // validateAndRechunk checks chunks for token limit compliance and re-chunks oversized ones.

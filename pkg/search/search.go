@@ -5,8 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"os"
+	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/XiaoConstantine/sgrep/pkg/embed"
@@ -14,6 +17,70 @@ import (
 	"github.com/XiaoConstantine/sgrep/pkg/store"
 	"github.com/XiaoConstantine/sgrep/pkg/util"
 )
+
+// QueryIntent represents the detected intent behind a search query.
+type QueryIntent int
+
+const (
+	// IntentConceptual is for general semantic queries (default).
+	IntentConceptual QueryIntent = iota
+	// IntentDefinition is for queries seeking type/interface definitions.
+	IntentDefinition
+	// IntentProcedural is for queries seeking implementation/how-to code.
+	IntentProcedural
+	// IntentExample is for queries explicitly seeking examples.
+	IntentExample
+)
+
+// String returns the string representation of QueryIntent.
+func (qi QueryIntent) String() string {
+	switch qi {
+	case IntentDefinition:
+		return "definition"
+	case IntentProcedural:
+		return "procedural"
+	case IntentExample:
+		return "example"
+	default:
+		return "conceptual"
+	}
+}
+
+var (
+	// Patterns for detecting query intent
+	definitionPatterns = regexp.MustCompile(`(?i)\b(type|interface|struct|class|enum|definition|define|what\s+is)\b`)
+	proceduralPatterns = regexp.MustCompile(`(?i)\b(how\s+to|implement|handle|process|manage|create|make|build)\b`)
+	examplePatterns    = regexp.MustCompile(`(?i)\b(example|sample|demo|usage|show\s+me)\b`)
+	// Meta-queries about the repository itself
+	metaRepoPatterns = regexp.MustCompile(`(?i)\b(what\s+(does|is)\s+(this|the)\s+(repo|repository|project|codebase)|about\s+(this|the)\s+(repo|project)|purpose\s+of\s+(this|the)|overview|introduction)\b`)
+)
+
+// IsMetaRepoQuery returns true if the query is asking about the repository itself.
+func IsMetaRepoQuery(query string) bool {
+	return metaRepoPatterns.MatchString(query)
+}
+
+// DetectQueryIntent analyzes a query string and returns the likely intent.
+func DetectQueryIntent(query string) QueryIntent {
+	// Check for explicit example requests first
+	if examplePatterns.MatchString(query) {
+		return IntentExample
+	}
+
+	// Check for procedural/how-to queries
+	if proceduralPatterns.MatchString(query) {
+		return IntentProcedural
+	}
+
+	// Check for definition queries
+	if definitionPatterns.MatchString(query) {
+		return IntentDefinition
+	}
+
+	// Default to conceptual for general queries like "error handling"
+	// These are often seeking definitions/core implementations
+	return IntentConceptual
+}
 
 // Result represents a search result.
 type Result struct {
@@ -37,6 +104,7 @@ type SearchOptions struct {
 	BM25Weight     float64 // Weight for BM25 score in hybrid mode (default: 0.4)
 	UseRerank      bool    // Enable reranking stage for better precision (default: false)
 	RerankTopK     int     // Number of candidates to fetch for reranking (default: 50)
+	RerankWeight   float64 // Weight for reranker in RRF fusion (0-1, default: 0.5). Lower = trust vector search more.
 }
 
 // DefaultSearchOptions returns sensible default options.
@@ -51,7 +119,8 @@ func DefaultSearchOptions() SearchOptions {
 		SemanticWeight: 0.6,
 		BM25Weight:     0.4,
 		UseRerank:      false,
-		RerankTopK:     50, // Fetch 50 candidates for reranking
+		RerankTopK:     50,  // Fetch 50 candidates for reranking
+		RerankWeight:   0.5, // Balance between vector search and reranker (0.5 = equal weight)
 	}
 }
 
@@ -184,34 +253,52 @@ func (s *Searcher) SearchWithOptions(ctx context.Context, query string, opts Sea
 		fetchLimit = opts.Limit * 5 // Need more results when filtering tests
 	}
 
-	searchTimer := util.NewTimer("vector_search")
-	// If reranking is enabled, fetch more candidates
-	if opts.UseRerank && s.reranker != nil {
-		fetchLimit = opts.RerankTopK
-		if fetchLimit < opts.Limit*3 {
-			fetchLimit = opts.Limit * 3
+	// Check if this is a meta-repo query (e.g., "what does this repo do")
+	// For such queries, try document-level search first
+	if IsMetaRepoQuery(query) {
+		fileDocsTimer := util.NewTimer("file_level_search")
+		fileDocs, fileDists, fileErr := s.searchDocumentLevel(ctx, queryEmb, opts.Limit, opts.Threshold)
+		fileDuration := fileDocsTimer.Stop()
+		if fileErr == nil && len(fileDocs) > 0 {
+			stats.RecordStage("file_level_search", fileDuration, int64(len(fileDocs)))
+			util.Debugf(util.DebugSummary, "Meta-query: found %d files via document-level search", len(fileDocs))
+			// Use file-level results directly
+			docs = fileDocs
+			distances = fileDists
 		}
 	}
 
-	if opts.UseHybrid {
-		// Hybrid search: combine semantic + BM25
-		queryTerms := ExtractSearchTerms(query)
-		docs, distances, err = s.store.HybridSearch(ctx, queryEmb, queryTerms,
-			fetchLimit, opts.Threshold, opts.SemanticWeight, opts.BM25Weight)
-	} else {
-		// Semantic-only search
-		docs, distances, err = s.store.Search(ctx, queryEmb, fetchLimit, opts.Threshold)
-	}
-	searchDuration := searchTimer.Stop()
-	stats.RecordStage("vector_search", searchDuration, int64(len(docs)))
-	if err != nil {
-		return nil, err
+	// Fall back to chunk-level search if document-level didn't find results
+	if len(docs) == 0 {
+		searchTimer := util.NewTimer("vector_search")
+		// If reranking is enabled, fetch more candidates
+		if opts.UseRerank && s.reranker != nil {
+			fetchLimit = opts.RerankTopK
+			if fetchLimit < opts.Limit*3 {
+				fetchLimit = opts.Limit * 3
+			}
+		}
+
+		if opts.UseHybrid {
+			// Hybrid search: combine semantic + BM25
+			queryTerms := ExtractSearchTerms(query)
+			docs, distances, err = s.store.HybridSearch(ctx, queryEmb, queryTerms,
+				fetchLimit, opts.Threshold, opts.SemanticWeight, opts.BM25Weight)
+		} else {
+			// Semantic-only search
+			docs, distances, err = s.store.Search(ctx, queryEmb, fetchLimit, opts.Threshold)
+		}
+		searchDuration := searchTimer.Stop()
+		stats.RecordStage("vector_search", searchDuration, int64(len(docs)))
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Stage 2: Reranking (if enabled and reranker is available)
 	if opts.UseRerank && s.reranker != nil && len(docs) > 0 {
 		rerankTimer := util.NewTimer("reranking")
-		docs, distances, err = s.rerankResults(ctx, query, docs, distances, opts.Limit)
+		docs, distances, err = s.rerankResults(ctx, query, docs, distances, opts)
 		rerankDuration := rerankTimer.Stop()
 		stats.RecordStage("reranking", rerankDuration, int64(len(docs)))
 		if err != nil {
@@ -333,11 +420,69 @@ func (s *Searcher) CacheStats() util.CacheStats {
 	return s.queryCache.Stats()
 }
 
-// rerankResults uses the reranker to reorder documents by relevance.
-func (s *Searcher) rerankResults(ctx context.Context, query string, docs []*store.Document, distances []float64, limit int) ([]*store.Document, []float64, error) {
+// searchDocumentLevel searches using document-level embeddings and returns chunks from matched files.
+// This is used for meta-queries like "what does this repo do" where chunk-level search fails.
+func (s *Searcher) searchDocumentLevel(ctx context.Context, queryEmb []float32, limit int, threshold float64) ([]*store.Document, []float64, error) {
+	// Check if store supports file embeddings
+	feStore, ok := s.store.(store.FileEmbeddingStorer)
+	if !ok {
+		return nil, nil, nil // Store doesn't support file embeddings
+	}
+
+	// Search for relevant files at document level
+	filePaths, fileDists, err := feStore.SearchFileEmbeddings(ctx, queryEmb, limit, threshold)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if len(filePaths) == 0 {
+		return nil, nil, nil
+	}
+
+	util.Debugf(util.DebugDetailed, "Document-level search found %d files", len(filePaths))
+
+	// For each matched file, get its first chunk (which typically contains the overview/header)
+	var docs []*store.Document
+	var distances []float64
+
+	for i, fp := range filePaths {
+		chunks, err := feStore.GetChunksByFilePath(ctx, fp)
+		if err != nil || len(chunks) == 0 {
+			continue
+		}
+
+		// For meta-queries, prioritize README and root-level files
+		// Include first chunk (usually contains overview) and potentially more
+		maxChunks := 2
+		if strings.HasSuffix(strings.ToLower(fp), "readme.md") {
+			maxChunks = 3 // README gets more chunks
+		}
+
+		for j := 0; j < maxChunks && j < len(chunks); j++ {
+			docs = append(docs, chunks[j])
+			distances = append(distances, fileDists[i])
+		}
+
+		// Stop if we have enough results
+		if len(docs) >= limit*2 {
+			break
+		}
+	}
+
+	return docs, distances, nil
+}
+
+// rerankResults uses the reranker to reorder documents using RRF score fusion.
+// It combines vector search rankings with cross-encoder scores, applying
+// code-specific signal boosting based on query intent.
+func (s *Searcher) rerankResults(ctx context.Context, query string, docs []*store.Document, distances []float64, opts SearchOptions) ([]*store.Document, []float64, error) {
 	if s.reranker == nil {
 		return docs, distances, nil
 	}
+
+	// Detect query intent to adjust fusion strategy
+	intent := DetectQueryIntent(query)
+	util.Debugf(util.DebugDetailed, "Query intent: %s", intent)
 
 	// Prepare document contents for reranking
 	contents := make([]string, len(docs))
@@ -351,32 +496,90 @@ func (s *Searcher) rerankResults(ctx context.Context, query string, docs []*stor
 		return docs, distances, err
 	}
 
-	// Reorder docs by rerank score
-	type scoredDoc struct {
-		doc      *store.Document
-		score    float64
-		origDist float64
-	}
-
-	scored := make([]scoredDoc, len(results))
-	for i, r := range results {
+	// Build a map of reranker scores by document index
+	rerankScores := make(map[int]float64)
+	for _, r := range results {
 		if r.Index >= 0 && r.Index < len(docs) {
-			scored[i] = scoredDoc{
-				doc:      docs[r.Index],
-				score:    r.Score,
-				origDist: distances[r.Index],
-			}
+			rerankScores[r.Index] = r.Score
 		}
 	}
 
-	// Sort by rerank score descending (higher = more relevant)
+	// Scored document with RRF fusion
+	type scoredDoc struct {
+		doc           *store.Document
+		vectorRank    int
+		vectorDist    float64
+		rerankScore   float64
+		codeBoost     float64
+		rrfScore      float64
+		finalDistance float64
+	}
+
+	// Compute RRF scores with code signal boosting
+	scored := make([]scoredDoc, len(docs))
+	const rrfK = 60.0 // Standard RRF constant to prevent early-rank bias
+
+	// Adjust rerank weight based on query intent
+	rerankWeight := opts.RerankWeight
+	if rerankWeight == 0 {
+		rerankWeight = 0.5 // Default
+	}
+
+	// For conceptual/definition queries, trust vector search more
+	// For procedural/example queries, trust reranker more
+	switch intent {
+	case IntentConceptual, IntentDefinition:
+		rerankWeight = math.Min(rerankWeight, 0.4) // Cap at 0.4 for definitions
+	case IntentExample:
+		rerankWeight = math.Max(rerankWeight, 0.6) // At least 0.6 for examples
+	}
+
+	for i, doc := range docs {
+		vectorRRF := 1.0 / (rrfK + float64(i+1)) // Vector rank (1-indexed)
+
+		// Get reranker score and convert to RRF-compatible value
+		rerankScore := rerankScores[i]
+		rerankProb := sigmoid(rerankScore)
+		// Convert probability to a pseudo-rank (0.99 prob → rank ~1, 0.01 prob → rank ~100)
+		rerankPseudoRank := (1.0-rerankProb)*100.0 + 1.0
+		rerankRRF := 1.0 / (rrfK + rerankPseudoRank)
+
+		// Compute code signal boost based on file path
+		codeBoost := computeCodeSignalBoost(doc.FilePath, intent)
+
+		// RRF fusion: combine vector and reranker with code boost
+		// Higher RRF score = better ranking
+		rrfScore := ((1.0-rerankWeight)*vectorRRF + rerankWeight*rerankRRF) * codeBoost
+
+		scored[i] = scoredDoc{
+			doc:           doc,
+			vectorRank:    i + 1,
+			vectorDist:    distances[i],
+			rerankScore:   rerankScore,
+			codeBoost:     codeBoost,
+			rrfScore:      rrfScore,
+			finalDistance: distances[i], // Preserve original distance for display
+		}
+	}
+
+	// Sort by RRF score descending (higher = better)
 	sort.Slice(scored, func(i, j int) bool {
-		return scored[i].score > scored[j].score
+		return scored[i].rrfScore > scored[j].rrfScore
 	})
 
+	// Debug: log top results with RRF breakdown
+	util.Debugf(util.DebugDetailed, "RRF fusion results (weight=%.2f):", rerankWeight)
+	for i := 0; i < len(scored) && i < 10; i++ {
+		s := scored[i]
+		if s.doc != nil {
+			util.Debugf(util.DebugDetailed, "  [%d] RRF=%.4f (vec#%d, rerank=%.2f, boost=%.2f): %s",
+				i+1, s.rrfScore, s.vectorRank, s.rerankScore, s.codeBoost, s.doc.FilePath)
+		}
+	}
+
 	// Limit results
-	if len(scored) > limit {
-		scored = scored[:limit]
+	if len(scored) > opts.Limit {
+		scored = scored[:opts.Limit]
 	}
 
 	// Reconstruct arrays
@@ -384,15 +587,77 @@ func (s *Searcher) rerankResults(ctx context.Context, query string, docs []*stor
 	rerankedDists := make([]float64, len(scored))
 	for i, s := range scored {
 		rerankedDocs[i] = s.doc
-		// Use inverted rerank score as distance (for consistency: lower = better)
-		// Rerank scores are typically 0-1, so 1 - score gives us 0 (best) to 1 (worst)
-		rerankedDists[i] = 1.0 - s.score
+		rerankedDists[i] = s.finalDistance
 	}
 
 	return rerankedDocs, rerankedDists, nil
 }
 
+// computeCodeSignalBoost returns a multiplier based on file path signals.
+// Higher boost = better ranking in RRF fusion.
+func computeCodeSignalBoost(filePath string, intent QueryIntent) float64 {
+	path := strings.ToLower(filePath)
+	boost := 1.0
+
+	// Root-level README boost for conceptual queries (highest priority)
+	// These are typically project descriptions
+	if intent == IntentConceptual {
+		if path == "readme.md" || path == "readme" || path == "readme.txt" {
+			boost *= 1.5 // +50% for root README
+		} else if strings.HasSuffix(path, "/readme.md") && !strings.Contains(path, "example") {
+			boost *= 1.2 // +20% for package READMEs
+		}
+	}
+
+	// Core package boost for definition/conceptual queries
+	if intent == IntentConceptual || intent == IntentDefinition {
+		// Boost core packages (pkg/*, internal/*, lib/*)
+		if strings.HasPrefix(path, "pkg/") || strings.HasPrefix(path, "internal/") || strings.HasPrefix(path, "lib/") {
+			// Extra boost if the path suggests it's the primary implementation
+			// e.g., pkg/errors/errors.go for "error handling" query
+			if !strings.Contains(path, "example") && !strings.Contains(path, "test") {
+				boost *= 1.3 // +30% for core non-example, non-test code
+			}
+		}
+
+		// Penalize example directories for definition queries
+		if strings.Contains(path, "/example") || strings.HasPrefix(path, "example") {
+			boost *= 0.7 // -30% for examples when seeking definitions
+		}
+	}
+
+	// Example boost for example queries
+	if intent == IntentExample {
+		if strings.Contains(path, "example") || strings.Contains(path, "demo") {
+			boost *= 1.3 // +30% for examples
+		}
+	}
+
+	// Test file penalty (unless explicitly including tests)
+	if strings.HasSuffix(path, "_test.go") || strings.Contains(path, "/test/") {
+		boost *= 0.8 // -20% for test files
+	}
+
+	// Worktree/duplicate penalty
+	if strings.Contains(path, ".worktrees/") || strings.Contains(path, "/.worktrees/") {
+		boost *= 0.5 // -50% for worktree duplicates
+	}
+
+	// Generated file penalty
+	if strings.Contains(path, ".generated.") || strings.Contains(path, ".pb.go") {
+		boost *= 0.6 // -40% for generated code
+	}
+
+	return boost
+}
+
 // SetReranker sets the reranker for two-stage retrieval.
 func (s *Searcher) SetReranker(r *rerank.Reranker) {
 	s.reranker = r
+}
+
+// sigmoid converts a logit to a probability (0-1 range).
+// Used to normalize reranker scores which are raw logits (can be negative).
+func sigmoid(x float64) float64 {
+	return 1.0 / (1.0 + math.Exp(-x))
 }
