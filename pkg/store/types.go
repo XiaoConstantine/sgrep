@@ -58,6 +58,11 @@ type FileEmbeddingStorer interface {
 	DeleteFileEmbedding(ctx context.Context, filePath string) error
 }
 
+// FileEmbeddingComputer is an optional interface for stores that can compute file embeddings from chunks.
+type FileEmbeddingComputer interface {
+	ComputeAndStoreFileEmbeddings(ctx context.Context) (int, error)
+}
+
 // FileEmbedding represents a document-level embedding for a file.
 type FileEmbedding struct {
 	FilePath   string
