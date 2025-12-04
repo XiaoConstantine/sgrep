@@ -456,13 +456,15 @@ func TestSearcher_SearchWithOptions_Deduplicate(t *testing.T) {
 		t.Skip("skipping integration test that requires embedding server")
 	}
 
+	// Smart deduplication: keeps non-overlapping chunks, collapses overlapping ones
 	ms := &mockStore{
 		docs: []*store.Document{
 			{ID: "chunk1", FilePath: "/main.go", Content: "func foo()", StartLine: 1, EndLine: 5},
-			{ID: "chunk2", FilePath: "/main.go", Content: "func bar()", StartLine: 10, EndLine: 15},
-			{ID: "chunk3", FilePath: "/other.go", Content: "func baz()", StartLine: 1, EndLine: 5},
+			{ID: "chunk2", FilePath: "/main.go", Content: "func bar()", StartLine: 10, EndLine: 15}, // non-overlapping with chunk1
+			{ID: "chunk3", FilePath: "/main.go", Content: "func foo2()", StartLine: 2, EndLine: 6}, // overlaps with chunk1
+			{ID: "chunk4", FilePath: "/other.go", Content: "func baz()", StartLine: 1, EndLine: 5},
 		},
-		distances: []float64{0.3, 0.5, 0.4},
+		distances: []float64{0.3, 0.5, 0.6, 0.4},
 	}
 	s := New(ms)
 
@@ -474,16 +476,20 @@ func TestSearcher_SearchWithOptions_Deduplicate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Should have deduplicated main.go
+	// Smart dedup keeps non-overlapping chunks from same file
+	// chunk1 (1-5) and chunk2 (10-15) are non-overlapping -> keep both
+	// chunk3 (2-6) overlaps with chunk1 (1-5) -> collapsed
+	// So main.go should have 2 chunks, other.go should have 1
 	fileCount := make(map[string]int)
 	for _, r := range results {
 		fileCount[r.FilePath]++
 	}
 
-	for file, count := range fileCount {
-		if count > 1 {
-			t.Errorf("file %s appears %d times, should be deduplicated", file, count)
-		}
+	if fileCount["/main.go"] != 2 {
+		t.Errorf("main.go should have 2 non-overlapping chunks, got %d", fileCount["/main.go"])
+	}
+	if fileCount["/other.go"] != 1 {
+		t.Errorf("other.go should have 1 chunk, got %d", fileCount["/other.go"])
 	}
 }
 
@@ -536,17 +542,18 @@ func TestSearcher_cacheKeyWithOpts(t *testing.T) {
 }
 
 func TestDeduplicateResults(t *testing.T) {
+	// Overlapping chunks from same file should be deduplicated
 	results := []Result{
-		{FilePath: "/a.go", Score: 0.3},
-		{FilePath: "/a.go", Score: 0.5},
-		{FilePath: "/b.go", Score: 0.4},
-		{FilePath: "/a.go", Score: 0.2}, // Best score for /a.go
+		{FilePath: "/a.go", StartLine: 1, EndLine: 10, Score: 0.3},
+		{FilePath: "/a.go", StartLine: 5, EndLine: 15, Score: 0.5}, // Overlaps with first
+		{FilePath: "/b.go", StartLine: 1, EndLine: 10, Score: 0.4},
+		{FilePath: "/a.go", StartLine: 1, EndLine: 10, Score: 0.2}, // Same range, best score
 	}
 
 	deduped := deduplicateResults(results)
 
 	if len(deduped) != 2 {
-		t.Errorf("expected 2 deduplicated results, got %d", len(deduped))
+		t.Errorf("expected 2 deduplicated results (overlapping chunks collapsed), got %d", len(deduped))
 	}
 
 	// Check that /a.go kept the best score
@@ -554,6 +561,33 @@ func TestDeduplicateResults(t *testing.T) {
 		if r.FilePath == "/a.go" && r.Score != 0.2 {
 			t.Errorf("expected best score 0.2 for /a.go, got %f", r.Score)
 		}
+	}
+}
+
+func TestDeduplicateResults_KeepsNonOverlapping(t *testing.T) {
+	// Non-overlapping chunks from same file should be kept
+	results := []Result{
+		{FilePath: "/a.go", StartLine: 1, EndLine: 10, Score: 0.3},
+		{FilePath: "/a.go", StartLine: 50, EndLine: 60, Score: 0.4}, // Different part of file
+		{FilePath: "/a.go", StartLine: 100, EndLine: 110, Score: 0.5}, // Another part
+		{FilePath: "/b.go", StartLine: 1, EndLine: 10, Score: 0.2},
+	}
+
+	deduped := deduplicateResults(results)
+
+	if len(deduped) != 4 {
+		t.Errorf("expected 4 results (non-overlapping chunks kept), got %d", len(deduped))
+	}
+
+	// Count chunks from /a.go
+	aCount := 0
+	for _, r := range deduped {
+		if r.FilePath == "/a.go" {
+			aCount++
+		}
+	}
+	if aCount != 3 {
+		t.Errorf("expected 3 chunks from /a.go (non-overlapping), got %d", aCount)
 	}
 }
 
@@ -651,10 +685,10 @@ func TestIsWorktreePath(t *testing.T) {
 
 func TestDeduplicateResults_Worktrees(t *testing.T) {
 	results := []Result{
-		{FilePath: "pkg/core/signature.go", Score: 0.3},
-		{FilePath: ".worktrees/feature/pkg/core/signature.go", Score: 0.3},
-		{FilePath: ".worktrees/another/pkg/core/signature.go", Score: 0.4},
-		{FilePath: "pkg/other/file.go", Score: 0.5},
+		{FilePath: "pkg/core/signature.go", StartLine: 1, EndLine: 10, Score: 0.3},
+		{FilePath: ".worktrees/feature/pkg/core/signature.go", StartLine: 1, EndLine: 10, Score: 0.3},
+		{FilePath: ".worktrees/another/pkg/core/signature.go", StartLine: 1, EndLine: 10, Score: 0.4},
+		{FilePath: "pkg/other/file.go", StartLine: 1, EndLine: 10, Score: 0.5},
 	}
 
 	deduped := deduplicateResults(results)
@@ -682,8 +716,8 @@ func TestDeduplicateResults_Worktrees(t *testing.T) {
 func TestDeduplicateResults_WorktreesBetterScore(t *testing.T) {
 	// If worktree has better score, it should be kept
 	results := []Result{
-		{FilePath: "pkg/core/signature.go", Score: 0.5},
-		{FilePath: ".worktrees/feature/pkg/core/signature.go", Score: 0.2}, // Better score
+		{FilePath: "pkg/core/signature.go", StartLine: 1, EndLine: 10, Score: 0.5},
+		{FilePath: ".worktrees/feature/pkg/core/signature.go", StartLine: 1, EndLine: 10, Score: 0.2}, // Better score
 	}
 
 	deduped := deduplicateResults(results)
@@ -701,8 +735,8 @@ func TestDeduplicateResults_WorktreesBetterScore(t *testing.T) {
 func TestDeduplicateResults_PreferNonWorktreeOnTie(t *testing.T) {
 	// On equal scores, prefer non-worktree path
 	results := []Result{
-		{FilePath: ".worktrees/feature/pkg/foo.go", Score: 0.3},
-		{FilePath: "pkg/foo.go", Score: 0.3}, // Same score, but comes second
+		{FilePath: ".worktrees/feature/pkg/foo.go", StartLine: 1, EndLine: 10, Score: 0.3},
+		{FilePath: "pkg/foo.go", StartLine: 1, EndLine: 10, Score: 0.3}, // Same score, but comes second
 	}
 
 	deduped := deduplicateResults(results)
@@ -714,5 +748,30 @@ func TestDeduplicateResults_PreferNonWorktreeOnTie(t *testing.T) {
 	// Should prefer the non-worktree path
 	if deduped[0].FilePath != "pkg/foo.go" {
 		t.Errorf("expected pkg/foo.go (non-worktree preferred on tie), got %s", deduped[0].FilePath)
+	}
+}
+
+func TestChunksOverlap(t *testing.T) {
+	tests := []struct {
+		name                       string
+		start1, end1, start2, end2 int
+		expected                   bool
+	}{
+		{"no overlap", 1, 10, 20, 30, false},
+		{"same range", 1, 10, 1, 10, true},
+		{"significant overlap", 1, 10, 5, 15, true},
+		{"minor overlap", 1, 100, 99, 200, false}, // Only 2 lines overlap out of 100
+		{"contained", 1, 100, 40, 60, true},
+		{"adjacent", 1, 10, 11, 20, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := chunksOverlap(tt.start1, tt.end1, tt.start2, tt.end2)
+			if result != tt.expected {
+				t.Errorf("chunksOverlap(%d-%d, %d-%d) = %v, want %v",
+					tt.start1, tt.end1, tt.start2, tt.end2, result, tt.expected)
+			}
+		})
 	}
 }

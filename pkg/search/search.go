@@ -105,6 +105,8 @@ type SearchOptions struct {
 	UseRerank      bool    // Enable reranking stage for better precision (default: false)
 	RerankTopK     int     // Number of candidates to fetch for reranking (default: 50)
 	RerankWeight   float64 // Weight for reranker in RRF fusion (0-1, default: 0.5). Lower = trust vector search more.
+	UseColBERT     bool    // Enable ColBERT-style late interaction scoring (default: false)
+	ColBERTWeight  float64 // Weight for ColBERT score in fusion (0-1, default: 0.3)
 }
 
 // DefaultSearchOptions returns sensible default options.
@@ -121,6 +123,8 @@ func DefaultSearchOptions() SearchOptions {
 		UseRerank:      false,
 		RerankTopK:     30,  // Fetch 30 candidates for reranking (reduced from 50 for performance)
 		RerankWeight:   0.5, // Balance between vector search and reranker (0.5 = equal weight)
+		UseColBERT:     false,
+		ColBERTWeight:  0.3, // ColBERT contribution in fusion (0.3 = 30% ColBERT, 70% other signals)
 	}
 }
 
@@ -132,21 +136,23 @@ type cachedResult struct {
 
 // Config holds searcher configuration (dependency injection pattern).
 type Config struct {
-	Store      store.Storer
-	Embedder   *embed.Embedder
-	Reranker   *rerank.Reranker // Optional reranker for two-stage retrieval
-	CacheSize  int
-	CacheTTL   time.Duration
-	EventBox   *util.EventBox
+	Store         store.Storer
+	Embedder      *embed.Embedder
+	Reranker      *rerank.Reranker // Optional cross-encoder reranker
+	ColBERTScorer *ColBERTScorer   // Optional ColBERT-style late interaction scorer
+	CacheSize     int
+	CacheTTL      time.Duration
+	EventBox      *util.EventBox
 }
 
 // Searcher handles semantic search with caching.
 type Searcher struct {
-	store      store.Storer
-	embedder   *embed.Embedder
-	reranker   *rerank.Reranker // Optional reranker for two-stage retrieval
-	queryCache *util.QueryCache // L3 cache: query text → results
-	eventBox   *util.EventBox
+	store         store.Storer
+	embedder      *embed.Embedder
+	reranker      *rerank.Reranker // Optional cross-encoder reranker
+	colbertScorer *ColBERTScorer   // Optional ColBERT-style late interaction scorer
+	queryCache    *util.QueryCache // L3 cache: query text → results
+	eventBox      *util.EventBox
 }
 
 // New creates a new searcher with caching enabled.
@@ -189,12 +195,19 @@ func NewWithConfig(cfg Config) *Searcher {
 		cacheTTL = 5 * time.Minute
 	}
 
+	// Initialize ColBERT scorer if not provided but embedder is available
+	colbertScorer := cfg.ColBERTScorer
+	if colbertScorer == nil && embedder != nil {
+		colbertScorer = NewColBERTScorer(embedder)
+	}
+
 	return &Searcher{
-		store:      cfg.Store,
-		embedder:   embedder,
-		reranker:   cfg.Reranker,
-		queryCache: util.NewQueryCache(cacheSize, cacheTTL),
-		eventBox:   cfg.EventBox,
+		store:         cfg.Store,
+		embedder:      embedder,
+		reranker:      cfg.Reranker,
+		colbertScorer: colbertScorer,
+		queryCache:    util.NewQueryCache(cacheSize, cacheTTL),
+		eventBox:      cfg.EventBox,
 	}
 }
 
@@ -374,28 +387,128 @@ func (s *Searcher) SearchWithOptions(ctx context.Context, query string, opts Sea
 	return results, nil
 }
 
-// deduplicateResults keeps only the best result per logical file.
-// It uses canonical paths to group duplicates from worktrees, vendored code, etc.
+// deduplicateResults performs smart deduplication:
+// 1. Collapses worktree duplicates (same canonical path) - keeps non-worktree version
+// 2. Keeps non-overlapping chunks from the same file (different line ranges)
+// 3. Collapses overlapping chunks from the same file - keeps best score
 func deduplicateResults(results []Result) []Result {
-	seen := make(map[string]int) // canonical path -> index in dedupedResults
+	// Group results by canonical path
+	type chunkKey struct {
+		canonical string
+		startLine int
+		endLine   int
+	}
+
+	// Track chunks we've seen for each canonical path
+	// Key: canonical path, Value: list of (startLine, endLine, index in dedupedResults)
+	fileChunks := make(map[string][]struct {
+		start, end int
+		idx        int
+		isWorktree bool
+	})
+
 	var dedupedResults []Result
 
 	for _, r := range results {
 		canonical := canonicalPath(r.FilePath)
-		if existingIdx, ok := seen[canonical]; ok {
-			existing := dedupedResults[existingIdx]
-			// Keep the one with better (lower) score, or prefer non-worktree path on tie
+		isWT := isWorktreePath(r.FilePath)
+
+		chunks, exists := fileChunks[canonical]
+		if !exists {
+			// First chunk from this file
+			fileChunks[canonical] = []struct {
+				start, end int
+				idx        int
+				isWorktree bool
+			}{{r.StartLine, r.EndLine, len(dedupedResults), isWT}}
+			dedupedResults = append(dedupedResults, r)
+			continue
+		}
+
+		// Check if this chunk overlaps with any existing chunk from this file
+		overlapsIdx := -1
+		for _, chunk := range chunks {
+			if chunksOverlap(r.StartLine, r.EndLine, chunk.start, chunk.end) {
+				overlapsIdx = chunk.idx
+				break
+			}
+		}
+
+		if overlapsIdx >= 0 {
+			// Overlapping chunk - keep the better one
+			existing := dedupedResults[overlapsIdx]
+			existingIsWT := isWorktreePath(existing.FilePath)
+
+			// Prefer: better score, or non-worktree on tie
 			if r.Score < existing.Score ||
-				(r.Score == existing.Score && !isWorktreePath(r.FilePath) && isWorktreePath(existing.FilePath)) {
-				dedupedResults[existingIdx] = r
+				(r.Score == existing.Score && !isWT && existingIsWT) {
+				dedupedResults[overlapsIdx] = r
+				// Update the chunk info
+				for i, chunk := range fileChunks[canonical] {
+					if chunk.idx == overlapsIdx {
+						fileChunks[canonical][i].start = r.StartLine
+						fileChunks[canonical][i].end = r.EndLine
+						fileChunks[canonical][i].isWorktree = isWT
+						break
+					}
+				}
 			}
 		} else {
-			seen[canonical] = len(dedupedResults)
-			dedupedResults = append(dedupedResults, r)
+			// Non-overlapping chunk from same file - keep it (more context for agents)
+			// But skip if it's a worktree duplicate of a non-worktree chunk
+			hasNonWorktreeVersion := false
+			if isWT {
+				for _, chunk := range chunks {
+					if !chunk.isWorktree {
+						hasNonWorktreeVersion = true
+						break
+					}
+				}
+			}
+
+			if !isWT || !hasNonWorktreeVersion {
+				fileChunks[canonical] = append(fileChunks[canonical], struct {
+					start, end int
+					idx        int
+					isWorktree bool
+				}{r.StartLine, r.EndLine, len(dedupedResults), isWT})
+				dedupedResults = append(dedupedResults, r)
+			}
 		}
 	}
 
 	return dedupedResults
+}
+
+// chunksOverlap returns true if two line ranges overlap significantly.
+// We consider chunks overlapping if they share more than 50% of lines.
+func chunksOverlap(start1, end1, start2, end2 int) bool {
+	// No overlap
+	if end1 < start2 || end2 < start1 {
+		return false
+	}
+
+	// Calculate overlap
+	overlapStart := start1
+	if start2 > overlapStart {
+		overlapStart = start2
+	}
+	overlapEnd := end1
+	if end2 < overlapEnd {
+		overlapEnd = end2
+	}
+
+	overlapLines := overlapEnd - overlapStart + 1
+	if overlapLines <= 0 {
+		return false
+	}
+
+	// Check if overlap is significant (>50% of either chunk)
+	chunk1Lines := end1 - start1 + 1
+	chunk2Lines := end2 - start2 + 1
+
+	return float64(overlapLines)/float64(chunk1Lines) > 0.5 ||
+		float64(overlapLines)/float64(chunk2Lines) > 0.5
 }
 
 // canonicalPath normalizes a file path by stripping worktree prefixes and other
@@ -503,47 +616,68 @@ func (s *Searcher) searchDocumentLevel(ctx context.Context, queryEmb []float32, 
 	return docs, distances, nil
 }
 
-// rerankResults uses the reranker to reorder documents using RRF score fusion.
-// It combines vector search rankings with cross-encoder scores, applying
-// code-specific signal boosting based on query intent.
+// rerankResults uses late interaction scoring to reorder documents using RRF score fusion.
+// It supports multiple scoring modes:
+// - Cross-encoder reranker (UseRerank=true): Traditional reranker, slower but accurate
+// - ColBERT-style scoring (UseColBERT=true): Late interaction, faster with good quality
+// - Combined mode: Both scorers contribute to final ranking
 func (s *Searcher) rerankResults(ctx context.Context, query string, docs []*store.Document, distances []float64, opts SearchOptions) ([]*store.Document, []float64, error) {
-	if s.reranker == nil {
+	// Check if we have any reranking capability
+	hasReranker := s.reranker != nil && opts.UseRerank
+	hasColBERT := s.colbertScorer != nil && opts.UseColBERT
+
+	if !hasReranker && !hasColBERT {
 		return docs, distances, nil
 	}
 
 	// Detect query intent to adjust fusion strategy
 	intent := DetectQueryIntent(query)
-	util.Debugf(util.DebugDetailed, "Query intent: %s", intent)
+	util.Debugf(util.DebugDetailed, "Query intent: %s (reranker=%v, colbert=%v)", intent, hasReranker, hasColBERT)
 
 	// Performance optimization: limit reranking to top candidates only
-	// Reranking is expensive (~70ms per doc with batching), so we limit how many we actually rerank
-	maxRerankDocs := 15 // Maximum documents to send to reranker
-	if len(docs) > maxRerankDocs {
-		// Keep original docs/distances for RRF fusion, but only rerank top N
-		util.Debugf(util.DebugDetailed, "Limiting rerank from %d to %d docs for performance", len(docs), maxRerankDocs)
+	maxRerankDocs := 15
+	if hasColBERT && !hasReranker {
+		// ColBERT is faster, can handle more docs
+		maxRerankDocs = 20
 	}
 
-	// Prepare document contents for reranking (only top N)
 	rerankCount := len(docs)
 	if rerankCount > maxRerankDocs {
+		util.Debugf(util.DebugDetailed, "Limiting rerank from %d to %d docs for performance", len(docs), maxRerankDocs)
 		rerankCount = maxRerankDocs
 	}
+
+	// Prepare document contents
 	contents := make([]string, rerankCount)
 	for i := 0; i < rerankCount; i++ {
 		contents[i] = docs[i].Content
 	}
 
-	// Call reranker on subset
-	results, err := s.reranker.Rerank(ctx, query, contents)
-	if err != nil {
-		return docs, distances, err
+	// Get cross-encoder reranker scores if enabled
+	rerankScores := make(map[int]float64)
+	if hasReranker {
+		results, err := s.reranker.Rerank(ctx, query, contents)
+		if err != nil {
+			util.Debugf(util.DebugDetailed, "Reranker error (continuing with other signals): %v", err)
+		} else {
+			for _, r := range results {
+				if r.Index >= 0 && r.Index < len(docs) {
+					rerankScores[r.Index] = r.Score
+				}
+			}
+		}
 	}
 
-	// Build a map of reranker scores by document index
-	rerankScores := make(map[int]float64)
-	for _, r := range results {
-		if r.Index >= 0 && r.Index < len(docs) {
-			rerankScores[r.Index] = r.Score
+	// Get ColBERT scores if enabled
+	colbertScores := make(map[int]float64)
+	if hasColBERT {
+		scores, err := s.colbertScorer.ScoreBatch(ctx, query, contents)
+		if err != nil {
+			util.Debugf(util.DebugDetailed, "ColBERT error (continuing with other signals): %v", err)
+		} else {
+			for i, score := range scores {
+				colbertScores[i] = score
+			}
 		}
 	}
 
@@ -553,70 +687,118 @@ func (s *Searcher) rerankResults(ctx context.Context, query string, docs []*stor
 		vectorRank    int
 		vectorDist    float64
 		rerankScore   float64
+		colbertScore  float64
 		codeBoost     float64
 		rrfScore      float64
 		finalDistance float64
 	}
 
-	// Compute RRF scores with code signal boosting
+	// Compute RRF scores with multi-signal fusion
 	scored := make([]scoredDoc, len(docs))
-	const rrfK = 60.0 // Standard RRF constant to prevent early-rank bias
+	const rrfK = 60.0 // Standard RRF constant
 
-	// Adjust rerank weight based on query intent
+	// Calculate effective weights based on what's available
+	vectorWeight := 0.4
 	rerankWeight := opts.RerankWeight
+	colbertWeight := opts.ColBERTWeight
+
 	if rerankWeight == 0 {
-		rerankWeight = 0.5 // Default
+		rerankWeight = 0.5
+	}
+	if colbertWeight == 0 {
+		colbertWeight = 0.3
 	}
 
-	// For conceptual/definition queries, trust vector search more
-	// For procedural/example queries, trust reranker more
+	// Adjust weights based on what's enabled
+	if hasReranker && hasColBERT {
+		// Both enabled: vector 30%, reranker 40%, ColBERT 30%
+		vectorWeight = 0.3
+		rerankWeight = 0.4
+		colbertWeight = 0.3
+	} else if hasColBERT && !hasReranker {
+		// ColBERT only: vector 50%, ColBERT 50%
+		vectorWeight = 0.5
+		rerankWeight = 0
+		colbertWeight = 0.5
+	} else if hasReranker && !hasColBERT {
+		// Reranker only: use original weights
+		vectorWeight = 1.0 - rerankWeight
+		colbertWeight = 0
+	}
+
+	// Adjust based on query intent
 	switch intent {
 	case IntentConceptual, IntentDefinition:
-		rerankWeight = math.Min(rerankWeight, 0.4) // Cap at 0.4 for definitions
+		// Trust vector search more for definitions
+		vectorWeight = math.Min(vectorWeight+0.1, 0.6)
+		rerankWeight = math.Max(rerankWeight-0.05, 0.2)
 	case IntentExample:
-		rerankWeight = math.Max(rerankWeight, 0.6) // At least 0.6 for examples
+		// Trust late interaction more for examples
+		if hasColBERT {
+			colbertWeight = math.Min(colbertWeight+0.1, 0.5)
+		}
+		if hasReranker {
+			rerankWeight = math.Min(rerankWeight+0.1, 0.5)
+		}
 	}
 
+	// Normalize weights
+	totalWeight := vectorWeight + rerankWeight + colbertWeight
+	vectorWeight /= totalWeight
+	rerankWeight /= totalWeight
+	colbertWeight /= totalWeight
+
+	util.Debugf(util.DebugDetailed, "Fusion weights: vector=%.2f, reranker=%.2f, colbert=%.2f", vectorWeight, rerankWeight, colbertWeight)
+
 	for i, doc := range docs {
-		vectorRRF := 1.0 / (rrfK + float64(i+1)) // Vector rank (1-indexed)
+		vectorRRF := 1.0 / (rrfK + float64(i+1))
 
-		// Get reranker score and convert to RRF-compatible value
-		rerankScore := rerankScores[i]
-		rerankProb := sigmoid(rerankScore)
-		// Convert probability to a pseudo-rank (0.99 prob → rank ~1, 0.01 prob → rank ~100)
-		rerankPseudoRank := (1.0-rerankProb)*100.0 + 1.0
-		rerankRRF := 1.0 / (rrfK + rerankPseudoRank)
+		// Cross-encoder contribution
+		var rerankRRF float64
+		if rerankScore, ok := rerankScores[i]; ok {
+			rerankProb := sigmoid(rerankScore)
+			rerankPseudoRank := (1.0-rerankProb)*100.0 + 1.0
+			rerankRRF = 1.0 / (rrfK + rerankPseudoRank)
+		}
 
-		// Compute code signal boost based on file path
+		// ColBERT contribution (score is already 0-1 range)
+		var colbertRRF float64
+		if colbertScore, ok := colbertScores[i]; ok {
+			// Convert ColBERT score (higher=better, ~0.5-1.0 range) to pseudo-rank
+			colbertPseudoRank := (1.0-colbertScore)*50.0 + 1.0
+			colbertRRF = 1.0 / (rrfK + colbertPseudoRank)
+		}
+
+		// Code signal boost
 		codeBoost := computeCodeSignalBoost(doc.FilePath, intent)
 
-		// RRF fusion: combine vector and reranker with code boost
-		// Higher RRF score = better ranking
-		rrfScore := ((1.0-rerankWeight)*vectorRRF + rerankWeight*rerankRRF) * codeBoost
+		// Multi-signal RRF fusion
+		rrfScore := (vectorWeight*vectorRRF + rerankWeight*rerankRRF + colbertWeight*colbertRRF) * codeBoost
 
 		scored[i] = scoredDoc{
 			doc:           doc,
 			vectorRank:    i + 1,
 			vectorDist:    distances[i],
-			rerankScore:   rerankScore,
+			rerankScore:   rerankScores[i],
+			colbertScore:  colbertScores[i],
 			codeBoost:     codeBoost,
 			rrfScore:      rrfScore,
-			finalDistance: distances[i], // Preserve original distance for display
+			finalDistance: distances[i],
 		}
 	}
 
-	// Sort by RRF score descending (higher = better)
+	// Sort by RRF score descending
 	sort.Slice(scored, func(i, j int) bool {
 		return scored[i].rrfScore > scored[j].rrfScore
 	})
 
-	// Debug: log top results with RRF breakdown
-	util.Debugf(util.DebugDetailed, "RRF fusion results (weight=%.2f):", rerankWeight)
+	// Debug logging
+	util.Debugf(util.DebugDetailed, "RRF fusion results:")
 	for i := 0; i < len(scored) && i < 10; i++ {
 		s := scored[i]
 		if s.doc != nil {
-			util.Debugf(util.DebugDetailed, "  [%d] RRF=%.4f (vec#%d, rerank=%.2f, boost=%.2f): %s",
-				i+1, s.rrfScore, s.vectorRank, s.rerankScore, s.codeBoost, s.doc.FilePath)
+			util.Debugf(util.DebugDetailed, "  [%d] RRF=%.4f (vec#%d, rerank=%.2f, colbert=%.2f, boost=%.2f): %s",
+				i+1, s.rrfScore, s.vectorRank, s.rerankScore, s.colbertScore, s.codeBoost, s.doc.FilePath)
 		}
 	}
 

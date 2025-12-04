@@ -158,6 +158,8 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	opts.BM25Weight = bm25Weight
 	opts.UseRerank = enableRerank
 	opts.RerankTopK = rerankTopK
+	// ColBERT late interaction is automatically enabled with --rerank for better quality
+	opts.UseColBERT = enableRerank
 
 	// Create searcher config
 	searchCfg := search.Config{Store: s}
