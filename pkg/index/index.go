@@ -419,6 +419,17 @@ func (idx *Indexer) Index(ctx context.Context) error {
 		stats.RecordStage("flush", flushDuration, 1)
 	}
 
+	// Compute document-level embeddings (mean of chunk embeddings per file)
+	fileEmbedTimer := util.NewTimer("file_embeddings")
+	fileCount, err := idx.computeFileEmbeddings(ctx)
+	fileEmbedDuration := fileEmbedTimer.Stop()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to compute file embeddings: %v\n", err)
+	} else if fileCount > 0 {
+		stats.RecordStage("file_embeddings", fileEmbedDuration, int64(fileCount))
+		util.Debugf(util.DebugSummary, "Computed %d file embeddings in %v", fileCount, fileEmbedDuration.Round(time.Millisecond))
+	}
+
 	elapsed := time.Since(startTime)
 	fmt.Printf("\rIndexed %d files in %v (%d errors)\n",
 		idx.processed, elapsed.Round(time.Millisecond), idx.errors)
@@ -561,6 +572,18 @@ func (idx *Indexer) indexFile(ctx context.Context, path string) error {
 		return nil
 	}
 	return idx.store.StoreBatch(ctx, docs)
+}
+
+// computeFileEmbeddings computes document-level embeddings by averaging chunk embeddings.
+// This enables document-level search for queries like "what does this repo do".
+func (idx *Indexer) computeFileEmbeddings(ctx context.Context) (int, error) {
+	// Check if store supports computing file embeddings
+	computer, ok := idx.store.(store.FileEmbeddingComputer)
+	if !ok {
+		return 0, nil // Store doesn't support file embeddings
+	}
+
+	return computer.ComputeAndStoreFileEmbeddings(ctx)
 }
 
 // validateAndRechunk checks chunks for token limit compliance and re-chunks oversized ones.

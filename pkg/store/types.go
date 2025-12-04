@@ -49,6 +49,28 @@ func EnsureFTS5IfNeeded(s Storer) error {
 	return nil
 }
 
+// FileEmbeddingStorer is an optional interface for stores that support document-level embeddings.
+type FileEmbeddingStorer interface {
+	StoreFileEmbedding(ctx context.Context, fe *FileEmbedding) error
+	StoreFileEmbeddingBatch(ctx context.Context, fes []*FileEmbedding) error
+	SearchFileEmbeddings(ctx context.Context, embedding []float32, limit int, threshold float64) ([]string, []float64, error)
+	GetChunksByFilePath(ctx context.Context, filePath string) ([]*Document, error)
+	DeleteFileEmbedding(ctx context.Context, filePath string) error
+}
+
+// FileEmbeddingComputer is an optional interface for stores that can compute file embeddings from chunks.
+type FileEmbeddingComputer interface {
+	ComputeAndStoreFileEmbeddings(ctx context.Context) (int, error)
+}
+
+// FileEmbedding represents a document-level embedding for a file.
+type FileEmbedding struct {
+	FilePath   string
+	Embedding  []float32
+	ChunkCount int
+	TotalLines int
+}
+
 // Document represents an indexed code chunk.
 type Document struct {
 	ID        string

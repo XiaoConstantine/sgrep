@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/XiaoConstantine/sgrep/pkg/index"
+	"github.com/XiaoConstantine/sgrep/pkg/rerank"
 	"github.com/XiaoConstantine/sgrep/pkg/search"
 	"github.com/XiaoConstantine/sgrep/pkg/server"
 	"github.com/XiaoConstantine/sgrep/pkg/store"
@@ -30,6 +31,8 @@ var (
 	hybridSearch   bool
 	semanticWeight float64
 	bm25Weight     float64
+	enableRerank   bool
+	rerankTopK     int
 
 	// Index flags
 	indexWorkers  int
@@ -38,6 +41,9 @@ var (
 	// Debug flags
 	debugLevel   int    // 0=off, 1=summary, 2=detailed (set via -d count)
 	debugLogFile string // optional log file path
+
+	// Setup flags
+	setupWithRerank bool
 )
 
 func Execute() error {
@@ -99,6 +105,8 @@ func init() {
 	rootCmd.Flags().BoolVar(&hybridSearch, "hybrid", false, "Enable hybrid search (semantic + BM25)")
 	rootCmd.Flags().Float64Var(&semanticWeight, "semantic-weight", 0.6, "Weight for semantic score in hybrid mode")
 	rootCmd.Flags().Float64Var(&bm25Weight, "bm25-weight", 0.4, "Weight for BM25 score in hybrid mode")
+	rootCmd.Flags().BoolVar(&enableRerank, "rerank", false, "Enable reranking stage for better precision (requires reranker model)")
+	rootCmd.Flags().IntVar(&rerankTopK, "rerank-topk", 50, "Number of candidates to fetch for reranking")
 
 	// Add subcommands
 	rootCmd.AddCommand(indexCmd)
@@ -148,9 +156,28 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	opts.UseHybrid = hybridSearch
 	opts.SemanticWeight = semanticWeight
 	opts.BM25Weight = bm25Weight
+	opts.UseRerank = enableRerank
+	opts.RerankTopK = rerankTopK
+
+	// Create searcher config
+	searchCfg := search.Config{Store: s}
+
+	// Set up reranker if enabled
+	if enableRerank {
+		// Check if reranker model is available
+		if !rerank.RerankerAvailable() {
+			return fmt.Errorf("reranker model not found. Run 'sgrep setup --with-rerank' first")
+		}
+
+		reranker, err := rerank.New()
+		if err != nil {
+			return fmt.Errorf("failed to initialize reranker: %w", err)
+		}
+		searchCfg.Reranker = reranker
+	}
 
 	// Search
-	searcher := search.New(s)
+	searcher := search.NewWithConfig(searchCfg)
 	results, err := searcher.SearchWithOptions(ctx, query, opts)
 	if err != nil {
 		return fmt.Errorf("search failed: %w", err)
@@ -428,15 +455,56 @@ var setupCmd = &cobra.Command{
 	Long: `Setup downloads the nomic-embed-text embedding model (~130MB) and
 verifies that llama-server is installed.
 
-The model is stored in ~/.sgrep/models/`,
+Use --with-rerank to also download the reranker model (~636MB) for better
+search precision with the --rerank flag.
+
+The models are stored in ~/.sgrep/models/`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		mgr, err := server.NewManager()
 		if err != nil {
 			return err
 		}
 
-		return mgr.Setup(true)
+		if err := mgr.Setup(true); err != nil {
+			return err
+		}
+
+		// Optionally download reranker model
+		if setupWithRerank {
+			fmt.Println()
+			fmt.Println("Downloading reranker model (~636MB)...")
+
+			rerankMgr, err := rerank.NewRerankerManager()
+			if err != nil {
+				return fmt.Errorf("failed to initialize reranker manager: %w", err)
+			}
+
+			if rerankMgr.ModelExists() {
+				fmt.Printf("✓ Reranker model already downloaded: %s\n", rerankMgr.ModelPath())
+			} else {
+				lastPct := -1
+				err = rerankMgr.DownloadModel(func(downloaded, total int64) {
+					if total > 0 {
+						pct := int(downloaded * 100 / total)
+						if pct != lastPct && pct%10 == 0 {
+							fmt.Printf("  %d%%\n", pct)
+							lastPct = pct
+						}
+					}
+				})
+				if err != nil {
+					return fmt.Errorf("failed to download reranker model: %w", err)
+				}
+				fmt.Printf("✓ Reranker model downloaded: %s\n", rerankMgr.ModelPath())
+			}
+		}
+
+		return nil
 	},
+}
+
+func init() {
+	setupCmd.Flags().BoolVar(&setupWithRerank, "with-rerank", false, "Also download reranker model for --rerank flag")
 }
 
 // Server command group
@@ -508,15 +576,16 @@ var serverStatusCmd = &cobra.Command{
 			return err
 		}
 
+		fmt.Println("=== Embedding Server ===")
 		running, pid, port := mgr.Status()
 		if running {
-			fmt.Printf("Server running on port %d", port)
+			fmt.Printf("Status: running on port %d", port)
 			if pid > 0 {
 				fmt.Printf(" (PID %d)", pid)
 			}
 			fmt.Println()
 		} else {
-			fmt.Println("Server not running")
+			fmt.Println("Status: not running")
 		}
 
 		if mgr.ModelExists() {
@@ -529,6 +598,31 @@ var serverStatusCmd = &cobra.Command{
 			fmt.Println("llama-server: installed")
 		} else {
 			fmt.Println("llama-server: not found (brew install llama.cpp)")
+		}
+
+		// Show reranker status
+		fmt.Println()
+		fmt.Println("=== Reranker Server ===")
+		rerankMgr, err := rerank.NewRerankerManager()
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+		} else {
+			running, pid, port := rerankMgr.Status()
+			if running {
+				fmt.Printf("Status: running on port %d", port)
+				if pid > 0 {
+					fmt.Printf(" (PID %d)", pid)
+				}
+				fmt.Println()
+			} else {
+				fmt.Println("Status: not running")
+			}
+
+			if rerankMgr.ModelExists() {
+				fmt.Printf("Model: %s\n", rerankMgr.ModelPath())
+			} else {
+				fmt.Println("Model: not downloaded (run 'sgrep setup --with-rerank')")
+			}
 		}
 
 		return nil

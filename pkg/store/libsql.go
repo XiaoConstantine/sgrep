@@ -138,6 +138,15 @@ func (s *LibSQLStore) init() error {
 		)`, s.dims),
 		`CREATE INDEX IF NOT EXISTS idx_documents_filepath ON documents(filepath)`,
 		`CREATE INDEX IF NOT EXISTS idx_documents_is_test ON documents(is_test)`,
+
+		// File-level embeddings for document-level search (meta-queries like "what does this repo do")
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS file_embeddings (
+			filepath TEXT PRIMARY KEY,
+			embedding F32_BLOB(%d),
+			chunk_count INTEGER NOT NULL,
+			total_lines INTEGER NOT NULL,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`, s.dims),
 	}
 
 	for _, q := range queries {
@@ -157,17 +166,6 @@ func (s *LibSQLStore) init() error {
 
 // createVectorIndex creates the DiskANN index with appropriate compression.
 func (s *LibSQLStore) createVectorIndex() error {
-	// Check if index exists
-	var count int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_documents_embedding'`).Scan(&count)
-	if err != nil {
-		return err
-	}
-
-	if count > 0 {
-		return nil // Index already exists
-	}
-
 	// Determine compression based on quantization mode
 	// libSQL supports: float8, float16, int8, 1bit
 	var indexOpts string
@@ -180,7 +178,33 @@ func (s *LibSQLStore) createVectorIndex() error {
 		indexOpts = "'compress_neighbors=float8', 'max_neighbors=50'"
 	}
 
-	query := fmt.Sprintf(`CREATE INDEX idx_documents_embedding ON documents (libsql_vector_idx(embedding, %s))`, indexOpts)
+	// Create index for documents table
+	if err := s.createSingleVectorIndex("idx_documents_embedding", "documents", indexOpts); err != nil {
+		return err
+	}
+
+	// Create index for file_embeddings table
+	if err := s.createSingleVectorIndex("idx_file_embeddings_embedding", "file_embeddings", indexOpts); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// createSingleVectorIndex creates a DiskANN index for a specific table.
+func (s *LibSQLStore) createSingleVectorIndex(indexName, tableName, indexOpts string) error {
+	// Check if index exists
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, indexName).Scan(&count)
+	if err != nil {
+		return err
+	}
+
+	if count > 0 {
+		return nil // Index already exists
+	}
+
+	query := fmt.Sprintf(`CREATE INDEX %s ON %s (libsql_vector_idx(embedding, %s))`, indexName, tableName, indexOpts)
 	_, err = s.db.Exec(query)
 	if err != nil {
 		// Vector index creation might fail if libSQL doesn't support it
@@ -188,7 +212,7 @@ func (s *LibSQLStore) createVectorIndex() error {
 		if strings.Contains(err.Error(), "libsql_vector_idx") {
 			return nil // Gracefully continue without index
 		}
-		return fmt.Errorf("failed to create vector index: %w", err)
+		return fmt.Errorf("failed to create vector index %s: %w", indexName, err)
 	}
 
 	return nil
@@ -773,4 +797,288 @@ func (s *LibSQLStore) VectorCount() int64 {
 // Close closes the database.
 func (s *LibSQLStore) Close() error {
 	return s.db.Close()
+}
+
+// DB returns the underlying database connection for direct queries.
+func (s *LibSQLStore) DB() *sql.DB {
+	return s.db
+}
+
+// StoreFileEmbedding stores a file-level embedding.
+func (s *LibSQLStore) StoreFileEmbedding(ctx context.Context, fe *FileEmbedding) error {
+	// Normalize embedding for fast cosine distance via dot product
+	normalizedEmb := util.NormalizeVectorCopy(fe.Embedding)
+	vecStr := formatVectorString(normalizedEmb)
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO file_embeddings (filepath, embedding, chunk_count, total_lines, updated_at)
+		VALUES (?, vector(?), ?, ?, CURRENT_TIMESTAMP)
+	`, fe.FilePath, vecStr, fe.ChunkCount, fe.TotalLines)
+
+	return err
+}
+
+// StoreFileEmbeddingBatch stores multiple file-level embeddings.
+func (s *LibSQLStore) StoreFileEmbeddingBatch(ctx context.Context, fes []*FileEmbedding) error {
+	if len(fes) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT OR REPLACE INTO file_embeddings (filepath, embedding, chunk_count, total_lines, updated_at)
+		VALUES (?, vector(?), ?, ?, CURRENT_TIMESTAMP)
+	`)
+	if err != nil {
+		return fmt.Errorf("prepare: %w", err)
+	}
+	defer func() { _ = stmt.Close() }()
+
+	for _, fe := range fes {
+		// Normalize embedding for fast cosine distance via dot product
+		normalizedEmb := util.NormalizeVectorCopy(fe.Embedding)
+		vecStr := formatVectorString(normalizedEmb)
+		if _, err := stmt.ExecContext(ctx, fe.FilePath, vecStr, fe.ChunkCount, fe.TotalLines); err != nil {
+			return fmt.Errorf("exec for %s: %w", fe.FilePath, err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+// SearchFileEmbeddings searches for files by their document-level embeddings.
+// Returns file paths and their distances.
+func (s *LibSQLStore) SearchFileEmbeddings(ctx context.Context, embedding []float32, limit int, threshold float64) ([]string, []float64, error) {
+	// Normalize query embedding
+	queryNorm := util.NormalizeVectorCopy(embedding)
+	vecStr := formatVectorString(queryNorm)
+
+	// Use vector_distance_cos for ANN search on file embeddings
+	query := `
+		SELECT filepath, vector_distance_cos(embedding, vector(?)) as distance
+		FROM file_embeddings
+		WHERE embedding IS NOT NULL
+		ORDER BY distance ASC
+		LIMIT ?
+	`
+
+	rows, err := s.db.QueryContext(ctx, query, vecStr, limit)
+	if err != nil {
+		// Fallback to brute force if vector_distance_cos not available
+		return s.searchFileEmbeddingsBruteForce(ctx, queryNorm, limit, threshold)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var filePaths []string
+	var distances []float64
+
+	for rows.Next() {
+		var fp string
+		var dist float64
+		if err := rows.Scan(&fp, &dist); err != nil {
+			continue
+		}
+		if dist <= threshold {
+			filePaths = append(filePaths, fp)
+			distances = append(distances, dist)
+		}
+	}
+
+	return filePaths, distances, rows.Err()
+}
+
+// searchFileEmbeddingsBruteForce does brute force search when vector functions unavailable.
+func (s *LibSQLStore) searchFileEmbeddingsBruteForce(ctx context.Context, queryNorm []float32, limit int, threshold float64) ([]string, []float64, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT filepath, vector_extract(embedding) FROM file_embeddings WHERE embedding IS NOT NULL`)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	type result struct {
+		path string
+		dist float64
+	}
+	var results []result
+
+	for rows.Next() {
+		var fp string
+		var vecJSON string
+		if err := rows.Scan(&fp, &vecJSON); err != nil {
+			continue
+		}
+		vec := parseVectorString(vecJSON)
+		if vec == nil || len(vec) != len(queryNorm) {
+			continue
+		}
+		// Use dot product for distance (vectors are normalized)
+		dist := util.DotProductDistance(queryNorm, vec)
+		if dist <= threshold {
+			results = append(results, result{fp, dist})
+		}
+	}
+
+	// Sort by distance
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].dist < results[j].dist
+	})
+
+	// Limit results
+	if len(results) > limit {
+		results = results[:limit]
+	}
+
+	filePaths := make([]string, len(results))
+	distances := make([]float64, len(results))
+	for i, r := range results {
+		filePaths[i] = r.path
+		distances[i] = r.dist
+	}
+
+	return filePaths, distances, nil
+}
+
+// GetChunksByFilePath returns all document chunks for a given file path.
+func (s *LibSQLStore) GetChunksByFilePath(ctx context.Context, filePath string) ([]*Document, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, filepath, content, start_line, end_line, metadata, is_test
+		FROM documents
+		WHERE filepath = ?
+		ORDER BY start_line ASC
+	`, filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var docs []*Document
+	for rows.Next() {
+		var doc Document
+		var metadataJSON sql.NullString
+		var isTest int
+
+		if err := rows.Scan(&doc.ID, &doc.FilePath, &doc.Content, &doc.StartLine, &doc.EndLine, &metadataJSON, &isTest); err != nil {
+			continue
+		}
+
+		doc.IsTest = isTest != 0
+		if metadataJSON.Valid {
+			_ = json.Unmarshal([]byte(metadataJSON.String), &doc.Metadata)
+		}
+
+		docs = append(docs, &doc)
+	}
+
+	return docs, rows.Err()
+}
+
+// DeleteFileEmbedding deletes the file-level embedding for a path.
+func (s *LibSQLStore) DeleteFileEmbedding(ctx context.Context, filePath string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM file_embeddings WHERE filepath = ?`, filePath)
+	return err
+}
+
+// ComputeAndStoreFileEmbeddings computes document-level embeddings by averaging chunk embeddings.
+// This enables document-level search for queries like "what does this repo do".
+func (s *LibSQLStore) ComputeAndStoreFileEmbeddings(ctx context.Context) (int, error) {
+	// Get list of unique file paths
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT filepath FROM documents`)
+	if err != nil {
+		return 0, fmt.Errorf("query file paths: %w", err)
+	}
+
+	var filePaths []string
+	for rows.Next() {
+		var fp string
+		if err := rows.Scan(&fp); err != nil {
+			continue
+		}
+		filePaths = append(filePaths, fp)
+	}
+	_ = rows.Close()
+
+	if len(filePaths) == 0 {
+		return 0, nil
+	}
+
+	// Batch file embeddings for storage
+	var fileEmbeddings []*FileEmbedding
+	const batchSize = 100
+
+	for _, fp := range filePaths {
+		// Get all chunk embeddings for this file
+		embRows, err := s.db.QueryContext(ctx, `
+			SELECT vector_extract(embedding), end_line
+			FROM documents
+			WHERE filepath = ? AND embedding IS NOT NULL
+			ORDER BY start_line
+		`, fp)
+		if err != nil {
+			continue
+		}
+
+		var embeddings [][]float32
+		var maxLine int
+		for embRows.Next() {
+			var vecStr string
+			var endLine int
+			if err := embRows.Scan(&vecStr, &endLine); err != nil {
+				continue
+			}
+			vec := parseVectorString(vecStr)
+			if vec != nil {
+				embeddings = append(embeddings, vec)
+				if endLine > maxLine {
+					maxLine = endLine
+				}
+			}
+		}
+		_ = embRows.Close()
+
+		if len(embeddings) == 0 {
+			continue
+		}
+
+		// Compute mean embedding
+		dims := len(embeddings[0])
+		meanEmb := make([]float32, dims)
+		for _, emb := range embeddings {
+			for i, v := range emb {
+				meanEmb[i] += v
+			}
+		}
+		scale := float32(1.0 / float64(len(embeddings)))
+		for i := range meanEmb {
+			meanEmb[i] *= scale
+		}
+
+		fileEmbeddings = append(fileEmbeddings, &FileEmbedding{
+			FilePath:   fp,
+			Embedding:  meanEmb,
+			ChunkCount: len(embeddings),
+			TotalLines: maxLine,
+		})
+
+		// Store in batches
+		if len(fileEmbeddings) >= batchSize {
+			if err := s.StoreFileEmbeddingBatch(ctx, fileEmbeddings); err != nil {
+				return 0, fmt.Errorf("store file embeddings: %w", err)
+			}
+			fileEmbeddings = nil
+		}
+	}
+
+	// Store remaining
+	if len(fileEmbeddings) > 0 {
+		if err := s.StoreFileEmbeddingBatch(ctx, fileEmbeddings); err != nil {
+			return 0, fmt.Errorf("store file embeddings: %w", err)
+		}
+	}
+
+	return len(filePaths), nil
 }
