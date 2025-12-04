@@ -119,7 +119,7 @@ func DefaultSearchOptions() SearchOptions {
 		SemanticWeight: 0.6,
 		BM25Weight:     0.4,
 		UseRerank:      false,
-		RerankTopK:     50,  // Fetch 50 candidates for reranking
+		RerankTopK:     30,  // Fetch 30 candidates for reranking (reduced from 50 for performance)
 		RerankWeight:   0.5, // Balance between vector search and reranker (0.5 = equal weight)
 	}
 }
@@ -484,13 +484,25 @@ func (s *Searcher) rerankResults(ctx context.Context, query string, docs []*stor
 	intent := DetectQueryIntent(query)
 	util.Debugf(util.DebugDetailed, "Query intent: %s", intent)
 
-	// Prepare document contents for reranking
-	contents := make([]string, len(docs))
-	for i, doc := range docs {
-		contents[i] = doc.Content
+	// Performance optimization: limit reranking to top candidates only
+	// Reranking is expensive (~70ms per doc with batching), so we limit how many we actually rerank
+	maxRerankDocs := 15 // Maximum documents to send to reranker
+	if len(docs) > maxRerankDocs {
+		// Keep original docs/distances for RRF fusion, but only rerank top N
+		util.Debugf(util.DebugDetailed, "Limiting rerank from %d to %d docs for performance", len(docs), maxRerankDocs)
 	}
 
-	// Call reranker
+	// Prepare document contents for reranking (only top N)
+	rerankCount := len(docs)
+	if rerankCount > maxRerankDocs {
+		rerankCount = maxRerankDocs
+	}
+	contents := make([]string, rerankCount)
+	for i := 0; i < rerankCount; i++ {
+		contents[i] = docs[i].Content
+	}
+
+	// Call reranker on subset
 	results, err := s.reranker.Rerank(ctx, query, contents)
 	if err != nil {
 		return docs, distances, err
