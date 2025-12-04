@@ -1,0 +1,204 @@
+{
+  "name": "dspy-go-eval",
+  "description": "Evaluation dataset for semantic code search on dspy-go framework",
+  "corpus": "dspy-go",
+  "corpus_path": "/Users/xiao/development/github.com/XiaoConstantine/dspy-go",
+  "queries": [
+    {
+      "query": "how does chain of thought prompting work",
+      "category": "conceptual",
+      "judgments": [
+        {"file": "chain_of_thought.go", "rel": 3, "reason": "Core CoT implementation"},
+        {"file": "predict.go", "rel": 2, "reason": "Base prediction module used by CoT"},
+        {"file": "decorators.go", "rel": 1, "reason": "Related module decorators"}
+      ],
+      "grep_patterns": ["chain", "thought", "rationale", "ChainOfThought"]
+    },
+    {
+      "query": "ReAct agent reasoning and action loop",
+      "category": "conceptual",
+      "judgments": [
+        {"file": "react.go", "rel": 3, "reason": "ReAct agent implementation"},
+        {"file": "react_agent.go", "rel": 2, "reason": "ReAct agent utilities"},
+        {"file": "agent.go", "rel": 2, "reason": "Base agent types"}
+      ],
+      "grep_patterns": ["ReAct", "react", "agent", "action", "observation", "thought"]
+    },
+    {
+      "query": "optimize prompts using bayesian methods",
+      "category": "conceptual",
+      "judgments": [
+        {"file": "mipro.go", "rel": 3, "reason": "MIPRO optimizer with bayesian selection"},
+        {"file": "bayesian_selector.go", "rel": 3, "reason": "Bayesian hyperparameter selection"},
+        {"file": "tpe_optimizer.go", "rel": 2, "reason": "TPE optimization"},
+        {"file": "optimizer.go", "rel": 1, "reason": "Base optimizer interface"}
+      ],
+      "grep_patterns": ["bayesian", "Bayesian", "optimize", "mipro", "MIPRO", "TPE"]
+    },
+    {
+      "query": "register and discover tools for LLM agents",
+      "category": "api",
+      "judgments": [
+        {"file": "registry.go", "rel": 3, "reason": "Tool registry implementation"},
+        {"file": "smart_registry.go", "rel": 3, "reason": "Smart tool registry"},
+        {"file": "discovery.go", "rel": 2, "reason": "Tool discovery"},
+        {"file": "tool.go", "rel": 2, "reason": "Tool interface definitions"}
+      ],
+      "grep_patterns": ["registry", "Registry", "tool", "Tool", "register", "discover"]
+    },
+    {
+      "query": "signature fields for module input and output",
+      "category": "api",
+      "judgments": [
+        {"file": "signature.go", "rel": 3, "reason": "Signature and field definitions"},
+        {"file": "typed_signature.go", "rel": 2, "reason": "Typed signatures"}
+      ],
+      "grep_patterns": ["signature", "Signature", "field", "Field", "input", "output"]
+    },
+    {
+      "query": "cache LLM responses to avoid redundant calls",
+      "category": "conceptual",
+      "judgments": [
+        {"file": "cache.go", "rel": 3, "reason": "LLM caching implementation"},
+        {"file": "provider_cache.go", "rel": 3, "reason": "Provider-level caching"},
+        {"file": "memory_cache.go", "rel": 2, "reason": "Memory caching"}
+      ],
+      "grep_patterns": ["cache", "Cache", "memoize", "store"]
+    },
+    {
+      "query": "connect to openai api",
+      "category": "api",
+      "judgments": [
+        {"file": "openai.go", "rel": 3, "reason": "OpenAI provider"},
+        {"file": "openai_providers.go", "rel": 2, "reason": "OpenAI provider utilities"},
+        {"file": "llm.go", "rel": 1, "reason": "Base LLM interface"}
+      ],
+      "grep_patterns": ["openai", "OpenAI", "gpt", "GPT", "api"]
+    },
+    {
+      "query": "run modules in parallel with concurrency control",
+      "category": "conceptual",
+      "judgments": [
+        {"file": "parallel.go", "rel": 3, "reason": "Parallel execution module"},
+        {"file": "parallel_executor.go", "rel": 3, "reason": "Parallel executor"},
+        {"file": "orchestrator.go", "rel": 2, "reason": "Orchestration with parallelism"}
+      ],
+      "grep_patterns": ["parallel", "Parallel", "concurrent", "goroutine", "worker"]
+    },
+    {
+      "query": "bootstrap few shot examples from training data",
+      "category": "conceptual",
+      "judgments": [
+        {"file": "bootstrap_fewshot.go", "rel": 3, "reason": "Bootstrap few-shot optimizer"},
+        {"file": "dataset.go", "rel": 2, "reason": "Dataset handling"},
+        {"file": "optimizer.go", "rel": 1, "reason": "Base optimizer"}
+      ],
+      "grep_patterns": ["bootstrap", "Bootstrap", "fewshot", "few-shot", "example"]
+    },
+    {
+      "query": "intercept and modify module execution",
+      "category": "conceptual",
+      "judgments": [
+        {"file": "interceptor.go", "rel": 3, "reason": "Interceptor implementation"},
+        {"file": "middleware.go", "rel": 2, "reason": "Middleware pattern"},
+        {"file": "decorators.go", "rel": 2, "reason": "Module decorators"}
+      ],
+      "grep_patterns": ["interceptor", "Interceptor", "middleware", "hook", "before", "after"]
+    },
+    {
+      "query": "store conversation history for context",
+      "category": "conceptual",
+      "judgments": [
+        {"file": "memory.go", "rel": 3, "reason": "Memory management"},
+        {"file": "buffered_memory.go", "rel": 3, "reason": "Buffered memory implementation"},
+        {"file": "execution_context.go", "rel": 2, "reason": "Execution context with history"}
+      ],
+      "grep_patterns": ["memory", "Memory", "history", "conversation", "context", "buffer"]
+    },
+    {
+      "query": "compare multiple reasoning chains and pick best",
+      "category": "conceptual",
+      "judgments": [
+        {"file": "multi_chain_comparison.go", "rel": 3, "reason": "Multi-chain comparison module"},
+        {"file": "chain_of_thought.go", "rel": 2, "reason": "Chain of thought used for comparison"}
+      ],
+      "grep_patterns": ["multi", "chain", "comparison", "compare", "vote", "best"]
+    },
+    {
+      "query": "self-refine answers through iteration",
+      "category": "conceptual",
+      "judgments": [
+        {"file": "refine.go", "rel": 3, "reason": "Refine module implementation"},
+        {"file": "chain_of_thought.go", "rel": 1, "reason": "Used in refinement"}
+      ],
+      "grep_patterns": ["refine", "Refine", "iterate", "improve", "feedback"]
+    },
+    {
+      "query": "configure logging and debugging",
+      "category": "api",
+      "judgments": [
+        {"file": "logger.go", "rel": 3, "reason": "Logger implementation"},
+        {"file": "log_entry.go", "rel": 2, "reason": "Log entry types"},
+        {"file": "flight_recorder.go", "rel": 2, "reason": "Debug recording"}
+      ],
+      "grep_patterns": ["log", "Log", "logger", "debug", "Debug", "trace"]
+    },
+    {
+      "query": "use anthropic claude models",
+      "category": "api",
+      "judgments": [
+        {"file": "anthrophic.go", "rel": 3, "reason": "Anthropic/Claude provider"},
+        {"file": "llm.go", "rel": 1, "reason": "Base LLM interface"}
+      ],
+      "grep_patterns": ["anthropic", "Anthropic", "claude", "Claude"]
+    },
+    {
+      "query": "LLM error handling and retry logic",
+      "category": "conceptual",
+      "judgments": [
+        {"file": "errors.go", "rel": 3, "reason": "Error handling"},
+        {"file": "llm.go", "rel": 2, "reason": "LLM call handling"},
+        {"file": "interceptor.go", "rel": 1, "reason": "Retry interceptors"}
+      ],
+      "grep_patterns": ["error", "Error", "retry", "Retry", "backoff", "fail"]
+    },
+    {
+      "query": "build pipelines of chained modules",
+      "category": "conceptual",
+      "judgments": [
+        {"file": "pipeline.go", "rel": 3, "reason": "Pipeline implementation"},
+        {"file": "pipeline_builder.go", "rel": 3, "reason": "Pipeline builder"},
+        {"file": "chain.go", "rel": 2, "reason": "Chaining modules"}
+      ],
+      "grep_patterns": ["pipeline", "Pipeline", "chain", "Chain", "compose", "builder"]
+    },
+    {
+      "query": "evaluate model accuracy on datasets",
+      "category": "conceptual",
+      "judgments": [
+        {"file": "accuracy.go", "rel": 3, "reason": "Accuracy metrics"},
+        {"file": "dataset.go", "rel": 2, "reason": "Dataset handling"},
+        {"file": "optimizer.go", "rel": 2, "reason": "Optimization evaluation"}
+      ],
+      "grep_patterns": ["accuracy", "Accuracy", "evaluate", "metric", "score", "dataset"]
+    },
+    {
+      "query": "multimodal content handling for images and audio",
+      "category": "conceptual",
+      "judgments": [
+        {"file": "content_utils.go", "rel": 3, "reason": "Content type utilities"},
+        {"file": "signature.go", "rel": 2, "reason": "Field types including image"}
+      ],
+      "grep_patterns": ["multimodal", "image", "Image", "vision", "content", "media"]
+    },
+    {
+      "query": "use local ollama models",
+      "category": "api",
+      "judgments": [
+        {"file": "ollama.go", "rel": 3, "reason": "Ollama provider"},
+        {"file": "llm.go", "rel": 1, "reason": "Base LLM interface"}
+      ],
+      "grep_patterns": ["ollama", "Ollama", "local", "llama"]
+    }
+  ]
+}
