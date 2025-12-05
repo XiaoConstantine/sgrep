@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["tiktoken"]
+# dependencies = ["tiktoken", "tqdm"]
 # ///
 """
 Benchmark semantic code search tools against dspy-go corpus.
@@ -23,8 +23,11 @@ import time
 import os
 import re
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 
 import tiktoken
+from tqdm import tqdm
 
 # Initialize tokenizer (cl100k_base is used by GPT-4, Claude uses similar)
 TOKENIZER = tiktoken.get_encoding("cl100k_base")
@@ -47,8 +50,9 @@ DATASET_PATH = Path(__file__).parent / "dspy-go-dataset.json"
 TOPK = 10
 
 
+@lru_cache(maxsize=1024)
 def read_file_range(filepath: str, start_line: int, end_line: int) -> str:
-    """Read specific line range from a file."""
+    """Read specific line range from a file. Cached to avoid repeated disk I/O."""
     try:
         with open(filepath, 'r', errors='ignore') as f:
             lines = f.readlines()
@@ -242,6 +246,43 @@ def compute_recall_at_k(results: list[str], expected: list[str], k: int) -> floa
     return hits / len(expected)
 
 
+def _run_single_query(args):
+    """Helper function to run a single query. Used for parallel execution."""
+    i, q, tool, sgrep_bin, rerank, hybrid, colbert = args
+    query_text = q["query"]
+    expected_files = [j["file"] for j in q.get("judgments", [])]
+
+    if not expected_files:
+        return None  # Skip queries without ground truth
+
+    if tool == "sgrep":
+        results, latency, tokens = run_sgrep(query_text, sgrep_bin, rerank, hybrid, colbert)
+    elif tool == "mgrep":
+        results, latency, tokens = run_mgrep(query_text, rerank)
+    else:  # osgrep
+        results, latency, tokens = run_osgrep(query_text)
+
+    mrr = compute_mrr(results, expected_files)
+    p5 = compute_precision_at_k(results, expected_files, 5)
+    p10 = compute_precision_at_k(results, expected_files, 10)
+    r5 = compute_recall_at_k(results, expected_files, 5)
+    r10 = compute_recall_at_k(results, expected_files, 10)
+
+    return {
+        "index": i,
+        "query": query_text,
+        "expected": expected_files,
+        "results": results,
+        "mrr": mrr,
+        "p5": p5,
+        "p10": p10,
+        "r5": r5,
+        "r10": r10,
+        "latency": latency,
+        "tokens": tokens,
+    }
+
+
 def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False, hybrid: bool = True, colbert: bool = False):
     """Run benchmark for a specific tool."""
     # Load dataset
@@ -282,28 +323,32 @@ def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False, hyb
     latency_vals = []
     token_vals = []
 
-    for i, q in enumerate(queries):
-        query_text = q["query"]
-        expected_files = [j["file"] for j in q.get("judgments", [])]
+    # Prepare args for parallel execution
+    query_args = [
+        (i, q, tool, sgrep_bin, rerank, hybrid, colbert)
+        for i, q in enumerate(queries)
+    ]
 
-        if not expected_files:
-            continue  # Skip queries without ground truth
+    # Run queries in parallel (6 workers)
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        results = list(tqdm(executor.map(_run_single_query, query_args), total=len(query_args), desc="Running queries"))
 
-        print(f"Query {i+1}/{len(queries)}: \"{query_text}\"")
-        print(f"  Expected: {expected_files[:3]}{'...' if len(expected_files) > 3 else ''}")
+    # Process results and print (sequential to maintain output order)
+    for result in tqdm(results, desc="Processing results", disable=len([r for r in results if r is not None]) == 0):
+        if result is None:
+            continue
 
-        if tool == "sgrep":
-            results, latency, tokens = run_sgrep(query_text, sgrep_bin, rerank, hybrid, colbert)
-        elif tool == "mgrep":
-            results, latency, tokens = run_mgrep(query_text, rerank)
-        else:  # osgrep
-            results, latency, tokens = run_osgrep(query_text)
-
-        mrr = compute_mrr(results, expected_files)
-        p5 = compute_precision_at_k(results, expected_files, 5)
-        p10 = compute_precision_at_k(results, expected_files, 10)
-        r5 = compute_recall_at_k(results, expected_files, 5)
-        r10 = compute_recall_at_k(results, expected_files, 10)
+        i = result["index"]
+        query_text = result["query"]
+        expected_files = result["expected"]
+        results_files = result["results"]
+        mrr = result["mrr"]
+        p5 = result["p5"]
+        p10 = result["p10"]
+        r5 = result["r5"]
+        r10 = result["r10"]
+        latency = result["latency"]
+        tokens = result["tokens"]
 
         mrr_vals.append(mrr)
         p5_vals.append(p5)
@@ -314,7 +359,9 @@ def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False, hyb
         token_vals.append(tokens)
 
         cost = estimate_cost(tokens)
-        print(f"  Results: {results[:5]}{'...' if len(results) > 5 else ''}")
+        print(f"Query {i+1}/{len(queries)}: \"{query_text}\"")
+        print(f"  Expected: {expected_files[:3]}{'...' if len(expected_files) > 3 else ''}")
+        print(f"  Results: {results_files[:5]}{'...' if len(results_files) > 5 else ''}")
         print(f"  MRR: {mrr:.3f} | P@5: {p5:.3f} | R@5: {r5:.3f} | Latency: {latency:.0f}ms | Tokens: {tokens} | Cost: ${cost:.4f}")
         print()
 
