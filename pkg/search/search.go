@@ -765,9 +765,11 @@ func (s *Searcher) rerankResults(ctx context.Context, query string, docs []*stor
 		// Hybrid mode: BM25 keyword matches are highly valuable for code search.
 		// The reranker should only make minor adjustments, not override BM25 rankings.
 		if hasReranker && hasColBERT {
+			// Cross-encoder tends to prefer prose/docs over code, so minimize its weight.
+			// ColBERT preserves keyword matching which is critical for code search.
 			vectorWeight = 0.70 // Hybrid ranking is primary signal
-			rerankWeight = 0.15 // Reranker for minor adjustments only
-			colbertWeight = 0.15
+			rerankWeight = 0.05 // Cross-encoder as tie-breaker only (was 0.15)
+			colbertWeight = 0.25 // Preserve ColBERT's keyword matching (was 0.15)
 		} else if hasColBERT && !hasReranker {
 			vectorWeight = 0.75
 			rerankWeight = 0
@@ -798,7 +800,12 @@ func (s *Searcher) rerankResults(ctx context.Context, query string, docs []*stor
 	case IntentConceptual, IntentDefinition:
 		// Trust vector search more for definitions
 		vectorWeight = math.Min(vectorWeight+0.1, 0.6)
-		rerankWeight = math.Max(rerankWeight-0.05, 0.2)
+		if hasReranker {
+			rerankWeight = math.Max(rerankWeight-0.05, 0.2)
+		} else if hasColBERT {
+			// When no reranker, boost ColBERT for conceptual queries
+			colbertWeight = math.Min(colbertWeight+0.2, 0.5)
+		}
 	case IntentExample:
 		// Trust late interaction more for examples
 		if hasColBERT {
