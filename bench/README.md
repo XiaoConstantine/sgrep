@@ -18,6 +18,53 @@ bench/
 └── search_benchmark_test.go  # End-to-end search benchmarks
 ```
 
+## Comparison Benchmark (dspy-go corpus)
+
+Compare sgrep against other semantic search tools on the dspy-go codebase (20 queries):
+
+```bash
+uv run bench/quality/run_dspy_bench.py --tool all --mode all
+```
+
+### Latest Results
+
+| Tool | MRR | P@5 | R@5 | Latency | Tokens | Cost |
+|------|-----|-----|-----|---------|--------|------|
+| **sgrep (hybrid+colbert)** | **0.664** | 0.220 | 0.400 | 6200ms | 2855 | $0.17 |
+| sgrep (hybrid) | 0.624 | 0.200 | 0.358 | 5277ms | 4034 | $0.24 |
+| sgrep (semantic) | 0.610 | 0.200 | 0.358 | 5723ms | 2462 | $0.15 |
+| sgrep (cascade) | 0.596 | 0.200 | 0.371 | 8732ms | 3522 | $0.21 |
+| mgrep (cloud) | 0.262 | 0.050 | 0.100 | 939ms | 4646 | $0.28 |
+| osgrep | 0.050 | 0.010 | 0.017 | 916ms | 332 | $0.02 |
+
+**Key findings:**
+- **sgrep (hybrid+colbert)** achieves best MRR (0.664) - 2.5x better than mgrep, 13x better than osgrep
+- ColBERT late interaction scoring significantly improves accuracy over plain hybrid (+6%)
+- Cascade (ColBERT + cross-encoder) hurts performance - cross-encoder demotes keyword matches
+- Token count measures actual code content returned (for LLM context estimation)
+- Cost estimated at $3/1M tokens (Claude pricing)
+
+### Supported Tools
+
+| Tool | Type | Description |
+|------|------|-------------|
+| `sgrep` | Local | This tool - semantic + BM25 hybrid search |
+| `osgrep` | Local | Open-source semantic search (requires `npm i -g osgrep`) |
+| `mgrep` | Cloud | Mixedbread cloud search (requires `npm i -g @mixedbread/mgrep && mgrep login`) |
+
+### Usage
+
+```bash
+# Test all sgrep configurations
+uv run bench/quality/run_dspy_bench.py --tool sgrep --mode all
+
+# Compare specific configuration
+uv run bench/quality/run_dspy_bench.py --tool sgrep --hybrid --colbert
+
+# Test all tools
+uv run bench/quality/run_dspy_bench.py --tool all --mode all
+```
+
 ## Quality Benchmarks
 
 Evaluate search result quality using IR (Information Retrieval) metrics:

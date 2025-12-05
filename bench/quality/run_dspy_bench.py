@@ -1,6 +1,7 @@
 #!/usr/bin/env -S uv run
 # /// script
 # requires-python = ">=3.11"
+# dependencies = ["tiktoken"]
 # ///
 """
 Benchmark semantic code search tools against dspy-go corpus.
@@ -11,7 +12,8 @@ Usage:
   uv run run_dspy_bench.py --tool sgrep --no-hybrid  # Semantic only
   uv run run_dspy_bench.py --tool sgrep --no-hybrid --rerank  # Semantic + rerank
   uv run run_dspy_bench.py --tool osgrep
-  uv run run_dspy_bench.py --tool both
+  uv run run_dspy_bench.py --tool mgrep              # Mixedbread mgrep (cloud)
+  uv run run_dspy_bench.py --tool all                # Test all tools
 """
 
 import json
@@ -22,14 +24,45 @@ import os
 import re
 from pathlib import Path
 
+import tiktoken
+
+# Initialize tokenizer (cl100k_base is used by GPT-4, Claude uses similar)
+TOKENIZER = tiktoken.get_encoding("cl100k_base")
+
+# Cost per 1M tokens (Claude 3.5 Sonnet input pricing)
+COST_PER_1M_TOKENS = 3.00
+
+
+def count_tokens(text: str) -> int:
+    """Count tokens in text using tiktoken."""
+    return len(TOKENIZER.encode(text))
+
+
+def estimate_cost(tokens: int) -> float:
+    """Estimate cost in USD based on token count."""
+    return (tokens / 1_000_000) * COST_PER_1M_TOKENS
+
 CORPUS = "/Users/xiao/development/github.com/XiaoConstantine/dspy-go"
 DATASET_PATH = Path(__file__).parent / "dspy-go-dataset.json"
 TOPK = 10
 
 
-def run_sgrep(query: str, sgrep_bin: str, rerank: bool = False, hybrid: bool = True, colbert: bool = False) -> tuple[list[str], float]:
-    """Run sgrep and return (result_files, latency_ms)."""
-    cmd = [sgrep_bin, "-n", str(TOPK), "-q"]
+def read_file_range(filepath: str, start_line: int, end_line: int) -> str:
+    """Read specific line range from a file."""
+    try:
+        with open(filepath, 'r', errors='ignore') as f:
+            lines = f.readlines()
+            # Convert to 0-indexed
+            start = max(0, start_line - 1)
+            end = min(len(lines), end_line)
+            return ''.join(lines[start:end])
+    except:
+        return ""
+
+
+def run_sgrep(query: str, sgrep_bin: str, rerank: bool = False, hybrid: bool = True, colbert: bool = False) -> tuple[list[str], float, int]:
+    """Run sgrep and return (result_files, latency_ms, tokens)."""
+    cmd = [sgrep_bin, "-n", str(TOPK)]
     if hybrid:
         cmd.append("--hybrid")
     if rerank:
@@ -56,23 +89,40 @@ def run_sgrep(query: str, sgrep_bin: str, rerank: bool = False, hybrid: bool = T
 
     latency_ms = (time.time() - start) * 1000
 
-    # Parse output: each line is "path/to/file.go:start-end" or similar
+    # Parse output and collect content for token counting
+    # Format: path/to/file.go:start-end
     files = []
+    total_content = ""
     for line in output.strip().split('\n'):
         if not line:
             continue
-        # Extract filename from path:lines format
-        path_part = line.split(':')[0] if ':' in line else line
+        # Parse path:lines format
+        if ':' in line:
+            path_part, line_range = line.rsplit(':', 1)
+            if '-' in line_range:
+                try:
+                    start_line, end_line = map(int, line_range.split('-'))
+                    full_path = os.path.join(CORPUS, path_part)
+                    content = read_file_range(full_path, start_line, end_line)
+                    total_content += f"// {path_part}:{line_range}\n{content}\n"
+                except ValueError:
+                    pass
+        else:
+            path_part = line
+
         filename = os.path.basename(path_part)
-        if filename and filename not in files:  # Dedupe
+        if filename and filename not in files:
             files.append(filename)
 
-    return files, latency_ms
+    tokens = count_tokens(total_content) if total_content else 0
+
+    return files, latency_ms, tokens
 
 
-def run_osgrep(query: str) -> tuple[list[str], float]:
-    """Run osgrep and return (result_files, latency_ms)."""
-    cmd = ["osgrep", query, "-m", str(TOPK), "--compact"]
+def run_osgrep(query: str) -> tuple[list[str], float, int]:
+    """Run osgrep and return (result_files, latency_ms, tokens)."""
+    # Run without --compact to get full content for token counting
+    cmd = ["osgrep", query, "-m", str(TOPK)]
 
     start = time.time()
     try:
@@ -92,12 +142,15 @@ def run_osgrep(query: str) -> tuple[list[str], float]:
 
     latency_ms = (time.time() - start) * 1000
 
+    # Count tokens from full output
+    tokens = count_tokens(output) if output else 0
+
     # Parse osgrep output - it outputs file paths, one per line
     # Format may vary: could be "path/to/file.go" or "path/to/file.go:10-20"
     files = []
     for line in output.strip().split('\n'):
         line = line.strip()
-        if not line or line.startswith('[') or line.startswith('Searching') or line.startswith('Indexing'):
+        if not line or line.startswith('[') or line.startswith('Searching') or line.startswith('Indexing') or line.startswith('Worker'):
             continue
         # Remove ANSI color codes
         line = re.sub(r'\x1b\[[0-9;]*m', '', line)
@@ -110,7 +163,59 @@ def run_osgrep(query: str) -> tuple[list[str], float]:
         if filename and filename.endswith('.go') and filename not in files:
             files.append(filename)
 
-    return files, latency_ms
+    return files, latency_ms, tokens
+
+
+def run_mgrep(query: str, rerank: bool = True) -> tuple[list[str], float, int]:
+    """Run mgrep (mixedbread cloud) and return (result_files, latency_ms, tokens)."""
+    # Run with -c to get content for token counting
+    cmd = ["mgrep", "search", query, "-m", str(TOPK), "-c"]
+    if not rerank:
+        cmd.append("--no-rerank")
+
+    start = time.time()
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=CORPUS,
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+        output = result.stdout
+    except subprocess.TimeoutExpired:
+        output = ""
+    except Exception as e:
+        print(f"  Error: {e}")
+        output = ""
+
+    latency_ms = (time.time() - start) * 1000
+
+    # Count tokens from full output
+    tokens = count_tokens(output) if output else 0
+
+    # Parse mgrep output: ./path/to/file.go:start-end (XX.XX% match)
+    files = []
+    for line in output.strip().split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        # Remove ANSI color codes
+        line = re.sub(r'\x1b\[[0-9;]*m', '', line)
+        # Extract path (before colon for line numbers)
+        # Format: ./path/to/file.go:123-456 (XX.XX% match)
+        if ':' in line:
+            path_part = line.split(':')[0]
+        else:
+            path_part = line.split(' ')[0] if ' ' in line else line
+        # Remove leading ./
+        if path_part.startswith('./'):
+            path_part = path_part[2:]
+        filename = os.path.basename(path_part)
+        if filename and filename not in files:
+            files.append(filename)
+
+    return files, latency_ms, tokens
 
 
 def compute_mrr(results: list[str], expected: list[str]) -> float:
@@ -175,6 +280,7 @@ def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False, hyb
     r5_vals = []
     r10_vals = []
     latency_vals = []
+    token_vals = []
 
     for i, q in enumerate(queries):
         query_text = q["query"]
@@ -187,9 +293,11 @@ def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False, hyb
         print(f"  Expected: {expected_files[:3]}{'...' if len(expected_files) > 3 else ''}")
 
         if tool == "sgrep":
-            results, latency = run_sgrep(query_text, sgrep_bin, rerank, hybrid, colbert)
+            results, latency, tokens = run_sgrep(query_text, sgrep_bin, rerank, hybrid, colbert)
+        elif tool == "mgrep":
+            results, latency, tokens = run_mgrep(query_text, rerank)
         else:  # osgrep
-            results, latency = run_osgrep(query_text)
+            results, latency, tokens = run_osgrep(query_text)
 
         mrr = compute_mrr(results, expected_files)
         p5 = compute_precision_at_k(results, expected_files, 5)
@@ -203,9 +311,11 @@ def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False, hyb
         r5_vals.append(r5)
         r10_vals.append(r10)
         latency_vals.append(latency)
+        token_vals.append(tokens)
 
+        cost = estimate_cost(tokens)
         print(f"  Results: {results[:5]}{'...' if len(results) > 5 else ''}")
-        print(f"  MRR: {mrr:.3f} | P@5: {p5:.3f} | R@5: {r5:.3f} | Latency: {latency:.0f}ms")
+        print(f"  MRR: {mrr:.3f} | P@5: {p5:.3f} | R@5: {r5:.3f} | Latency: {latency:.0f}ms | Tokens: {tokens} | Cost: ${cost:.4f}")
         print()
 
     # Summary
@@ -213,6 +323,9 @@ def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False, hyb
     if n == 0:
         print("No queries with ground truth!")
         return None
+
+    total_tokens = sum(token_vals)
+    total_cost = estimate_cost(total_tokens)
 
     summary = {
         "tool": tool_label,
@@ -223,6 +336,9 @@ def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False, hyb
         "mean_r5": sum(r5_vals)/n,
         "mean_r10": sum(r10_vals)/n,
         "mean_latency_ms": sum(latency_vals)/n,
+        "total_tokens": total_tokens,
+        "mean_tokens": total_tokens / n,
+        "total_cost_usd": total_cost,
     }
 
     print(f"{'='*60}")
@@ -234,6 +350,9 @@ def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False, hyb
     print(f"Mean R@5:      {summary['mean_r5']:.3f}")
     print(f"Mean R@10:     {summary['mean_r10']:.3f}")
     print(f"Mean Latency:  {summary['mean_latency_ms']:.1f}ms")
+    print(f"Total Tokens:  {summary['total_tokens']:,}")
+    print(f"Mean Tokens:   {summary['mean_tokens']:.0f}")
+    print(f"Total Cost:    ${summary['total_cost_usd']:.4f}")
     print(f"Queries: {n}")
 
     return summary
@@ -258,7 +377,7 @@ def main():
 
     summaries = []
 
-    if tool in ["sgrep", "both"]:
+    if tool in ["sgrep", "all"]:
         if mode == "all":
             # Test all configurations
             # 1. Semantic only
@@ -285,20 +404,26 @@ def main():
             if s:
                 summaries.append(s)
 
-    if tool in ["osgrep", "both"]:
+    if tool in ["osgrep", "all"]:
         s = run_benchmark("osgrep")
+        if s:
+            summaries.append(s)
+
+    if tool in ["mgrep", "all"]:
+        # mgrep with rerank (default)
+        s = run_benchmark("mgrep", rerank=True)
         if s:
             summaries.append(s)
 
     # Comparison table
     if len(summaries) > 1:
-        print(f"\n{'='*60}")
+        print(f"\n{'='*80}")
         print("COMPARISON")
-        print(f"{'='*60}")
-        print(f"{'Tool':<20} {'MRR':>8} {'P@5':>8} {'R@5':>8} {'Latency':>10}")
-        print("-" * 60)
+        print(f"{'='*80}")
+        print(f"{'Tool':<22} {'MRR':>7} {'P@5':>6} {'R@5':>6} {'Latency':>9} {'Tokens':>8} {'Cost':>8}")
+        print("-" * 80)
         for s in summaries:
-            print(f"{s['tool']:<20} {s['mean_mrr']:>8.3f} {s['mean_p5']:>8.3f} {s['mean_r5']:>8.3f} {s['mean_latency_ms']:>9.0f}ms")
+            print(f"{s['tool']:<22} {s['mean_mrr']:>7.3f} {s['mean_p5']:>6.3f} {s['mean_r5']:>6.3f} {s['mean_latency_ms']:>8.0f}ms {s['mean_tokens']:>8.0f} ${s['total_cost_usd']:>6.4f}")
 
     # JSON output
     print("\n\nJSON Summaries:")
