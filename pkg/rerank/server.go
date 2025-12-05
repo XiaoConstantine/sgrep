@@ -17,9 +17,9 @@ import (
 const (
 	DefaultRerankerPort    = 8081
 	DefaultHost            = "localhost"
-	RerankerModelURL       = "https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q8_0.gguf"
-	RerankerModelName      = "bge-reranker-v2-m3-Q8_0.gguf"
-	RerankerModelSize      = 636_000_000 // ~636MB
+	RerankerModelURL       = "https://huggingface.co/Mungert/mxbai-rerank-large-v2-GGUF/resolve/main/mxbai-rerank-large-v2-q8_0.gguf"
+	RerankerModelName      = "mxbai-rerank-large-v2-q8_0.gguf"
+	RerankerModelSize      = 1_650_000_000 // ~1.65GB
 	RerankerStartupTimeout = 30 * time.Second
 	RerankerHealthInterval = 500 * time.Millisecond
 )

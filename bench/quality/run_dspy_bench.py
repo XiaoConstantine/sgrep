@@ -5,7 +5,11 @@
 """
 Benchmark semantic code search tools against dspy-go corpus.
 Usage:
-  uv run run_dspy_bench.py --tool sgrep [--rerank]
+  uv run run_dspy_bench.py --tool sgrep --mode all   # Test all configurations
+  uv run run_dspy_bench.py --tool sgrep              # Hybrid only (default)
+  uv run run_dspy_bench.py --tool sgrep --rerank     # Hybrid + rerank
+  uv run run_dspy_bench.py --tool sgrep --no-hybrid  # Semantic only
+  uv run run_dspy_bench.py --tool sgrep --no-hybrid --rerank  # Semantic + rerank
   uv run run_dspy_bench.py --tool osgrep
   uv run run_dspy_bench.py --tool both
 """
@@ -23,11 +27,15 @@ DATASET_PATH = Path(__file__).parent / "dspy-go-dataset.json"
 TOPK = 10
 
 
-def run_sgrep(query: str, sgrep_bin: str, rerank: bool = False) -> tuple[list[str], float]:
+def run_sgrep(query: str, sgrep_bin: str, rerank: bool = False, hybrid: bool = True, colbert: bool = False) -> tuple[list[str], float]:
     """Run sgrep and return (result_files, latency_ms)."""
     cmd = [sgrep_bin, "-n", str(TOPK), "-q"]
+    if hybrid:
+        cmd.append("--hybrid")
     if rerank:
         cmd.extend(["--rerank", "--rerank-topk", "100"])
+    if colbert:
+        cmd.append("--colbert")
     cmd.append(query)
 
     start = time.time()
@@ -129,7 +137,7 @@ def compute_recall_at_k(results: list[str], expected: list[str], k: int) -> floa
     return hits / len(expected)
 
 
-def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False):
+def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False, hybrid: bool = True, colbert: bool = False):
     """Run benchmark for a specific tool."""
     # Load dataset
     with open(DATASET_PATH) as f:
@@ -138,8 +146,21 @@ def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False):
     queries = dataset["queries"]
 
     tool_label = tool
-    if tool == "sgrep" and rerank:
-        tool_label = "sgrep (rerank)"
+    if tool == "sgrep":
+        if hybrid and rerank and colbert:
+            tool_label = "sgrep (cascade)"  # hybrid + colbert + rerank
+        elif hybrid and rerank:
+            tool_label = "sgrep (hybrid+rerank)"
+        elif hybrid and colbert:
+            tool_label = "sgrep (hybrid+colbert)"
+        elif hybrid:
+            tool_label = "sgrep (hybrid)"
+        elif rerank:
+            tool_label = "sgrep (semantic+rerank)"
+        elif colbert:
+            tool_label = "sgrep (semantic+colbert)"
+        else:
+            tool_label = "sgrep (semantic)"
 
     print(f"\n{'='*60}")
     print(f"Benchmarking: {tool_label}")
@@ -166,7 +187,7 @@ def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False):
         print(f"  Expected: {expected_files[:3]}{'...' if len(expected_files) > 3 else ''}")
 
         if tool == "sgrep":
-            results, latency = run_sgrep(query_text, sgrep_bin, rerank)
+            results, latency = run_sgrep(query_text, sgrep_bin, rerank, hybrid, colbert)
         else:  # osgrep
             results, latency = run_osgrep(query_text)
 
@@ -220,24 +241,47 @@ def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False):
 
 def main():
     tool = "sgrep"
-    rerank = "--rerank" in sys.argv
     sgrep_bin = "sgrep"
+    mode = "all"  # default: test all sgrep modes
 
     # Parse args
+    rerank = "--rerank" in sys.argv
+    no_hybrid = "--no-hybrid" in sys.argv
+
     for i, arg in enumerate(sys.argv):
         if arg == "--tool" and i + 1 < len(sys.argv):
             tool = sys.argv[i + 1]
         if arg == "--sgrep" and i + 1 < len(sys.argv):
             sgrep_bin = sys.argv[i + 1]
+        if arg == "--mode" and i + 1 < len(sys.argv):
+            mode = sys.argv[i + 1]
 
     summaries = []
 
     if tool in ["sgrep", "both"]:
-        s = run_benchmark("sgrep", sgrep_bin, rerank=False)
-        if s:
-            summaries.append(s)
-        if rerank or tool == "both":
-            s = run_benchmark("sgrep", sgrep_bin, rerank=True)
+        if mode == "all":
+            # Test all configurations
+            # 1. Semantic only
+            s = run_benchmark("sgrep", sgrep_bin, rerank=False, hybrid=False, colbert=False)
+            if s:
+                summaries.append(s)
+            # 2. Hybrid only
+            s = run_benchmark("sgrep", sgrep_bin, rerank=False, hybrid=True, colbert=False)
+            if s:
+                summaries.append(s)
+            # 3. Hybrid + ColBERT (no cross-encoder)
+            s = run_benchmark("sgrep", sgrep_bin, rerank=False, hybrid=True, colbert=True)
+            if s:
+                summaries.append(s)
+            # 4. CASCADE: Hybrid + ColBERT + Cross-encoder
+            s = run_benchmark("sgrep", sgrep_bin, rerank=True, hybrid=True, colbert=True)
+            if s:
+                summaries.append(s)
+        else:
+            # Single configuration based on flags
+            use_hybrid = not no_hybrid
+            use_colbert = "--colbert" in sys.argv
+            s = run_benchmark("sgrep", sgrep_bin, rerank=rerank, hybrid=use_hybrid, colbert=use_colbert)
             if s:
                 summaries.append(s)
 

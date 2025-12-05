@@ -308,8 +308,12 @@ func (s *Searcher) SearchWithOptions(ctx context.Context, query string, opts Sea
 		}
 	}
 
-	// Stage 2: Reranking (if enabled and reranker is available)
-	if opts.UseRerank && s.reranker != nil && len(docs) > 0 {
+	// Stage 2: Late interaction scoring (ColBERT and/or cross-encoder reranking)
+	// CASCADE mode: ColBERT first (preserves keywords), then cross-encoder on top results (semantic).
+	// This combination works well even with hybrid search.
+	hasReranker := opts.UseRerank && s.reranker != nil
+	hasColBERTScorer := opts.UseColBERT && s.colbertScorer != nil
+	if (hasReranker || hasColBERTScorer) && len(docs) > 0 {
 		rerankTimer := util.NewTimer("reranking")
 		docs, distances, err = s.rerankResults(ctx, query, docs, distances, opts)
 		rerankDuration := rerankTimer.Stop()
@@ -392,13 +396,6 @@ func (s *Searcher) SearchWithOptions(ctx context.Context, query string, opts Sea
 // 2. Keeps non-overlapping chunks from the same file (different line ranges)
 // 3. Collapses overlapping chunks from the same file - keeps best score
 func deduplicateResults(results []Result) []Result {
-	// Group results by canonical path
-	type chunkKey struct {
-		canonical string
-		startLine int
-		endLine   int
-	}
-
 	// Track chunks we've seen for each canonical path
 	// Key: canonical path, Value: list of (startLine, endLine, index in dedupedResults)
 	fileChunks := make(map[string][]struct {
@@ -616,11 +613,11 @@ func (s *Searcher) searchDocumentLevel(ctx context.Context, queryEmb []float32, 
 	return docs, distances, nil
 }
 
-// rerankResults uses late interaction scoring to reorder documents using RRF score fusion.
-// It supports multiple scoring modes:
-// - Cross-encoder reranker (UseRerank=true): Traditional reranker, slower but accurate
-// - ColBERT-style scoring (UseColBERT=true): Late interaction, faster with good quality
-// - Combined mode: Both scorers contribute to final ranking
+// rerankResults uses late interaction scoring to reorder documents.
+// It supports CASCADE mode when both ColBERT and cross-encoder are enabled:
+// 1. ColBERT scores all candidates (fast, preserves keywords)
+// 2. Cross-encoder refines top N results (slow, semantic understanding)
+// 3. Final fusion combines both signals
 func (s *Searcher) rerankResults(ctx context.Context, query string, docs []*store.Document, distances []float64, opts SearchOptions) ([]*store.Document, []float64, error) {
 	// Check if we have any reranking capability
 	hasReranker := s.reranker != nil && opts.UseRerank
@@ -634,41 +631,35 @@ func (s *Searcher) rerankResults(ctx context.Context, query string, docs []*stor
 	intent := DetectQueryIntent(query)
 	util.Debugf(util.DebugDetailed, "Query intent: %s (reranker=%v, colbert=%v)", intent, hasReranker, hasColBERT)
 
-	// Performance optimization: limit reranking to top candidates only
-	maxRerankDocs := 15
-	if hasColBERT && !hasReranker {
-		// ColBERT is faster, can handle more docs
-		maxRerankDocs = 20
+	// CASCADE MODE: ColBERT first (on more docs), then cross-encoder (on fewer docs)
+	// This preserves ColBERT's keyword matching while adding cross-encoder's semantic understanding
+	colbertCandidates := 50  // ColBERT can handle more docs (faster)
+	crossEncoderCandidates := 20  // Cross-encoder only on top results (slower)
+
+	if !hasColBERT {
+		colbertCandidates = 0
+	}
+	if !hasReranker {
+		crossEncoderCandidates = 0
 	}
 
+	// Limit to available docs
 	rerankCount := len(docs)
-	if rerankCount > maxRerankDocs {
-		util.Debugf(util.DebugDetailed, "Limiting rerank from %d to %d docs for performance", len(docs), maxRerankDocs)
-		rerankCount = maxRerankDocs
+	if hasColBERT && rerankCount > colbertCandidates {
+		rerankCount = colbertCandidates
+	} else if !hasColBERT && rerankCount > crossEncoderCandidates {
+		rerankCount = crossEncoderCandidates
 	}
 
-	// Prepare document contents
+	util.Debugf(util.DebugDetailed, "Cascade rerank: %d docs for ColBERT, top %d for cross-encoder", rerankCount, crossEncoderCandidates)
+
+	// Prepare document contents for ColBERT (or cross-encoder if ColBERT disabled)
 	contents := make([]string, rerankCount)
 	for i := 0; i < rerankCount; i++ {
 		contents[i] = docs[i].Content
 	}
 
-	// Get cross-encoder reranker scores if enabled
-	rerankScores := make(map[int]float64)
-	if hasReranker {
-		results, err := s.reranker.Rerank(ctx, query, contents)
-		if err != nil {
-			util.Debugf(util.DebugDetailed, "Reranker error (continuing with other signals): %v", err)
-		} else {
-			for _, r := range results {
-				if r.Index >= 0 && r.Index < len(docs) {
-					rerankScores[r.Index] = r.Score
-				}
-			}
-		}
-	}
-
-	// Get ColBERT scores if enabled
+	// STAGE 1: ColBERT scoring on all candidates (preserves keyword matches)
 	colbertScores := make(map[int]float64)
 	if hasColBERT {
 		scores, err := s.colbertScorer.ScoreBatch(ctx, query, contents)
@@ -677,6 +668,63 @@ func (s *Searcher) rerankResults(ctx context.Context, query string, docs []*stor
 		} else {
 			for i, score := range scores {
 				colbertScores[i] = score
+			}
+		}
+	}
+
+	// STAGE 2: Cross-encoder on top candidates only (adds semantic understanding)
+	// First, sort by ColBERT scores to find top candidates for cross-encoder
+	rerankScores := make(map[int]float64)
+	if hasReranker && hasColBERT && len(colbertScores) > 0 {
+		// Sort indices by ColBERT score (descending)
+		type idxScore struct {
+			idx   int
+			score float64
+		}
+		colbertRanked := make([]idxScore, 0, len(colbertScores))
+		for idx, score := range colbertScores {
+			colbertRanked = append(colbertRanked, idxScore{idx, score})
+		}
+		sort.Slice(colbertRanked, func(i, j int) bool {
+			return colbertRanked[i].score > colbertRanked[j].score
+		})
+
+		// Take top N for cross-encoder
+		topN := crossEncoderCandidates
+		if topN > len(colbertRanked) {
+			topN = len(colbertRanked)
+		}
+
+		topContents := make([]string, topN)
+		topIndices := make([]int, topN)
+		for i := 0; i < topN; i++ {
+			topIndices[i] = colbertRanked[i].idx
+			topContents[i] = contents[colbertRanked[i].idx]
+		}
+
+		util.Debugf(util.DebugDetailed, "Cross-encoder reranking top %d ColBERT results", topN)
+
+		results, err := s.reranker.Rerank(ctx, query, topContents)
+		if err != nil {
+			util.Debugf(util.DebugDetailed, "Reranker error (continuing with ColBERT): %v", err)
+		} else {
+			for _, r := range results {
+				if r.Index >= 0 && r.Index < len(topIndices) {
+					originalIdx := topIndices[r.Index]
+					rerankScores[originalIdx] = r.Score
+				}
+			}
+		}
+	} else if hasReranker && !hasColBERT {
+		// No ColBERT, just run cross-encoder on all candidates
+		results, err := s.reranker.Rerank(ctx, query, contents)
+		if err != nil {
+			util.Debugf(util.DebugDetailed, "Reranker error: %v", err)
+		} else {
+			for _, r := range results {
+				if r.Index >= 0 && r.Index < len(docs) {
+					rerankScores[r.Index] = r.Score
+				}
 			}
 		}
 	}
@@ -710,20 +758,39 @@ func (s *Searcher) rerankResults(ctx context.Context, query string, docs []*stor
 	}
 
 	// Adjust weights based on what's enabled
-	if hasReranker && hasColBERT {
-		// Both enabled: vector 30%, reranker 40%, ColBERT 30%
-		vectorWeight = 0.3
-		rerankWeight = 0.4
-		colbertWeight = 0.3
-	} else if hasColBERT && !hasReranker {
-		// ColBERT only: vector 50%, ColBERT 50%
-		vectorWeight = 0.5
-		rerankWeight = 0
-		colbertWeight = 0.5
-	} else if hasReranker && !hasColBERT {
-		// Reranker only: use original weights
-		vectorWeight = 1.0 - rerankWeight
-		colbertWeight = 0
+	// IMPORTANT: When hybrid search is enabled, the initial ranking already includes
+	// BM25 keyword matching which is highly valuable for code search. We must preserve
+	// this signal by giving higher weight to the initial (hybrid) ranking.
+	if opts.UseHybrid {
+		// Hybrid mode: BM25 keyword matches are highly valuable for code search.
+		// The reranker should only make minor adjustments, not override BM25 rankings.
+		if hasReranker && hasColBERT {
+			vectorWeight = 0.70 // Hybrid ranking is primary signal
+			rerankWeight = 0.15 // Reranker for minor adjustments only
+			colbertWeight = 0.15
+		} else if hasColBERT && !hasReranker {
+			vectorWeight = 0.75
+			rerankWeight = 0
+			colbertWeight = 0.25
+		} else if hasReranker && !hasColBERT {
+			vectorWeight = 0.75 // BM25 keyword matches are highly valuable
+			rerankWeight = 0.25 // Reranker as tie-breaker only
+			colbertWeight = 0
+		}
+	} else {
+		// Semantic-only mode: reranker/colbert provide complementary signals
+		if hasReranker && hasColBERT {
+			vectorWeight = 0.3
+			rerankWeight = 0.4
+			colbertWeight = 0.3
+		} else if hasColBERT && !hasReranker {
+			vectorWeight = 0.5
+			rerankWeight = 0
+			colbertWeight = 0.5
+		} else if hasReranker && !hasColBERT {
+			vectorWeight = 1.0 - rerankWeight
+			colbertWeight = 0
+		}
 	}
 
 	// Adjust based on query intent

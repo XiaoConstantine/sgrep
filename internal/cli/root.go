@@ -32,6 +32,7 @@ var (
 	semanticWeight float64
 	bm25Weight     float64
 	enableRerank   bool
+	enableColBERT  bool
 	rerankTopK     int
 
 	// Index flags
@@ -105,7 +106,8 @@ func init() {
 	rootCmd.Flags().BoolVar(&hybridSearch, "hybrid", false, "Enable hybrid search (semantic + BM25)")
 	rootCmd.Flags().Float64Var(&semanticWeight, "semantic-weight", 0.6, "Weight for semantic score in hybrid mode")
 	rootCmd.Flags().Float64Var(&bm25Weight, "bm25-weight", 0.4, "Weight for BM25 score in hybrid mode")
-	rootCmd.Flags().BoolVar(&enableRerank, "rerank", false, "Enable reranking stage for better precision (requires reranker model)")
+	rootCmd.Flags().BoolVar(&enableRerank, "rerank", false, "Enable cross-encoder reranking (requires reranker model)")
+	rootCmd.Flags().BoolVar(&enableColBERT, "colbert", false, "Enable ColBERT late interaction scoring (no extra model needed)")
 	rootCmd.Flags().IntVar(&rerankTopK, "rerank-topk", 50, "Number of candidates to fetch for reranking")
 
 	// Add subcommands
@@ -158,8 +160,8 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	opts.BM25Weight = bm25Weight
 	opts.UseRerank = enableRerank
 	opts.RerankTopK = rerankTopK
-	// ColBERT late interaction is automatically enabled with --rerank for better quality
-	opts.UseColBERT = enableRerank
+	// ColBERT can be enabled independently via --colbert, or automatically with --rerank
+	opts.UseColBERT = enableColBERT || enableRerank
 
 	// Create searcher config
 	searchCfg := search.Config{Store: s}
