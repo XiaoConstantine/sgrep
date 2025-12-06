@@ -232,7 +232,7 @@ func (m *RerankerManager) ModelExists() bool {
 	if err != nil {
 		return false
 	}
-	return info.Size() > 500_000_000 // Should be > 500MB
+	return info.Size() > 100_000_000 // Should be > 100MB (jina-reranker-v2 is ~300MB)
 }
 
 // DownloadModel downloads the reranker model if not present.
@@ -241,7 +241,7 @@ func (m *RerankerManager) DownloadModel(progress func(downloaded, total int64)) 
 
 	// Check if already exists
 	if info, err := os.Stat(modelPath); err == nil {
-		if info.Size() > 500_000_000 { // Sanity check: should be > 500MB
+		if info.Size() > 100_000_000 { // Sanity check: should be > 100MB
 			return nil
 		}
 		// File exists but seems incomplete, remove it

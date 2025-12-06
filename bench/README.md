@@ -30,17 +30,18 @@ uv run bench/quality/run_dspy_bench.py --tool all --mode all
 
 | Tool | MRR | P@5 | R@5 | Latency | Tokens | Cost |
 |------|-----|-----|-----|---------|--------|------|
-| **sgrep (hybrid+colbert)** | **0.664** | 0.220 | 0.400 | 6200ms | 2855 | $0.17 |
-| sgrep (hybrid) | 0.624 | 0.200 | 0.358 | 5277ms | 4034 | $0.24 |
-| sgrep (semantic) | 0.610 | 0.200 | 0.358 | 5723ms | 2462 | $0.15 |
-| sgrep (cascade) | 0.596 | 0.200 | 0.371 | 8732ms | 3522 | $0.21 |
+| **sgrep (hybrid+colbert)** | **0.698** | 0.230 | 0.425 | 9461ms | 2757 | $0.17 |
+| sgrep (hybrid) | 0.615 | 0.200 | 0.358 | 6246ms | 4016 | $0.24 |
+| sgrep (semantic) | 0.610 | 0.200 | 0.358 | 5823ms | 2473 | $0.15 |
+| sgrep (cascade) | 0.596 | 0.220 | 0.408 | 10564ms | 3121 | $0.19 |
 | mgrep (cloud) | 0.262 | 0.050 | 0.100 | 939ms | 4646 | $0.28 |
 | osgrep | 0.050 | 0.010 | 0.017 | 916ms | 332 | $0.02 |
 
 **Key findings:**
-- **sgrep (hybrid+colbert)** achieves best MRR (0.664) - 2.5x better than mgrep, 13x better than osgrep
-- ColBERT late interaction scoring significantly improves accuracy over plain hybrid (+6%)
-- Cascade (ColBERT + cross-encoder) hurts performance - cross-encoder demotes keyword matches
+- **sgrep (hybrid+colbert)** achieves best MRR (0.698) - 2.7x better than mgrep, 14x better than osgrep
+- ColBERT late interaction scoring significantly improves accuracy over plain hybrid (+13%)
+- Cascade (hybrid+colbert+cross-encoder) hurts performance - cross-encoder demotes code-relevant results
+- Cross-encoders like jina-reranker-v2 and mxbai-rerank are trained on general text, not code
 - Token count measures actual code content returned (for LLM context estimation)
 - Cost estimated at $3/1M tokens (Claude pricing)
 
