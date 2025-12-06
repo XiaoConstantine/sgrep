@@ -168,14 +168,16 @@ func (s *LibSQLStore) init() error {
 func (s *LibSQLStore) createVectorIndex() error {
 	// Determine compression based on quantization mode
 	// libSQL supports: float8, float16, int8, 1bit
+	// Default max_neighbors is 3*sqrt(dims) ≈ 83 for 768-dim vectors
+	// Higher values improve recall at slight index size cost
 	var indexOpts string
 	switch s.quantize {
 	case QuantizeInt8:
-		indexOpts = "'compress_neighbors=int8', 'max_neighbors=50'"
+		indexOpts = "'compress_neighbors=int8', 'max_neighbors=83'"
 	case QuantizeBinary:
-		indexOpts = "'compress_neighbors=float8', 'max_neighbors=20'"
+		indexOpts = "'compress_neighbors=float8', 'max_neighbors=40'"
 	default:
-		indexOpts = "'compress_neighbors=float8', 'max_neighbors=50'"
+		indexOpts = "'compress_neighbors=float8', 'max_neighbors=83'"
 	}
 
 	// Create index for documents table
@@ -496,10 +498,10 @@ func (s *LibSQLStore) searchWithIndex(ctx context.Context, embedding []float32, 
 	vecStr := formatVectorString(embedding)
 
 	// Use vector_top_k for DiskANN-based search
-	// Fetch more candidates and filter by threshold
-	fetchLimit := limit * 3
-	if fetchLimit < 20 {
-		fetchLimit = 20
+	// Fetch 5× candidates to compensate for ANN approximation, then filter by threshold
+	fetchLimit := limit * 5
+	if fetchLimit < 30 {
+		fetchLimit = 30
 	}
 
 	query := `
@@ -655,7 +657,7 @@ func (s *LibSQLStore) HybridSearch(ctx context.Context, embedding []float32, que
 		return s.Search(ctx, embedding, limit, threshold)
 	}
 
-	// Get semantic candidates
+	// Get semantic candidates (5× for better recall before hybrid reranking)
 	fetchLimit := limit * 5
 	if fetchLimit < 50 {
 		fetchLimit = 50
