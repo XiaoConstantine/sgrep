@@ -78,14 +78,15 @@ sgrep setup
 # Index your codebase (auto-starts embedding server)
 sgrep index .
 
-# Semantic search
+# Semantic search (quick)
 sgrep "error handling for database connections"
-sgrep "JWT token validation logic"
-sgrep "how are API rate limits implemented"
 
-# Hybrid search (semantic + BM25) - better for exact term matching
-sgrep --hybrid "authentication middleware"
-sgrep --hybrid "JWT token" --semantic-weight 0.5 --bm25-weight 0.5
+# Hybrid + ColBERT (recommended - best accuracy)
+sgrep --hybrid --colbert "JWT token validation logic"
+sgrep --hybrid --colbert "how are API rate limits implemented"
+
+# Hybrid with custom weights
+sgrep --hybrid --colbert "authentication middleware" --semantic-weight 0.5 --bm25-weight 0.5
 
 # Watch mode (background indexing)
 sgrep watch .
@@ -113,29 +114,81 @@ sgrep --hybrid --semantic-weight 0.4 --bm25-weight 0.6 "parseAST"
 
 **Note**: Hybrid search requires building with FTS5 support (see [From Source](#from-source)). The FTS5 index is created automatically on first hybrid search - no re-indexing needed.
 
-## Two-Stage Retrieval with Reranking
+## Multi-Stage Retrieval Pipeline
 
-For higher precision, sgrep supports **cross-encoder reranking** using a dedicated reranker model:
+sgrep uses a sophisticated multi-stage retrieval pipeline for maximum accuracy:
 
-```bash
-# Enable reranking for better precision
-sgrep --rerank "error handling"
-
-# Combine with hybrid search
-sgrep --rerank --hybrid "authentication middleware"
+```
+Query: "authentication middleware"
+         ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ Stage 1: Hybrid Retrieval (--hybrid)                            │
+│ ┌───────────────┐    ┌───────────────┐                         │
+│ │   Semantic    │    │     BM25      │                         │
+│ │  (DiskANN)    │    │    (FTS5)     │                         │
+│ │     60%       │    │     40%       │                         │
+│ └───────┬───────┘    └───────┬───────┘                         │
+│         └────────┬───────────┘                                  │
+│                  ↓                                              │
+│         Top 50 candidates                                       │
+└─────────────────────────────────────────────────────────────────┘
+                   ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ Stage 2: ColBERT Late Interaction (--colbert)                   │
+│ ┌───────────────────────────────────────────────────────────┐  │
+│ │  Token-level similarity: MaxSim(query_tokens, doc_tokens) │  │
+│ │  Scores all 50 candidates with fine-grained matching      │  │
+│ └───────────────────────────────────────────────────────────┘  │
+│                  ↓                                              │
+│         Re-scored candidates                                    │
+└─────────────────────────────────────────────────────────────────┘
+                   ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ Stage 3: Cross-Encoder Reranking (--rerank)                     │
+│ ┌───────────────────────────────────────────────────────────┐  │
+│ │  Full attention: query ⊗ document → relevance score       │  │
+│ │  Reranks top 20 ColBERT results (~300-700ms)              │  │
+│ └───────────────────────────────────────────────────────────┘  │
+│                  ↓                                              │
+│         Final ranked results                                    │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-**How it works:**
-1. **Stage 1**: Fast vector search retrieves top candidates (~30 docs)
-2. **Stage 2**: Cross-encoder reranks candidates using query-document attention
+### Retrieval Modes
 
-**Setup reranking:**
+| Mode | Command | MRR | Latency | Best For |
+|------|---------|-----|---------|----------|
+| Semantic only | `sgrep "query"` | 0.61 | ~30ms | Quick searches |
+| **Hybrid + ColBERT** | `sgrep --hybrid --colbert "query"` | **0.70** | ~200ms | **Best accuracy for code** |
+| Hybrid | `sgrep --hybrid "query"` | 0.62 | ~50ms | Exact term matching |
+| Cascade (all 3 stages) | `sgrep --hybrid --colbert --rerank "query"` | 0.60 | ~500ms | General text (not code) |
+
+**Recommended for code**: Use `--hybrid --colbert`. ColBERT provides +13% MRR over plain hybrid.
+
+> **Note**: Cross-encoder reranking adds a third stage but currently hurts code search accuracy (MRR drops from 0.70 to 0.60). This is because available cross-encoder models (mxbai-rerank) are trained on general text, not code. Cross-encoder may help for non-code search tasks.
+
 ```bash
-# Download reranker model (~636MB) and start server
+# Best accuracy (recommended)
+sgrep --hybrid --colbert "authentication middleware"
+
+# Quick search (semantic only)
+sgrep "error handling"
+
+# With custom weights
+sgrep --hybrid --colbert --semantic-weight 0.5 --bm25-weight 0.5 "JWT token"
+```
+
+### Setup
+
+```bash
+# Basic setup (embedding model only, ~130MB)
+sgrep setup
+
+# With cross-encoder reranking (~1.6GB additional)
 sgrep setup --with-rerank
 ```
 
-The reranker uses BGE-reranker-v2-m3 via llama.cpp, running on a separate port (8081). It provides better precision for complex queries at the cost of ~300-700ms additional latency.
+**Note**: ColBERT scoring uses the same embedding model—no additional setup required. Cross-encoder reranking requires a separate model download.
 
 ## Document-Level Search
 
@@ -279,9 +332,10 @@ After installation, restart Claude Code to activate. The plugin works automatica
 | `-t, --include-tests` | Include test files in results (excluded by default) |
 | `--all-chunks` | Show all matching chunks (disable deduplication) |
 | `--hybrid` | Enable hybrid search (semantic + BM25) |
+| `--colbert` | Enable ColBERT late interaction scoring (recommended with --hybrid) |
 | `--semantic-weight F` | Weight for semantic score in hybrid mode (default: 0.6) |
 | `--bm25-weight F` | Weight for BM25 score in hybrid mode (default: 0.4) |
-| `--rerank` | Enable two-stage retrieval with cross-encoder reranking |
+| `--rerank` | Enable cross-encoder reranking (requires `sgrep setup --with-rerank`) |
 | `-d, --debug` | Show debug timing information |
 
 ## Configuration
@@ -314,11 +368,18 @@ SGREP_DIMS=768                         # Vector dimensions
 │         ↓                                                    │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐      │
 │  │ llama.cpp   │───▶│  DiskANN    │───▶│   libSQL    │      │
-│  │ Embedding   │    │   Search    │    │  Documents  │      │
-│  │   (~15ms)   │    │   (~5ms)    │    │   (~5ms)    │      │
+│  │ Embedding   │    │ + BM25/FTS5 │    │  Documents  │      │
+│  │   (~15ms)   │    │   (~10ms)   │    │   (~5ms)    │      │
 │  └─────────────┘    └─────────────┘    └─────────────┘      │
 │       ▲                    │                                 │
-│       │                    ▼ (with --rerank)                 │
+│       │                    ▼ (with --colbert)                │
+│       │              ┌─────────────┐                         │
+│       │              │  ColBERT    │                         │
+│       │              │ Late-Interx │                         │
+│       │              │  (~150ms)   │                         │
+│       │              └──────┬──────┘                         │
+│       │                     │                                │
+│       │                     ▼ (with --rerank)                │
 │       │              ┌─────────────┐                         │
 │       │              │Cross-Encoder│                         │
 │       │              │  Reranker   │                         │
@@ -328,7 +389,7 @@ SGREP_DIMS=768                         # Vector dimensions
 │       │ Auto-started by sgrep (16 parallel slots)           │
 │       │ (daemon mode, continuous batching)                  │
 │                                                              │
-│  Total: ~30ms (or ~500ms with reranking)                    │
+│  Recommended: --hybrid --colbert (~200ms, MRR 0.70)         │
 └──────────────────────────────────────────────────────────────┘
 ```
 
