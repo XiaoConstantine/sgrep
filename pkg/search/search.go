@@ -388,6 +388,15 @@ func (s *Searcher) SearchWithOptions(ctx context.Context, query string, opts Sea
 		util.Debugf(util.DebugSummary, "Search completed: %d results in %v", len(results), totalDuration.Round(time.Millisecond))
 	}
 
+	// Capture trace for slow queries (>500ms) if FlightRecorder is running
+	if totalDuration > 500*time.Millisecond {
+		if recorder := util.GetFlightRecorder(); recorder.IsStarted() {
+			if tracePath, err := recorder.Snapshot("slow-query"); err == nil {
+				util.Debugf(util.DebugSummary, "Slow query trace saved: %s (took %v)", tracePath, totalDuration.Round(time.Millisecond))
+			}
+		}
+	}
+
 	return results, nil
 }
 

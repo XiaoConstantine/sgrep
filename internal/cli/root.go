@@ -42,6 +42,7 @@ var (
 	// Debug flags
 	debugLevel   int    // 0=off, 1=summary, 2=detailed (set via -d count)
 	debugLogFile string // optional log file path
+	enableTrace  bool   // enable FlightRecorder tracing
 
 	// Setup flags
 	setupWithRerank bool
@@ -85,6 +86,14 @@ func setupDebug(cmd *cobra.Command, args []string) error {
 	}
 	util.SetDebugWriter(writer)
 
+	// Start FlightRecorder if tracing enabled
+	if enableTrace {
+		if err := util.StartGlobalRecorder(); err != nil {
+			return fmt.Errorf("failed to start flight recorder: %w", err)
+		}
+		util.Debugf(util.DebugSummary, "FlightRecorder tracing enabled")
+	}
+
 	return nil
 }
 
@@ -94,6 +103,8 @@ func init() {
 		"Debug level: -d (summary timing), -dd (detailed per-operation timing)")
 	rootCmd.PersistentFlags().StringVar(&debugLogFile, "debug-log", "",
 		"Write debug output to file (in addition to stderr)")
+	rootCmd.PersistentFlags().BoolVar(&enableTrace, "trace", false,
+		"Enable FlightRecorder tracing (auto-captures slow queries to ~/.sgrep/traces/)")
 
 	// Search flags
 	rootCmd.Flags().IntVarP(&limit, "limit", "n", 10, "Maximum number of results")

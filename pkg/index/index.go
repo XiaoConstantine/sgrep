@@ -256,9 +256,7 @@ func (idx *Indexer) Index(ctx context.Context) error {
 
 	// Stage 3: Single DB writer goroutine
 	// Note: This goroutine exits when docChan is closed (done after embedWg.Wait())
-	writerWg.Add(1)
-	go func() {
-		defer writerWg.Done()
+	writerWg.Go(func() {
 		for docs := range docChan {
 			writeTimer := util.NewTimer("db_write")
 			if err := idx.store.StoreBatch(ctx, docs); err != nil {
@@ -268,12 +266,10 @@ func (idx *Indexer) Index(ctx context.Context) error {
 			writeDuration := writeTimer.Stop()
 			stats.RecordOp("db_write", writeDuration, int64(len(docs)))
 		}
-	}()
+	})
 
 	// Stage 2: Single batcher goroutine - collects chunks and batch embeds them
-	batcherWg.Add(1)
-	go func() {
-		defer batcherWg.Done()
+	batcherWg.Go(func() {
 		defer close(docChan) // Close docChan when batcher is done
 
 		var pendingChunks []chunkItem
@@ -358,13 +354,11 @@ func (idx *Indexer) Index(ctx context.Context) error {
 				docChan <- docs
 			}
 		}
-	}()
+	})
 
 	// Stage 1: File reader workers - read and chunk files, send to batcher
 	for i := 0; i < numWorkers; i++ {
-		readerWg.Add(1)
-		go func() {
-			defer readerWg.Done()
+		readerWg.Go(func() {
 			for path := range fileChan {
 				readTimer := util.NewTimer("file_read")
 				chunks, err := idx.readAndChunkFile(path)
@@ -394,7 +388,7 @@ func (idx *Indexer) Index(ctx context.Context) error {
 					fmt.Printf("\rProcessed %d/%d files...", processed, len(files))
 				}
 			}
-		}()
+		})
 	}
 
 	// Send files to workers
@@ -654,14 +648,12 @@ func (idx *Indexer) embedBatchWithRetry(ctx context.Context, texts []string, max
 	sem := make(chan struct{}, idx.indexCfg.EmbedConcurrency)
 
 	for i, text := range texts {
-		wg.Add(1)
-		go func(index int, t string, embedder *Indexer) {
-			defer wg.Done()
-
+		i, text := i, text // Capture loop variables
+		wg.Go(func() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			emb, err := embedder.embedWithRetry(ctx, t, maxRetries)
+			emb, err := idx.embedWithRetry(ctx, text, maxRetries)
 			if err != nil {
 				mu.Lock()
 				if firstErr == nil {
@@ -672,9 +664,9 @@ func (idx *Indexer) embedBatchWithRetry(ctx context.Context, texts []string, max
 			}
 
 			mu.Lock()
-			results[index] = emb
+			results[i] = emb
 			mu.Unlock()
-		}(i, text, idx)
+		})
 	}
 
 	wg.Wait()

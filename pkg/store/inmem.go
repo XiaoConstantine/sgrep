@@ -476,16 +476,14 @@ func (s *InMemStore) searchParallel(ctx context.Context, embedding []float32, ve
 			continue
 		}
 
-		wg.Add(1)
-		go func(partition, start, end int) {
-			defer wg.Done()
-
+		p, start, end := p, start, end // Capture loop variables
+		wg.Go(func() {
 			if cancelled.Load() {
 				return
 			}
 
 			// Get pre-allocated slab for this partition
-			slab := s.slabPool.Get(partition)
+			slab := s.slabPool.Get(p)
 			partitionSize := end - start
 			distances := slab.Distances(partitionSize)
 
@@ -504,8 +502,8 @@ func (s *InMemStore) searchParallel(ctx context.Context, embedding []float32, ve
 				}
 			}
 
-			resultChan <- partialResult{partition: partition, results: results}
-		}(p, start, end)
+			resultChan <- partialResult{partition: p, results: results}
+		})
 	}
 
 	// Close channel when all workers done

@@ -322,14 +322,12 @@ func (e *Embedder) embedBatchFallback(ctx context.Context, texts []string) ([][]
 	sem := make(chan struct{}, 8)
 
 	for i, text := range texts {
-		wg.Add(1)
-		go func(idx int, t string) {
-			defer wg.Done()
-
+		i, text := i, text // Capture loop variables
+		wg.Go(func() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			emb, err := e.Embed(ctx, t)
+			emb, err := e.Embed(ctx, text)
 			if err != nil {
 				mu.Lock()
 				if firstErr == nil {
@@ -340,9 +338,9 @@ func (e *Embedder) embedBatchFallback(ctx context.Context, texts []string) ([][]
 			}
 
 			mu.Lock()
-			results[idx] = emb
+			results[i] = emb
 			mu.Unlock()
-		}(i, text)
+		})
 	}
 
 	wg.Wait()

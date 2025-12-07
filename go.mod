@@ -1,6 +1,6 @@
 module github.com/XiaoConstantine/sgrep
 
-go 1.23.0
+go 1.25.0
 
 require (
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
@@ -15,6 +15,7 @@ require (
 	github.com/tree-sitter/tree-sitter-python v0.25.0
 	github.com/tree-sitter/tree-sitter-rust v0.24.0
 	github.com/tree-sitter/tree-sitter-typescript v0.23.2
+	github.com/tursodatabase/go-libsql v0.0.0-20251025125656-00da49cd4a6e
 )
 
 require (
@@ -23,7 +24,6 @@ require (
 	github.com/libsql/sqlite-antlr4-parser v0.0.0-20240327125255-dbf53b6cbf06 // indirect
 	github.com/mattn/go-pointer v0.0.1 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
-	github.com/tursodatabase/go-libsql v0.0.0-20251025125656-00da49cd4a6e // indirect
 	golang.org/x/exp v0.0.0-20230515195305-f3d0a9c9a5cc // indirect
 	golang.org/x/sys v0.22.0 // indirect
 )
