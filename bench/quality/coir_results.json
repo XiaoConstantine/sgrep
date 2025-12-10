@@ -1,0 +1,13 @@
+[
+  {
+    "ndcg@10": 0.6218106047968865,
+    "mrr": 0.5705079365079364,
+    "recall@10": 0.782,
+    "mean_latency_ms": 2928.383071422577,
+    "p50_latency_ms": 2930.3715229034424,
+    "p95_latency_ms": 3124.1740703582764,
+    "num_queries": 500,
+    "dataset": "cosqa",
+    "mode": "hybrid+colbert"
+  }
+]

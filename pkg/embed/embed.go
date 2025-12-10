@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -20,7 +21,7 @@ import (
 const (
 	defaultEndpoint  = "http://localhost:8080"
 	defaultTimeout   = 30 * time.Second
-	maxContextTokens = 1500 // Safe limit for 2048 context (llama.cpp tokens)
+	maxContextTokens = 700 // Safe limit for 1024 context per slot (quality config)
 )
 
 // Config holds embedder configuration (dependency injection).
@@ -108,9 +109,22 @@ func NewWithConfig(cfg Config) *Embedder {
 		cacheSize = 10000
 	}
 
+	// Optimized HTTP transport for concurrent embedding requests
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 100, // High for concurrent batch requests
+		MaxConnsPerHost:     100,
+		IdleConnTimeout:     90 * time.Second,
+		DisableCompression:  true, // Embeddings don't compress well
+	}
+
 	return &Embedder{
 		endpoint:  endpoint,
-		client:    &http.Client{Timeout: timeout},
+		client:    &http.Client{Timeout: timeout, Transport: transport},
 		cache:     NewCache(cacheSize),
 		serverMgr: mgr,
 		autoStart: cfg.AutoStart,

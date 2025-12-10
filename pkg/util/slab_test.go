@@ -310,6 +310,134 @@ func TestSlabPool_Concurrent(t *testing.T) {
 	wg.Wait()
 }
 
+func TestDotProductUnrolled8(t *testing.T) {
+	tests := []struct {
+		name     string
+		a        []float32
+		b        []float32
+		expected float64
+	}{
+		{
+			name:     "identical unit vectors",
+			a:        []float32{1, 0, 0},
+			b:        []float32{1, 0, 0},
+			expected: 1.0,
+		},
+		{
+			name:     "orthogonal vectors",
+			a:        []float32{1, 0, 0},
+			b:        []float32{0, 1, 0},
+			expected: 0.0,
+		},
+		{
+			name:     "opposite vectors",
+			a:        []float32{1, 0, 0},
+			b:        []float32{-1, 0, 0},
+			expected: -1.0,
+		},
+		{
+			name:     "simple dot product",
+			a:        []float32{1, 2, 3},
+			b:        []float32{4, 5, 6},
+			expected: 32.0, // 1*4 + 2*5 + 3*6 = 4 + 10 + 18
+		},
+		{
+			name:     "empty vectors",
+			a:        []float32{},
+			b:        []float32{},
+			expected: 0.0,
+		},
+		{
+			name:     "length mismatch",
+			a:        []float32{1, 2},
+			b:        []float32{1, 2, 3},
+			expected: 0.0,
+		},
+		{
+			name:     "exactly 8 elements",
+			a:        []float32{1, 2, 3, 4, 5, 6, 7, 8},
+			b:        []float32{1, 1, 1, 1, 1, 1, 1, 1},
+			expected: 36.0, // 1+2+3+4+5+6+7+8
+		},
+		{
+			name:     "9 elements (tests remainder)",
+			a:        []float32{1, 2, 3, 4, 5, 6, 7, 8, 9},
+			b:        []float32{1, 1, 1, 1, 1, 1, 1, 1, 1},
+			expected: 45.0, // 1+2+3+4+5+6+7+8+9
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := DotProductUnrolled8(tt.a, tt.b)
+			if math.Abs(got-tt.expected) > 1e-6 {
+				t.Errorf("DotProductUnrolled8() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestDotProductUnrolled8_MatchesNaive(t *testing.T) {
+	// Test that unrolled version matches naive implementation
+	// for vectors of various sizes
+	sizes := []int{1, 7, 8, 9, 15, 16, 17, 768, 769}
+
+	for _, size := range sizes {
+		t.Run("size_"+intToStr(size), func(t *testing.T) {
+			a := make([]float32, size)
+			b := make([]float32, size)
+			for i := range a {
+				a[i] = rand.Float32()*2 - 1
+				b[i] = rand.Float32()*2 - 1
+			}
+
+			// Naive implementation
+			var expected float64
+			for i := range a {
+				expected += float64(a[i]) * float64(b[i])
+			}
+
+			got := DotProductUnrolled8(a, b)
+			if math.Abs(got-expected) > 1e-5 {
+				t.Errorf("DotProductUnrolled8() = %v, naive = %v, diff = %v",
+					got, expected, math.Abs(got-expected))
+			}
+		})
+	}
+}
+
+func TestDotProductUnrolled8_NormalizedVectors(t *testing.T) {
+	// For normalized vectors, dot product equals cosine similarity
+	a := NormalizeVectorCopy([]float32{1, 2, 3, 4, 5, 6, 7, 8})
+	b := NormalizeVectorCopy([]float32{8, 7, 6, 5, 4, 3, 2, 1})
+
+	// Compute using unrolled dot product
+	dotSim := DotProductUnrolled8(a, b)
+
+	// Compute using CosineDistance (1 - similarity)
+	cosDist := CosineDistance(a, b)
+	cosSim := 1.0 - cosDist
+
+	if math.Abs(dotSim-cosSim) > 1e-6 {
+		t.Errorf("Dot product similarity (%v) != Cosine similarity (%v)", dotSim, cosSim)
+	}
+}
+
+func intToStr(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	if n < 0 {
+		return "-" + intToStr(-n)
+	}
+	result := ""
+	for n > 0 {
+		result = string(rune('0'+n%10)) + result
+		n /= 10
+	}
+	return result
+}
+
 // Benchmarks
 
 func BenchmarkL2DistanceSlab_768dims(b *testing.B) {
@@ -370,6 +498,55 @@ func BenchmarkSlabPool_Get(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		pool.Get(i % 16)
 	}
+}
+
+func BenchmarkDotProduct_768dims(b *testing.B) {
+	a := make([]float32, 768)
+	c := make([]float32, 768)
+	for i := range a {
+		a[i] = rand.Float32()*2 - 1
+		c[i] = rand.Float32()*2 - 1
+	}
+
+	// Normalize for fair comparison
+	NormalizeVector(a)
+	NormalizeVector(c)
+
+	b.Run("Naive", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			var dot float64
+			for j := range a {
+				dot += float64(a[j]) * float64(c[j])
+			}
+			_ = dot
+		}
+	})
+
+	b.Run("DotProductDistance", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			DotProductDistance(a, c)
+		}
+	})
+
+	b.Run("DotProductUnrolled8", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			DotProductUnrolled8(a, c)
+		}
+	})
+
+	b.Run("CosineDistance", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			CosineDistance(a, c)
+		}
+	})
 }
 
 func max(a, b int) int {

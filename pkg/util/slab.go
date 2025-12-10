@@ -166,6 +166,40 @@ func DotProductDistance(a, b []float32) float64 {
 	return 1.0 - dot
 }
 
+// DotProductUnrolled8 computes dot product with 8-way loop unrolling.
+// Exploits CPU pipelining by breaking data dependencies between iterations.
+// For 768-dim vectors (common embedding size): 768/8 = 96 iterations.
+// Returns the raw dot product (not distance). For similarity of normalized
+// vectors, this equals cosine similarity directly.
+func DotProductUnrolled8(a, b []float32) float64 {
+	n := len(a)
+	if n != len(b) {
+		return 0
+	}
+
+	var s0, s1, s2, s3, s4, s5, s6, s7 float64
+
+	// Unrolled main loop (8 elements per iteration)
+	i := 0
+	for ; i <= n-8; i += 8 {
+		s0 += float64(a[i]) * float64(b[i])
+		s1 += float64(a[i+1]) * float64(b[i+1])
+		s2 += float64(a[i+2]) * float64(b[i+2])
+		s3 += float64(a[i+3]) * float64(b[i+3])
+		s4 += float64(a[i+4]) * float64(b[i+4])
+		s5 += float64(a[i+5]) * float64(b[i+5])
+		s6 += float64(a[i+6]) * float64(b[i+6])
+		s7 += float64(a[i+7]) * float64(b[i+7])
+	}
+
+	// Handle remainder (for dimensions not divisible by 8)
+	for ; i < n; i++ {
+		s0 += float64(a[i]) * float64(b[i])
+	}
+
+	return s0 + s1 + s2 + s3 + s4 + s5 + s6 + s7
+}
+
 // CosineDistanceBatch computes cosine distances for multiple vectors.
 // Results are written to the distances slice (must be len(vectors)).
 // For pre-normalized vectors, use DotProductDistanceBatch instead (faster).

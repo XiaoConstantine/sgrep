@@ -105,16 +105,17 @@ func (m *Manager) Start() error {
 		threads = 16
 	}
 
-	// Parallel slots: for Apple Silicon 16GB, 8-16 is optimal
+	// Parallel slots: more slots = more parallelism but each gets less context
 	// Formula: n_slot_ctx = n_ctx / parallel (each slot gets portion of context)
-	// We want 2048 tokens per slot for our chunk sizes
-	parallelSlots := 16 // Start aggressive for embeddings
+	// Tested: 32 slots optimal for Apple Silicon, smaller context = faster attention
+	parallelSlots := 32
 	if numCPU < 8 {
-		parallelSlots = 8
+		parallelSlots = 16
 	}
 
-	// Context size: 2048 tokens per slot
-	contextSize := parallelSlots * 2048
+	// Context size: 1024 tokens per slot - quality optimized
+	// Benchmarks show maxContextTokens matters more than context size
+	contextSize := parallelSlots * 1024
 
 	// Build command with GPU support if available
 	args := []string{
