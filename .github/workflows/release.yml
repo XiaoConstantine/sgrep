@@ -19,7 +19,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: '1.25'
           cache: true
 
       - name: Install build dependencies
@@ -52,12 +52,12 @@ jobs:
       matrix:
         include:
           # macOS Intel: use sqlite_vec (go-libsql lacks x86_64 prebuilts)
-          - runner: macos-13
+          - runner: macos-15-intel
             arch: amd64
             artifact_arch: x86_64
             tags: "-tags=sqlite_vec"
           # macOS ARM: use libSQL (default, has prebuilt binaries)
-          - runner: macos-14
+          - runner: macos-latest
             arch: arm64
             artifact_arch: arm64
             tags: ""
@@ -70,7 +70,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: '1.25'
           cache: true
 
       - name: Run tests (with FTS5 for hybrid search)
