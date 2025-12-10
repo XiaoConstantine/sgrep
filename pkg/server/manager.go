@@ -113,9 +113,9 @@ func (m *Manager) Start() error {
 		parallelSlots = 16
 	}
 
-	// Context size: 1024 tokens per slot - quality optimized
-	// Benchmarks show maxContextTokens matters more than context size
-	contextSize := parallelSlots * 1024
+	// Context size: 256 tokens per slot - speed optimized
+	// Benchmarks show identical quality (NDCG@10=0.6218) with 2.5x faster indexing
+	contextSize := parallelSlots * 256
 
 	// Build command with GPU support if available
 	args := []string{

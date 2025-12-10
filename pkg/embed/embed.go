@@ -21,7 +21,7 @@ import (
 const (
 	defaultEndpoint  = "http://localhost:8080"
 	defaultTimeout   = 30 * time.Second
-	maxContextTokens = 700 // Safe limit for 1024 context per slot (quality config)
+	maxContextTokens = 128 // Safe limit for 256 context per slot (speed config)
 )
 
 // Config holds embedder configuration (dependency injection).
