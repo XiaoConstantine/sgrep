@@ -269,6 +269,8 @@ func (idx *Indexer) Index(ctx context.Context) error {
 	})
 
 	// Stage 2: Single batcher goroutine - collects chunks and batch embeds them
+	// Note: Embedding server is typically the bottleneck, not HTTP concurrency.
+	// Parallel HTTP just queues at the server, causing timeouts without speedup.
 	batcherWg.Go(func() {
 		defer close(docChan) // Close docChan when batcher is done
 
@@ -1073,4 +1075,192 @@ func (idx *Indexer) shouldSmartSkip(path string) bool {
 		".wasm": true, ".map": true,
 	}
 	return skipExts[ext]
+}
+
+// ComputeColBERTSegments pre-computes and stores ColBERT segment embeddings for all chunks.
+// This enables fast MaxSim scoring at query time (~1-5ms vs ~100ms per doc).
+// Returns the number of chunks processed and any error.
+func (idx *Indexer) ComputeColBERTSegments(ctx context.Context) (int, error) {
+	// Check if store supports ColBERT segments
+	segmentStore, ok := idx.store.(store.ColBERTSegmentStorer)
+	if !ok {
+		return 0, fmt.Errorf("store does not support ColBERT segments")
+	}
+
+	// Get all documents from the store
+	stats, err := idx.store.Stats(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get stats: %w", err)
+	}
+
+	fmt.Printf("Computing ColBERT segments for %d chunks...\n", stats.Chunks)
+
+	// Query all documents - we need to process them in batches
+	// For now, we'll use a simple approach: load all chunks via store
+	// In the future, this could be optimized with pagination
+
+	// Get chunks by querying with a zero vector (returns all documents up to limit)
+	zeroEmb := make([]float32, 768) // Assume 768 dims
+	allDocs, _, err := idx.store.Search(ctx, zeroEmb, int(stats.Chunks)+100, 1000.0) // High threshold to get all
+	if err != nil {
+		return 0, fmt.Errorf("failed to get documents: %w", err)
+	}
+
+	if len(allDocs) == 0 {
+		return 0, nil
+	}
+
+	// Process in batches
+	batchSize := 32 // Process 32 chunks at a time
+	processed := 0
+
+	for i := 0; i < len(allDocs); i += batchSize {
+		end := i + batchSize
+		if end > len(allDocs) {
+			end = len(allDocs)
+		}
+		batch := allDocs[i:end]
+
+		// Collect all segments for this batch
+		var allSegmentTexts []string
+		segmentCounts := make([]int, len(batch))
+
+		for j, doc := range batch {
+			segments := decomposeDocumentForColBERT(doc.Content)
+			segmentCounts[j] = len(segments)
+			allSegmentTexts = append(allSegmentTexts, segments...)
+		}
+
+		if len(allSegmentTexts) == 0 {
+			continue
+		}
+
+		// Embed all segments in one batch
+		embeddings, err := idx.embedBatchWithRetry(ctx, allSegmentTexts, 3)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to embed segments: %v\n", err)
+			continue
+		}
+
+		// Normalize embeddings
+		for k := range embeddings {
+			embeddings[k] = util.NormalizeVectorCopy(embeddings[k])
+		}
+
+		// Group segments by chunk and store
+		chunkSegments := make(map[string][]store.ColBERTSegment)
+		segIdx := 0
+		textIdx := 0
+
+		for j, doc := range batch {
+			count := segmentCounts[j]
+			if count == 0 {
+				continue
+			}
+
+			segments := make([]store.ColBERTSegment, count)
+			for k := 0; k < count; k++ {
+				segments[k] = store.ColBERTSegment{
+					SegmentIdx: k,
+					Text:       allSegmentTexts[textIdx],
+					Embedding:  embeddings[segIdx],
+				}
+				segIdx++
+				textIdx++
+			}
+			chunkSegments[doc.ID] = segments
+		}
+
+		// Store batch
+		if err := segmentStore.StoreColBERTSegmentsBatch(ctx, chunkSegments); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to store segments: %v\n", err)
+			continue
+		}
+
+		processed += len(batch)
+		fmt.Printf("Processed %d/%d chunks...\n", processed, len(allDocs))
+	}
+
+	return processed, nil
+}
+
+// decomposeDocumentForColBERT splits a document into meaningful segments for ColBERT.
+// Uses the same logic as the search package's DecomposeDocument.
+func decomposeDocumentForColBERT(content string) []string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return nil
+	}
+
+	var segments []string
+
+	// Split by newlines first (code structure)
+	lines := strings.Split(content, "\n")
+
+	var currentSegment strings.Builder
+	currentLen := 0
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			// Empty line: flush current segment if substantial
+			if currentLen > 20 {
+				segments = append(segments, strings.TrimSpace(currentSegment.String()))
+				currentSegment.Reset()
+				currentLen = 0
+			}
+			continue
+		}
+
+		// Check if this line starts a new logical unit
+		isNewUnit := strings.HasPrefix(line, "func ") ||
+			strings.HasPrefix(line, "type ") ||
+			strings.HasPrefix(line, "//") ||
+			strings.HasPrefix(line, "def ") ||
+			strings.HasPrefix(line, "class ") ||
+			strings.HasPrefix(line, "#")
+
+		if isNewUnit && currentLen > 20 {
+			segments = append(segments, strings.TrimSpace(currentSegment.String()))
+			currentSegment.Reset()
+			currentLen = 0
+		}
+
+		currentSegment.WriteString(line)
+		currentSegment.WriteString(" ")
+		currentLen += len(line)
+
+		// Flush if segment is getting long
+		if currentLen > 200 {
+			segments = append(segments, strings.TrimSpace(currentSegment.String()))
+			currentSegment.Reset()
+			currentLen = 0
+		}
+	}
+
+	// Flush remaining
+	if currentLen > 10 {
+		segments = append(segments, strings.TrimSpace(currentSegment.String()))
+	}
+
+	// Limit segments to avoid explosion
+	if len(segments) > 10 {
+		// Keep first, last, and sample from middle
+		sampled := make([]string, 0, 10)
+		sampled = append(sampled, segments[0])
+		step := len(segments) / 8
+		if step < 1 {
+			step = 1
+		}
+		for i := step; i < len(segments)-1; i += step {
+			sampled = append(sampled, segments[i])
+			if len(sampled) >= 9 {
+				break
+			}
+		}
+		sampled = append(sampled, segments[len(segments)-1])
+		segments = sampled
+	}
+
+	return segments
 }

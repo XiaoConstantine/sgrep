@@ -201,6 +201,13 @@ func NewWithConfig(cfg Config) *Searcher {
 		colbertScorer = NewColBERTScorer(embedder)
 	}
 
+	// Configure ColBERT scorer with segment store if available
+	if colbertScorer != nil {
+		if segmentStore, ok := cfg.Store.(store.ColBERTSegmentStorer); ok {
+			colbertScorer.SetSegmentStore(segmentStore)
+		}
+	}
+
 	return &Searcher{
 		store:         cfg.Store,
 		embedder:      embedder,
@@ -662,16 +669,19 @@ func (s *Searcher) rerankResults(ctx context.Context, query string, docs []*stor
 
 	util.Debugf(util.DebugDetailed, "Cascade rerank: %d docs for ColBERT, top %d for cross-encoder", rerankCount, crossEncoderCandidates)
 
-	// Prepare document contents for ColBERT (or cross-encoder if ColBERT disabled)
+	// Prepare document contents and IDs for ColBERT (or cross-encoder if ColBERT disabled)
 	contents := make([]string, rerankCount)
+	chunkIDs := make([]string, rerankCount)
 	for i := 0; i < rerankCount; i++ {
 		contents[i] = docs[i].Content
+		chunkIDs[i] = docs[i].ID
 	}
 
 	// STAGE 1: ColBERT scoring on all candidates (preserves keyword matches)
+	// Uses pre-computed segments when available (fast) or on-demand embedding (slow)
 	colbertScores := make(map[int]float64)
 	if hasColBERT {
-		scores, err := s.colbertScorer.ScoreBatch(ctx, query, contents)
+		scores, err := s.colbertScorer.ScoreBatchWithChunkIDs(ctx, query, chunkIDs, contents)
 		if err != nil {
 			util.Debugf(util.DebugDetailed, "ColBERT error (continuing with other signals): %v", err)
 		} else {

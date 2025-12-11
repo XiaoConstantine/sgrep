@@ -63,6 +63,43 @@ type FileEmbeddingComputer interface {
 	ComputeAndStoreFileEmbeddings(ctx context.Context) (int, error)
 }
 
+// ColBERTSegmentStorer is an optional interface for stores that support pre-computed ColBERT segments.
+// Pre-computing segment embeddings during indexing enables fast MaxSim scoring at query time.
+type ColBERTSegmentStorer interface {
+	// StoreColBERTSegments stores pre-computed segment embeddings for a chunk.
+	// Each chunk can have multiple segments (lines, functions, etc.) with their own embeddings.
+	StoreColBERTSegments(ctx context.Context, chunkID string, segments []ColBERTSegment) error
+
+	// StoreColBERTSegmentsBatch stores segments for multiple chunks efficiently.
+	StoreColBERTSegmentsBatch(ctx context.Context, chunkSegments map[string][]ColBERTSegment) error
+
+	// GetColBERTSegments retrieves pre-computed segment embeddings for a chunk.
+	GetColBERTSegments(ctx context.Context, chunkID string) ([]ColBERTSegment, error)
+
+	// GetColBERTSegmentsBatch retrieves segments for multiple chunks efficiently.
+	GetColBERTSegmentsBatch(ctx context.Context, chunkIDs []string) (map[string][]ColBERTSegment, error)
+
+	// DeleteColBERTSegments removes segment embeddings for a chunk.
+	DeleteColBERTSegments(ctx context.Context, chunkID string) error
+
+	// HasColBERTSegments checks if ColBERT segments exist for any chunks.
+	HasColBERTSegments(ctx context.Context) (bool, error)
+}
+
+// ColBERTSegment represents a pre-computed segment embedding for ColBERT scoring.
+// Supports both float32 (full precision) and int8 (quantized, 4x smaller) storage.
+type ColBERTSegment struct {
+	SegmentIdx int       // Index within the chunk (0, 1, 2, ...)
+	Text       string    // Original segment text (for debugging)
+	Embedding  []float32 // Pre-normalized embedding vector (float32, 3072 bytes for 768 dims)
+
+	// Quantized storage (int8, 768 bytes for 768 dims = 4x compression)
+	// If EmbeddingInt8 is set, Embedding may be nil to save memory during retrieval.
+	EmbeddingInt8 []int8   // Quantized embedding values
+	QuantScale    float32  // Scale factor for dequantization
+	QuantMin      float32  // Minimum value for dequantization
+}
+
 // FileEmbedding represents a document-level embedding for a file.
 type FileEmbedding struct {
 	FilePath   string

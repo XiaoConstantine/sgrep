@@ -259,6 +259,111 @@ func DotProductDistanceBatch(query []float32, vectors [][]float32, distances []f
 	}
 }
 
+// QuantizeInt8 quantizes a float32 vector to int8 using min-max scaling.
+// Returns the quantized values along with scale and offset for dequantization.
+// Formula: quantized = round((value - min) / scale) - 128
+// This maps the range [min, max] to [-128, 127].
+func QuantizeInt8(v []float32) ([]int8, float32, float32) {
+	if len(v) == 0 {
+		return nil, 0, 0
+	}
+
+	// Find min and max
+	min, max := v[0], v[0]
+	for _, val := range v[1:] {
+		if val < min {
+			min = val
+		}
+		if val > max {
+			max = val
+		}
+	}
+
+	// Handle edge case where all values are the same
+	scale := max - min
+	if scale == 0 {
+		scale = 1.0
+	}
+	scale = scale / 255.0 // Map to 256 levels
+
+	result := make([]int8, len(v))
+	for i, val := range v {
+		// Normalize to [0, 255], then shift to [-128, 127]
+		normalized := (val - min) / scale
+		result[i] = int8(normalized - 128)
+	}
+
+	return result, scale, min
+}
+
+// DequantizeInt8 converts int8 quantized values back to float32.
+// Formula: value = (quantized + 128) * scale + min
+func DequantizeInt8(q []int8, scale, min float32) []float32 {
+	result := make([]float32, len(q))
+	for i, val := range q {
+		result[i] = (float32(val)+128)*scale + min
+	}
+	return result
+}
+
+// DequantizeInt8Into converts int8 quantized values into a pre-allocated float32 buffer.
+// More efficient than DequantizeInt8 when processing many vectors.
+func DequantizeInt8Into(q []int8, scale, min float32, out []float32) {
+	for i, val := range q {
+		out[i] = (float32(val)+128)*scale + min
+	}
+}
+
+// DotProductInt8 computes approximate dot product between a float32 query vector
+// and a quantized int8 document vector. Dequantizes on-the-fly for efficiency.
+// For ColBERT, we need high precision for the query (float32) but can use
+// quantized storage for documents.
+func DotProductInt8(query []float32, doc []int8, scale, min float32) float64 {
+	n := len(query)
+	if n != len(doc) {
+		return 0
+	}
+
+	var sum float64
+	for i := 0; i < n; i++ {
+		// Dequantize on the fly: docVal = (int8 + 128) * scale + min
+		docVal := (float32(doc[i])+128)*scale + min
+		sum += float64(query[i]) * float64(docVal)
+	}
+	return sum
+}
+
+// DotProductInt8Unrolled8 computes dot product with 8-way unrolling for int8 doc vectors.
+// Combines dequantization with dot product for better cache efficiency.
+func DotProductInt8Unrolled8(query []float32, doc []int8, scale, min float32) float64 {
+	n := len(query)
+	if n != len(doc) {
+		return 0
+	}
+
+	var s0, s1, s2, s3, s4, s5, s6, s7 float64
+
+	// Unrolled main loop
+	i := 0
+	for ; i <= n-8; i += 8 {
+		s0 += float64(query[i]) * float64((float32(doc[i])+128)*scale+min)
+		s1 += float64(query[i+1]) * float64((float32(doc[i+1])+128)*scale+min)
+		s2 += float64(query[i+2]) * float64((float32(doc[i+2])+128)*scale+min)
+		s3 += float64(query[i+3]) * float64((float32(doc[i+3])+128)*scale+min)
+		s4 += float64(query[i+4]) * float64((float32(doc[i+4])+128)*scale+min)
+		s5 += float64(query[i+5]) * float64((float32(doc[i+5])+128)*scale+min)
+		s6 += float64(query[i+6]) * float64((float32(doc[i+6])+128)*scale+min)
+		s7 += float64(query[i+7]) * float64((float32(doc[i+7])+128)*scale+min)
+	}
+
+	// Handle remainder
+	for ; i < n; i++ {
+		s0 += float64(query[i]) * float64((float32(doc[i])+128)*scale+min)
+	}
+
+	return s0 + s1 + s2 + s3 + s4 + s5 + s6 + s7
+}
+
 // TopKIndices returns indices of k smallest values in distances (partial sort).
 // Uses indices buffer for zero allocation.
 func TopKIndices(distances []float64, indices []int, k int) []int {

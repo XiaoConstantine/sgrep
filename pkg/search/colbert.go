@@ -8,15 +8,21 @@ import (
 	"unicode"
 
 	"github.com/XiaoConstantine/sgrep/pkg/embed"
+	"github.com/XiaoConstantine/sgrep/pkg/store"
 	"github.com/XiaoConstantine/sgrep/pkg/util"
 )
 
 // ColBERTScorer implements late interaction scoring similar to ColBERT.
 // Instead of single-vector similarity, it computes MaxSim between query
 // terms and document segments for more precise relevance scoring.
+//
+// Supports two modes:
+// 1. Pre-computed segments: Load from store (fast, ~1-5ms per query)
+// 2. On-demand embedding: Generate at query time (slow, ~100ms per doc)
 type ColBERTScorer struct {
-	embedder *embed.Embedder
-	cache    *segmentCache
+	embedder     *embed.Embedder
+	segmentStore store.ColBERTSegmentStorer // Optional: for pre-computed segments
+	cache        *segmentCache
 }
 
 // segmentCache caches PRE-NORMALIZED segment embeddings to avoid recomputation.
@@ -64,6 +70,12 @@ func NewColBERTScorer(embedder *embed.Embedder) *ColBERTScorer {
 		embedder: embedder,
 		cache:    newSegmentCache(1000),
 	}
+}
+
+// SetSegmentStore sets the store for pre-computed segments.
+// When set, the scorer will use pre-computed embeddings instead of generating on-demand.
+func (c *ColBERTScorer) SetSegmentStore(s store.ColBERTSegmentStorer) {
+	c.segmentStore = s
 }
 
 // Score computes ColBERT-style MaxSim score between query and document.
@@ -195,6 +207,85 @@ func (c *ColBERTScorer) ScoreBatch(ctx context.Context, query string, documents 
 	return scores, nil
 }
 
+// ScoreBatchWithChunkIDs scores documents using pre-computed segment embeddings.
+// This is the FAST path (~1-5ms total vs ~100ms per doc with on-demand embedding).
+// Falls back to ScoreBatch if pre-computed segments aren't available.
+func (c *ColBERTScorer) ScoreBatchWithChunkIDs(ctx context.Context, query string, chunkIDs []string, documents []string) ([]float64, error) {
+	// If no segment store, fall back to on-demand embedding
+	if c.segmentStore == nil {
+		util.Debugf(util.DebugDetailed, "ColBERT: no segment store, using on-demand embedding")
+		return c.ScoreBatch(ctx, query, documents)
+	}
+
+	// Decompose query into terms
+	queryTerms := decomposeQuery(query)
+	if len(queryTerms) == 0 {
+		return make([]float64, len(documents)), nil
+	}
+
+	// Get query term embeddings (computed once, normalized via cache)
+	queryEmbeddings, err := c.embedTexts(ctx, queryTerms)
+	if err != nil {
+		return nil, err
+	}
+
+	// Batch load pre-computed segment embeddings for all chunks
+	segmentMap, err := c.segmentStore.GetColBERTSegmentsBatch(ctx, chunkIDs)
+	if err != nil {
+		util.Debugf(util.DebugDetailed, "ColBERT: failed to load segments, falling back: %v", err)
+		return c.ScoreBatch(ctx, query, documents)
+	}
+
+	// Check if we have pre-computed segments
+	hasPrecomputed := 0
+	for _, segs := range segmentMap {
+		if len(segs) > 0 {
+			hasPrecomputed++
+		}
+	}
+
+	if hasPrecomputed == 0 {
+		util.Debugf(util.DebugDetailed, "ColBERT: no pre-computed segments found, using on-demand embedding")
+		return c.ScoreBatch(ctx, query, documents)
+	}
+
+	util.Debugf(util.DebugDetailed, "ColBERT: using %d/%d pre-computed segment sets", hasPrecomputed, len(chunkIDs))
+
+	// Score documents using pre-computed segments (FAST: pure CPU, no network)
+	scores := make([]float64, len(documents))
+
+	for i, chunkID := range chunkIDs {
+		segments := segmentMap[chunkID]
+		if len(segments) == 0 {
+			// Fall back to on-demand for this document
+			docSegments := decomposeDocument(documents[i])
+			if len(docSegments) == 0 {
+				continue
+			}
+			docEmbeddings, err := c.embedTexts(ctx, docSegments)
+			if err != nil {
+				continue
+			}
+			segments = make([]store.ColBERTSegment, len(docEmbeddings))
+			for j, emb := range docEmbeddings {
+				segments[j] = store.ColBERTSegment{Embedding: emb}
+			}
+		}
+
+		// Compute MaxSim score using int8 quantized embeddings if available
+		var totalScore float64
+		for _, qEmb := range queryEmbeddings {
+			maxSim := maxSimInt8(qEmb, segments)
+			if maxSim > 0 {
+				totalScore += maxSim
+			}
+		}
+		scores[i] = totalScore / float64(len(queryTerms))
+	}
+
+	return scores, nil
+}
+
 // embedTexts embeds multiple texts, using cache where possible.
 func (c *ColBERTScorer) embedTexts(ctx context.Context, texts []string) ([][]float32, error) {
 	embeddings := make([][]float32, len(texts))
@@ -280,6 +371,13 @@ func decomposeQuery(query string) []string {
 	}
 
 	return unique
+}
+
+// DecomposeDocument splits a document into meaningful segments.
+// Uses sentence boundaries and code structure hints.
+// Exported for use during indexing to pre-compute segment embeddings.
+func DecomposeDocument(content string) []string {
+	return decomposeDocument(content)
 }
 
 // decomposeDocument splits a document into meaningful segments.
@@ -458,6 +556,31 @@ func maxSimBatch(qEmb []float32, docEmbs [][]float32, distances []float64) float
 	for i := 1; i < len(docEmbs); i++ {
 		if distances[i] > maxSim {
 			maxSim = distances[i]
+		}
+	}
+	return maxSim
+}
+
+// maxSimInt8 computes MaxSim for a query embedding against int8-quantized doc segments.
+// Supports both int8 (quantized) and float32 (fallback for on-demand) embeddings.
+// Returns the maximum similarity found (-1 if no segments provided).
+func maxSimInt8(qEmb []float32, segments []store.ColBERTSegment) float64 {
+	if len(segments) == 0 {
+		return -1
+	}
+
+	maxSim := float64(-1)
+	for _, seg := range segments {
+		var sim float64
+		if seg.EmbeddingInt8 != nil {
+			// Use int8 quantized embedding (4x compressed storage)
+			sim = util.DotProductInt8Unrolled8(qEmb, seg.EmbeddingInt8, seg.QuantScale, seg.QuantMin)
+		} else if seg.Embedding != nil {
+			// Fall back to float32 (on-demand generated)
+			sim = util.DotProductUnrolled8(qEmb, seg.Embedding)
+		}
+		if sim > maxSim {
+			maxSim = sim
 		}
 	}
 	return maxSim

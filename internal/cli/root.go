@@ -36,8 +36,9 @@ var (
 	rerankTopK     int
 
 	// Index flags
-	indexWorkers  int
-	indexQuantize string
+	indexWorkers         int
+	indexQuantize        string
+	indexColBERTPreindex bool
 
 	// Debug flags
 	debugLevel   int    // 0=off, 1=summary, 2=detailed (set via -d count)
@@ -313,7 +314,21 @@ var indexCmd = &cobra.Command{
 		}
 		defer func() { _ = indexer.Close() }()
 
-		return indexer.Index(ctx)
+		if err := indexer.Index(ctx); err != nil {
+			return err
+		}
+
+		// Pre-compute ColBERT segments if requested
+		if indexColBERTPreindex {
+			fmt.Println("\nPre-computing ColBERT segments for fast query-time scoring...")
+			processed, err := indexer.ComputeColBERTSegments(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to compute ColBERT segments: %w", err)
+			}
+			fmt.Printf("Computed segments for %d chunks\n", processed)
+		}
+
+		return nil
 	},
 }
 
@@ -321,6 +336,7 @@ func init() {
 	// Add index-specific flags
 	indexCmd.Flags().IntVar(&indexWorkers, "workers", 0, "Number of parallel workers (default: 2x CPU cores, max 16)")
 	indexCmd.Flags().StringVar(&indexQuantize, "quantize", "int8", "Quantization mode: none (4x size), int8 (1x size), binary (0.125x size)")
+	indexCmd.Flags().BoolVar(&indexColBERTPreindex, "colbert-preindex", false, "Pre-compute ColBERT segment embeddings for fast query-time scoring")
 }
 
 // Watch command
