@@ -64,9 +64,18 @@ def read_file_range(filepath: str, start_line: int, end_line: int) -> str:
         return ""
 
 
-def run_sgrep(query: str, sgrep_bin: str, rerank: bool = False, hybrid: bool = True, colbert: bool = False) -> tuple[list[str], float, int]:
-    """Run sgrep and return (result_files, latency_ms, tokens)."""
-    cmd = [sgrep_bin, "-n", str(TOPK)]
+def run_sgrep(query: str, sgrep_bin: str, rerank: bool = False, hybrid: bool = True, colbert: bool = False) -> tuple[list[str], float, float, int, dict]:
+    """Run sgrep and return (result_files, search_latency_ms, total_latency_ms, tokens, timing_breakdown).
+
+    Returns:
+        result_files: List of result filenames
+        search_latency_ms: Actual search time (from sgrep debug output)
+        total_latency_ms: Total subprocess time (includes startup overhead)
+        tokens: Token count of results
+        timing_breakdown: Dict with pipeline stage timings
+    """
+    # Use -d flag to get timing info from sgrep
+    cmd = [sgrep_bin, "-n", str(TOPK), "-d"]
     if hybrid:
         cmd.append("--hybrid")
     if rerank:
@@ -85,20 +94,45 @@ def run_sgrep(query: str, sgrep_bin: str, rerank: bool = False, hybrid: bool = T
             timeout=120
         )
         output = result.stdout
+        stderr = result.stderr
     except subprocess.TimeoutExpired:
         output = ""
+        stderr = ""
     except Exception as e:
         print(f"  Error: {e}")
         output = ""
+        stderr = ""
 
-    latency_ms = (time.time() - start) * 1000
+    total_latency_ms = (time.time() - start) * 1000
+
+    # Parse search latency from debug output (stderr)
+    # Format: [DEBUG] Search completed: 10 results in 42ms
+    search_latency_ms = total_latency_ms  # fallback to total
+    timing_breakdown = {}
+
+    debug_output = stderr if stderr else output
+    for line in debug_output.split('\n'):
+        # Parse actual search time
+        if 'Search completed:' in line and 'in ' in line:
+            match = re.search(r'in (\d+)ms', line)
+            if match:
+                search_latency_ms = float(match.group(1))
+
+        # Parse pipeline stage timings
+        # Format:   query_embedding:     13ms (1 ops, 13.135ms avg, 43%)
+        if ':' in line and 'ms' in line and ('query_embedding' in line or 'vector_search' in line or 'reranking' in line):
+            match = re.match(r'\s*(\w+):\s+(\d+)ms', line)
+            if match:
+                stage = match.group(1)
+                time_ms = int(match.group(2))
+                timing_breakdown[stage] = time_ms
 
     # Parse output and collect content for token counting
     # Format: path/to/file.go:start-end
     files = []
     total_content = ""
     for line in output.strip().split('\n'):
-        if not line:
+        if not line or line.startswith('[DEBUG]'):
             continue
         # Parse path:lines format
         if ':' in line:
@@ -120,7 +154,16 @@ def run_sgrep(query: str, sgrep_bin: str, rerank: bool = False, hybrid: bool = T
 
     tokens = count_tokens(total_content) if total_content else 0
 
-    return files, latency_ms, tokens
+    return files, search_latency_ms, total_latency_ms, tokens, timing_breakdown
+
+
+def warmup_sgrep(sgrep_bin: str, corpus: str):
+    """Run a warmup query to initialize llama-server connection."""
+    cmd = [sgrep_bin, "warmup query", "--hybrid", "-n", "1"]
+    try:
+        subprocess.run(cmd, cwd=corpus, capture_output=True, timeout=30)
+    except:
+        pass
 
 
 def run_osgrep(query: str) -> tuple[list[str], float, int]:
@@ -256,11 +299,15 @@ def _run_single_query(args):
         return None  # Skip queries without ground truth
 
     if tool == "sgrep":
-        results, latency, tokens = run_sgrep(query_text, sgrep_bin, rerank, hybrid, colbert)
+        results, search_latency, total_latency, tokens, timing = run_sgrep(query_text, sgrep_bin, rerank, hybrid, colbert)
     elif tool == "mgrep":
-        results, latency, tokens = run_mgrep(query_text, rerank)
+        results, total_latency, tokens = run_mgrep(query_text, rerank)
+        search_latency = total_latency
+        timing = {}
     else:  # osgrep
-        results, latency, tokens = run_osgrep(query_text)
+        results, total_latency, tokens = run_osgrep(query_text)
+        search_latency = total_latency
+        timing = {}
 
     mrr = compute_mrr(results, expected_files)
     p5 = compute_precision_at_k(results, expected_files, 5)
@@ -278,7 +325,9 @@ def _run_single_query(args):
         "p10": p10,
         "r5": r5,
         "r10": r10,
-        "latency": latency,
+        "search_latency": search_latency,
+        "total_latency": total_latency,
+        "timing_breakdown": timing,
         "tokens": tokens,
     }
 
@@ -314,14 +363,23 @@ def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False, hyb
     print(f"Top-K: {TOPK}")
     print(f"{'='*60}\n")
 
+    # Warmup for sgrep to initialize llama-server connection
+    if tool == "sgrep":
+        print("Warming up sgrep (initializing llama-server connection)...")
+        warmup_sgrep(sgrep_bin, CORPUS)
+
     # Collect metrics
     mrr_vals = []
     p5_vals = []
     p10_vals = []
     r5_vals = []
     r10_vals = []
-    latency_vals = []
+    search_latency_vals = []
+    total_latency_vals = []
     token_vals = []
+
+    # Aggregate timing breakdowns
+    timing_totals = {"query_embedding": [], "vector_search": [], "reranking": []}
 
     # Prepare args for parallel execution
     query_args = [
@@ -347,7 +405,9 @@ def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False, hyb
         p10 = result["p10"]
         r5 = result["r5"]
         r10 = result["r10"]
-        latency = result["latency"]
+        search_latency = result["search_latency"]
+        total_latency = result["total_latency"]
+        timing = result.get("timing_breakdown", {})
         tokens = result["tokens"]
 
         mrr_vals.append(mrr)
@@ -355,14 +415,24 @@ def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False, hyb
         p10_vals.append(p10)
         r5_vals.append(r5)
         r10_vals.append(r10)
-        latency_vals.append(latency)
+        search_latency_vals.append(search_latency)
+        total_latency_vals.append(total_latency)
         token_vals.append(tokens)
 
+        # Collect timing breakdown
+        for stage in timing_totals:
+            if stage in timing:
+                timing_totals[stage].append(timing[stage])
+
         cost = estimate_cost(tokens)
+        timing_str = ""
+        if timing:
+            timing_str = f" [emb:{timing.get('query_embedding', 0)}ms vec:{timing.get('vector_search', 0)}ms rerank:{timing.get('reranking', 0)}ms]"
+
         print(f"Query {i+1}/{len(queries)}: \"{query_text}\"")
         print(f"  Expected: {expected_files[:3]}{'...' if len(expected_files) > 3 else ''}")
         print(f"  Results: {results_files[:5]}{'...' if len(results_files) > 5 else ''}")
-        print(f"  MRR: {mrr:.3f} | P@5: {p5:.3f} | R@5: {r5:.3f} | Latency: {latency:.0f}ms | Tokens: {tokens} | Cost: ${cost:.4f}")
+        print(f"  MRR: {mrr:.3f} | P@5: {p5:.3f} | R@5: {r5:.3f} | Search: {search_latency:.0f}ms | Total: {total_latency:.0f}ms{timing_str}")
         print()
 
     # Summary
@@ -374,6 +444,12 @@ def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False, hyb
     total_tokens = sum(token_vals)
     total_cost = estimate_cost(total_tokens)
 
+    # Calculate timing breakdown averages
+    timing_avg = {}
+    for stage, vals in timing_totals.items():
+        if vals:
+            timing_avg[stage] = sum(vals) / len(vals)
+
     summary = {
         "tool": tool_label,
         "queries": n,
@@ -382,7 +458,9 @@ def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False, hyb
         "mean_p10": sum(p10_vals)/n,
         "mean_r5": sum(r5_vals)/n,
         "mean_r10": sum(r10_vals)/n,
-        "mean_latency_ms": sum(latency_vals)/n,
+        "mean_search_latency_ms": sum(search_latency_vals)/n,
+        "mean_total_latency_ms": sum(total_latency_vals)/n,
+        "timing_breakdown": timing_avg,
         "total_tokens": total_tokens,
         "mean_tokens": total_tokens / n,
         "total_cost_usd": total_cost,
@@ -391,21 +469,31 @@ def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False, hyb
     print(f"{'='*60}")
     print(f"SUMMARY: {tool_label}")
     print(f"{'='*60}")
-    print(f"Mean MRR:      {summary['mean_mrr']:.3f}")
-    print(f"Mean P@5:      {summary['mean_p5']:.3f}")
-    print(f"Mean P@10:     {summary['mean_p10']:.3f}")
-    print(f"Mean R@5:      {summary['mean_r5']:.3f}")
-    print(f"Mean R@10:     {summary['mean_r10']:.3f}")
-    print(f"Mean Latency:  {summary['mean_latency_ms']:.1f}ms")
-    print(f"Total Tokens:  {summary['total_tokens']:,}")
-    print(f"Mean Tokens:   {summary['mean_tokens']:.0f}")
-    print(f"Total Cost:    ${summary['total_cost_usd']:.4f}")
+    print(f"Mean MRR:          {summary['mean_mrr']:.3f}")
+    print(f"Mean P@5:          {summary['mean_p5']:.3f}")
+    print(f"Mean P@10:         {summary['mean_p10']:.3f}")
+    print(f"Mean R@5:          {summary['mean_r5']:.3f}")
+    print(f"Mean R@10:         {summary['mean_r10']:.3f}")
+    print(f"Mean Search Time:  {summary['mean_search_latency_ms']:.1f}ms  (actual search)")
+    print(f"Mean Total Time:   {summary['mean_total_latency_ms']:.1f}ms  (includes process startup)")
+    if timing_avg:
+        print(f"  Pipeline breakdown:")
+        if 'query_embedding' in timing_avg:
+            print(f"    - Query embedding: {timing_avg['query_embedding']:.1f}ms")
+        if 'vector_search' in timing_avg:
+            print(f"    - Vector search:   {timing_avg['vector_search']:.1f}ms")
+        if 'reranking' in timing_avg:
+            print(f"    - Reranking:       {timing_avg['reranking']:.1f}ms")
+    print(f"Total Tokens:      {summary['total_tokens']:,}")
+    print(f"Mean Tokens:       {summary['mean_tokens']:.0f}")
+    print(f"Total Cost:        ${summary['total_cost_usd']:.4f}")
     print(f"Queries: {n}")
 
     return summary
 
 
 def main():
+    global CORPUS
     tool = "sgrep"
     sgrep_bin = "sgrep"
     mode = "all"  # default: test all sgrep modes
@@ -417,10 +505,16 @@ def main():
     for i, arg in enumerate(sys.argv):
         if arg == "--tool" and i + 1 < len(sys.argv):
             tool = sys.argv[i + 1]
-        if arg == "--sgrep" and i + 1 < len(sys.argv):
+        if arg in ["--sgrep", "--sgrep-path"] and i + 1 < len(sys.argv):
             sgrep_bin = sys.argv[i + 1]
         if arg == "--mode" and i + 1 < len(sys.argv):
             mode = sys.argv[i + 1]
+        if arg == "--repo" and i + 1 < len(sys.argv):
+            CORPUS = sys.argv[i + 1]
+
+    # Convert sgrep_bin to absolute path
+    if not os.path.isabs(sgrep_bin):
+        sgrep_bin = os.path.abspath(sgrep_bin)
 
     summaries = []
 
@@ -440,6 +534,22 @@ def main():
             if s:
                 summaries.append(s)
             # 4. CASCADE: Hybrid + ColBERT + Cross-encoder
+            s = run_benchmark("sgrep", sgrep_bin, rerank=True, hybrid=True, colbert=True)
+            if s:
+                summaries.append(s)
+        elif mode == "semantic":
+            s = run_benchmark("sgrep", sgrep_bin, rerank=False, hybrid=False, colbert=False)
+            if s:
+                summaries.append(s)
+        elif mode == "hybrid":
+            s = run_benchmark("sgrep", sgrep_bin, rerank=False, hybrid=True, colbert=False)
+            if s:
+                summaries.append(s)
+        elif mode == "hybrid+colbert":
+            s = run_benchmark("sgrep", sgrep_bin, rerank=False, hybrid=True, colbert=True)
+            if s:
+                summaries.append(s)
+        elif mode == "cascade":
             s = run_benchmark("sgrep", sgrep_bin, rerank=True, hybrid=True, colbert=True)
             if s:
                 summaries.append(s)
@@ -470,7 +580,7 @@ def main():
         print(f"{'Tool':<22} {'MRR':>7} {'P@5':>6} {'R@5':>6} {'Latency':>9} {'Tokens':>8} {'Cost':>8}")
         print("-" * 80)
         for s in summaries:
-            print(f"{s['tool']:<22} {s['mean_mrr']:>7.3f} {s['mean_p5']:>6.3f} {s['mean_r5']:>6.3f} {s['mean_latency_ms']:>8.0f}ms {s['mean_tokens']:>8.0f} ${s['total_cost_usd']:>6.4f}")
+            print(f"{s['tool']:<22} {s['mean_mrr']:>7.3f} {s['mean_p5']:>6.3f} {s['mean_r5']:>6.3f} {s['mean_search_latency_ms']:>8.0f}ms {s['mean_tokens']:>8.0f} ${s['total_cost_usd']:>6.4f}")
 
     # JSON output
     print("\n\nJSON Summaries:")
