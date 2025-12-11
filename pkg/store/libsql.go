@@ -40,6 +40,9 @@ type LibSQLStore struct {
 	// Parallel search config
 	partitions int
 	slabPool   *util.SlabPool
+
+	// Segment pooler for ColBERT compression (optional)
+	segmentPooler *SegmentPooler
 }
 
 // LibSQLStoreOption configures a LibSQLStore.
@@ -50,6 +53,15 @@ type LibSQLStoreOption func(*LibSQLStore)
 func WithLibSQLQuantization(mode QuantizationMode) LibSQLStoreOption {
 	return func(s *LibSQLStore) {
 		s.quantize = mode
+	}
+}
+
+// WithSegmentPooling enables segment pooling for ColBERT compression.
+// maxSegments: maximum segments to keep per chunk (default 5)
+// minSim: minimum similarity threshold for merging (default 0.90)
+func WithSegmentPooling(maxSegments int, minSim float64) LibSQLStoreOption {
+	return func(s *LibSQLStore) {
+		s.segmentPooler = NewSegmentPooler(maxSegments, minSim)
 	}
 }
 
@@ -1199,10 +1211,34 @@ func (s *LibSQLStore) StoreColBERTSegmentsBatch(ctx context.Context, chunkSegmen
 			return err
 		}
 
+		// Apply segment pooling if configured (reduces segment count via diversity sampling)
+		if s.segmentPooler != nil && len(segments) > 0 {
+			// First quantize all segments so pooler can work with int8
+			for i := range segments {
+				if segments[i].Embedding != nil && segments[i].EmbeddingInt8 == nil {
+					q, scale, min := util.QuantizeInt8(segments[i].Embedding)
+					segments[i].EmbeddingInt8 = q
+					segments[i].QuantScale = scale
+					segments[i].QuantMin = min
+				}
+			}
+			segments = s.segmentPooler.PoolAndMerge(segments)
+		}
+
 		// Insert new segments with quantized embeddings
 		for _, seg := range segments {
-			quantized, scale, min := util.QuantizeInt8(seg.Embedding)
-			embBytes := int8SliceToBytes(quantized)
+			var embBytes []byte
+			var scale, min float32
+			if seg.EmbeddingInt8 != nil {
+				embBytes = int8SliceToBytes(seg.EmbeddingInt8)
+				scale = seg.QuantScale
+				min = seg.QuantMin
+			} else if seg.Embedding != nil {
+				quantized, s, m := util.QuantizeInt8(seg.Embedding)
+				embBytes = int8SliceToBytes(quantized)
+				scale = s
+				min = m
+			}
 			if _, err := insertStmt.ExecContext(ctx, chunkID, seg.SegmentIdx, seg.Text, embBytes, scale, min); err != nil {
 				return err
 			}
