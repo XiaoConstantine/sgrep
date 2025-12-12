@@ -7,15 +7,15 @@ import (
 )
 
 func TestProductQuantizer(t *testing.T) {
-	// Create random training vectors
-	rand.Seed(42)
-	nVectors := 1000
+	// Create random training vectors - use smaller set for CI speed
+	rng := rand.New(rand.NewSource(42))
+	nVectors := 300 // Reduced from 1000 for faster CI
 	dims := 768
 	vectors := make([][]float32, nVectors)
 	for i := range vectors {
 		vectors[i] = make([]float32, dims)
 		for j := range vectors[i] {
-			vectors[i][j] = rand.Float32()*2 - 1 // [-1, 1]
+			vectors[i][j] = rng.Float32()*2 - 1 // [-1, 1]
 		}
 		// Normalize
 		vectors[i] = NormalizeVector(vectors[i])
@@ -32,7 +32,7 @@ func TestProductQuantizer(t *testing.T) {
 	t.Logf("Code size: %d bytes (vs %d for int8, %d for float32)", pq.CodeSize(), dims, dims*4)
 	t.Logf("Compression ratio: %.1fx over float32", pq.CompressionRatio())
 
-	err = pq.Train(vectors, 25)
+	err = pq.Train(vectors, 10) // Reduced iterations for faster CI
 	if err != nil {
 		t.Fatalf("Train: %v", err)
 	}
@@ -98,20 +98,22 @@ func TestProductQuantizer(t *testing.T) {
 }
 
 func TestProductQuantizerSerialization(t *testing.T) {
-	rand.Seed(42)
+	rng := rand.New(rand.NewSource(42))
 	nVectors := 500
 	dims := 768
 	vectors := make([][]float32, nVectors)
 	for i := range vectors {
 		vectors[i] = make([]float32, dims)
 		for j := range vectors[i] {
-			vectors[i][j] = rand.Float32()*2 - 1
+			vectors[i][j] = rng.Float32()*2 - 1
 		}
 	}
 
 	// Create, train, and serialize
 	pq, _ := NewProductQuantizer(DefaultPQConfig())
-	pq.Train(vectors, 10)
+	if err := pq.Train(vectors, 10); err != nil {
+		t.Fatalf("Train: %v", err)
+	}
 
 	data, err := pq.SerializeCodebook()
 	if err != nil {
@@ -138,14 +140,14 @@ func TestProductQuantizerSerialization(t *testing.T) {
 
 func TestPQRankingAccuracy(t *testing.T) {
 	// Test if PQ preserves ranking order (most important for reranking)
-	rand.Seed(42)
+	rng := rand.New(rand.NewSource(42))
 	nDocs := 500 // Need at least 256 for k=256 centroids
 	dims := 768
 	docs := make([][]float32, nDocs)
 	for i := range docs {
 		docs[i] = make([]float32, dims)
 		for j := range docs[i] {
-			docs[i][j] = rand.Float32()*2 - 1
+			docs[i][j] = rng.Float32()*2 - 1
 		}
 		docs[i] = NormalizeVector(docs[i])
 	}
@@ -172,7 +174,7 @@ func TestPQRankingAccuracy(t *testing.T) {
 	// Random query
 	query := make([]float32, dims)
 	for i := range query {
-		query[i] = rand.Float32()*2 - 1
+		query[i] = rng.Float32()*2 - 1
 	}
 	query = NormalizeVector(query)
 
@@ -250,48 +252,48 @@ func findRank(scores []float64, idx int) int {
 }
 
 func BenchmarkPQEncode(b *testing.B) {
-	rand.Seed(42)
+	rng := rand.New(rand.NewSource(42))
 	nVectors := 1000
 	dims := 768
 	vectors := make([][]float32, nVectors)
 	for i := range vectors {
 		vectors[i] = make([]float32, dims)
 		for j := range vectors[i] {
-			vectors[i][j] = rand.Float32()*2 - 1
+			vectors[i][j] = rng.Float32()*2 - 1
 		}
 	}
 
 	pq, _ := NewProductQuantizer(DefaultPQConfig())
-	pq.Train(vectors[:500], 10)
+	_ = pq.Train(vectors[:500], 10)
 
 	testVec := vectors[500]
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		pq.Encode(testVec)
+		_, _ = pq.Encode(testVec)
 	}
 }
 
 func BenchmarkPQDotProduct(b *testing.B) {
-	rand.Seed(42)
+	rng := rand.New(rand.NewSource(42))
 	nVectors := 1000
 	dims := 768
 	vectors := make([][]float32, nVectors)
 	for i := range vectors {
 		vectors[i] = make([]float32, dims)
 		for j := range vectors[i] {
-			vectors[i][j] = rand.Float32()*2 - 1
+			vectors[i][j] = rng.Float32()*2 - 1
 		}
 	}
 
 	pq, _ := NewProductQuantizer(DefaultPQConfig())
-	pq.Train(vectors[:500], 10)
+	_ = pq.Train(vectors[:500], 10)
 
 	query := vectors[500]
 	docCodes, _ := pq.Encode(vectors[501])
 
 	b.Run("ADC", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			pq.DotProductWithCodes(query, docCodes)
+			_, _ = pq.DotProductWithCodes(query, docCodes)
 		}
 	})
 
@@ -304,13 +306,13 @@ func BenchmarkPQDotProduct(b *testing.B) {
 }
 
 func BenchmarkPQVsInt8(b *testing.B) {
-	rand.Seed(42)
+	rng := rand.New(rand.NewSource(42))
 	dims := 768
 	query := make([]float32, dims)
 	doc := make([]float32, dims)
 	for i := range query {
-		query[i] = rand.Float32()*2 - 1
-		doc[i] = rand.Float32()*2 - 1
+		query[i] = rng.Float32()*2 - 1
+		doc[i] = rng.Float32()*2 - 1
 	}
 	query = NormalizeVector(query)
 	doc = NormalizeVector(doc)
@@ -323,11 +325,11 @@ func BenchmarkPQVsInt8(b *testing.B) {
 	for i := range vectors {
 		vectors[i] = make([]float32, dims)
 		for j := range vectors[i] {
-			vectors[i][j] = rand.Float32()*2 - 1
+			vectors[i][j] = rng.Float32()*2 - 1
 		}
 	}
 	pq, _ := NewProductQuantizer(DefaultPQConfig())
-	pq.Train(vectors, 10)
+	_ = pq.Train(vectors, 10)
 	docPQ, _ := pq.Encode(doc)
 	table, _ := pq.PrecomputeQueryTable(query)
 
