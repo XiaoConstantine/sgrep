@@ -63,6 +63,13 @@ type FileEmbeddingComputer interface {
 	ComputeAndStoreFileEmbeddings(ctx context.Context) (int, error)
 }
 
+// VectorExporter is an optional interface for stores that can export all vectors for MMap storage.
+type VectorExporter interface {
+	// ExportAllVectors returns all chunk IDs and their corresponding embeddings.
+	// This is used to export vectors to MMap format for zero-copy access.
+	ExportAllVectors(ctx context.Context) (chunkIDs []string, embeddings [][]float32, err error)
+}
+
 // ColBERTSegmentStorer is an optional interface for stores that support pre-computed ColBERT segments.
 // Pre-computing segment embeddings during indexing enables fast MaxSim scoring at query time.
 type ColBERTSegmentStorer interface {

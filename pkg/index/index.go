@@ -58,6 +58,7 @@ func DefaultIndexConfig() *IndexConfig {
 // Indexer handles file indexing.
 type Indexer struct {
 	rootPath  string
+	repoDir   string // Directory containing index files (e.g., ~/.sgrep/repos/<hash>)
 	store     store.Storer
 	embedder  *embed.Embedder
 	chunkCfg  *chunk.Config
@@ -113,12 +114,18 @@ func NewWithConfig(path string, cfg *IndexConfig) (*Indexer, error) {
 
 	return &Indexer{
 		rootPath: absPath,
+		repoDir:  repoDir,
 		store:    s,
 		embedder: embed.New(),
 		chunkCfg: chunk.DefaultConfig(),
 		indexCfg: cfg,
 		ignore:   ignore,
 	}, nil
+}
+
+// RepoDir returns the directory containing index files.
+func (idx *Indexer) RepoDir() string {
+	return idx.repoDir
 }
 
 // getSgrepHome returns the sgrep home directory (~/.sgrep).
@@ -1147,7 +1154,7 @@ func (idx *Indexer) ComputeColBERTSegments(ctx context.Context) (int, error) {
 			embeddings[k] = util.NormalizeVectorCopy(embeddings[k])
 		}
 
-		// Group segments by chunk and store
+		// Group segments by chunk with int8 quantization for efficient storage
 		chunkSegments := make(map[string][]store.ColBERTSegment)
 		segIdx := 0
 		textIdx := 0
@@ -1160,10 +1167,14 @@ func (idx *Indexer) ComputeColBERTSegments(ctx context.Context) (int, error) {
 
 			segments := make([]store.ColBERTSegment, count)
 			for k := 0; k < count; k++ {
+				// Quantize to int8 for 4x storage savings
+				quantized, scale, min := util.QuantizeInt8(embeddings[segIdx])
 				segments[k] = store.ColBERTSegment{
-					SegmentIdx: k,
-					Text:       allSegmentTexts[textIdx],
-					Embedding:  embeddings[segIdx],
+					SegmentIdx:    k,
+					Text:          allSegmentTexts[textIdx],
+					EmbeddingInt8: quantized,
+					QuantScale:    scale,
+					QuantMin:      min,
 				}
 				segIdx++
 				textIdx++
@@ -1171,7 +1182,7 @@ func (idx *Indexer) ComputeColBERTSegments(ctx context.Context) (int, error) {
 			chunkSegments[doc.ID] = segments
 		}
 
-		// Store batch
+		// Store batch in SQLite
 		if err := segmentStore.StoreColBERTSegmentsBatch(ctx, chunkSegments); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to store segments: %v\n", err)
 			continue
@@ -1182,6 +1193,112 @@ func (idx *Indexer) ComputeColBERTSegments(ctx context.Context) (int, error) {
 	}
 
 	return processed, nil
+}
+
+// ExportColBERTToMMap exports all ColBERT segments from SQLite to an MMap file.
+// This provides faster read access at query time (zero-copy memory mapping).
+// Returns the number of segments exported and any error.
+func (idx *Indexer) ExportColBERTToMMap(ctx context.Context, outputDir string) (int, error) {
+	segmentStore, ok := idx.store.(store.ColBERTSegmentStorer)
+	if !ok {
+		return 0, fmt.Errorf("store does not support ColBERT segments")
+	}
+
+	// Check if segments exist
+	hasSegments, err := segmentStore.HasColBERTSegments(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to check segments: %w", err)
+	}
+	if !hasSegments {
+		return 0, fmt.Errorf("no ColBERT segments found; run with --colbert-preindex first")
+	}
+
+	// Get all documents to find chunk IDs
+	stats, err := idx.store.Stats(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get stats: %w", err)
+	}
+
+	zeroEmb := make([]float32, 768)
+	allDocs, _, err := idx.store.Search(ctx, zeroEmb, int(stats.Chunks)+100, 1000.0)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get documents: %w", err)
+	}
+
+	// Collect all chunk IDs
+	chunkIDs := make([]string, len(allDocs))
+	for i, doc := range allDocs {
+		chunkIDs[i] = doc.ID
+	}
+
+	// Load all segments from SQLite
+	allSegments, err := segmentStore.GetColBERTSegmentsBatch(ctx, chunkIDs)
+	if err != nil {
+		return 0, fmt.Errorf("failed to load segments: %w", err)
+	}
+
+	// Create MMap store
+	mmapStore, err := store.OpenMMapSegmentStore(outputDir, 768)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create MMap store: %w", err)
+	}
+	defer func() { _ = mmapStore.Close() }()
+
+	// Write all segments to MMap
+	mmapStore.BeginWrite()
+	totalSegments := 0
+	for chunkID, segments := range allSegments {
+		mmapStore.WriteSegments(chunkID, segments)
+		totalSegments += len(segments)
+	}
+
+	if err := mmapStore.CommitWrite(); err != nil {
+		return 0, fmt.Errorf("failed to commit MMap: %w", err)
+	}
+
+	return totalSegments, nil
+}
+
+// ExportVectorsToMMap exports all chunk vector embeddings from SQLite to an MMap file.
+// This provides faster read access at query time (zero-copy memory mapping).
+// Returns the number of vectors exported and any error.
+func (idx *Indexer) ExportVectorsToMMap(ctx context.Context, outputDir string) (int, error) {
+	// Check if store implements VectorExporter interface
+	exporter, ok := idx.store.(store.VectorExporter)
+	if !ok {
+		return 0, fmt.Errorf("store does not support vector export")
+	}
+
+	// Get all vectors directly from store
+	chunkIDs, embeddings, err := exporter.ExportAllVectors(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to export vectors: %w", err)
+	}
+
+	if len(chunkIDs) == 0 {
+		return 0, nil
+	}
+
+	// Create MMap store
+	mmapStore, err := store.OpenMMapVectorStore(outputDir, 768)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create MMap vector store: %w", err)
+	}
+	defer func() { _ = mmapStore.Close() }()
+
+	// Write all vectors
+	mmapStore.BeginWrite()
+	for i, chunkID := range chunkIDs {
+		if embeddings[i] != nil {
+			mmapStore.WriteVector(chunkID, embeddings[i])
+		}
+	}
+
+	if err := mmapStore.CommitWrite(); err != nil {
+		return 0, fmt.Errorf("failed to commit MMap vectors: %w", err)
+	}
+
+	return mmapStore.VectorCount(), nil
 }
 
 // decomposeDocumentForColBERT splits a document into meaningful segments for ColBERT.

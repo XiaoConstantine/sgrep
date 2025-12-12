@@ -11,7 +11,8 @@ import (
 )
 
 func TestSegmentPooler_Pool(t *testing.T) {
-	rand.Seed(42)
+	rng := rand.New(rand.NewSource(42))
+	_ = rng // Use local rng if needed
 	dims := 768
 
 	// Create 20 random segments
@@ -50,7 +51,8 @@ func TestSegmentPooler_Pool(t *testing.T) {
 }
 
 func TestSegmentPooler_MergeBySimilarity(t *testing.T) {
-	rand.Seed(42)
+	rng := rand.New(rand.NewSource(42))
+	_ = rng // Use local rng if needed
 	dims := 768
 
 	// Create segments with some very similar ones
@@ -110,7 +112,8 @@ func TestSegmentPooler_MergeBySimilarity(t *testing.T) {
 }
 
 func TestSegmentPooler_PoolAndMerge(t *testing.T) {
-	rand.Seed(42)
+	rng := rand.New(rand.NewSource(42))
+	_ = rng // Use local rng if needed
 	dims := 768
 
 	// Create 15 segments with some duplicates
@@ -146,7 +149,8 @@ func TestSegmentPooler_PoolAndMerge(t *testing.T) {
 }
 
 func TestMMapSegmentStore(t *testing.T) {
-	rand.Seed(42)
+	rng := rand.New(rand.NewSource(42))
+	_ = rng // Use local rng if needed
 	dims := 768
 	ctx := context.Background()
 
@@ -155,7 +159,7 @@ func TestMMapSegmentStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Create store
 	store, err := OpenMMapSegmentStore(tmpDir, dims)
@@ -240,13 +244,13 @@ func TestMMapSegmentStore(t *testing.T) {
 	}
 
 	// Close and reopen to test persistence
-	store.Close()
+	_ = store.Close()
 
 	store2, err := OpenMMapSegmentStore(tmpDir, dims)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store2.Close()
+	defer func() { _ = store2.Close() }()
 
 	// Verify data persisted
 	segs, err := store2.GetColBERTSegments(ctx, "chunk2")
@@ -282,7 +286,8 @@ func createTestSegments(t *testing.T, dims int, count int) []ColBERTSegment {
 }
 
 func BenchmarkSegmentPooler_Pool(b *testing.B) {
-	rand.Seed(42)
+	rng := rand.New(rand.NewSource(42))
+	_ = rng // Use local rng if needed
 	dims := 768
 
 	// Create 10 segments (typical chunk)
@@ -313,7 +318,8 @@ func BenchmarkSegmentPooler_Pool(b *testing.B) {
 }
 
 func BenchmarkMMapSegmentStore_Read(b *testing.B) {
-	rand.Seed(42)
+	rng := rand.New(rand.NewSource(42))
+	_ = rng // Use local rng if needed
 	dims := 768
 	ctx := context.Background()
 
@@ -322,7 +328,7 @@ func BenchmarkMMapSegmentStore_Read(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Create and populate store
 	store, _ := OpenMMapSegmentStore(tmpDir, dims)
@@ -346,11 +352,11 @@ func BenchmarkMMapSegmentStore_Read(b *testing.B) {
 		}
 		store.WriteSegments(chunkID, segs)
 	}
-	store.CommitWrite()
+	_ = store.CommitWrite()
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		chunkID := "chunk" + string(rune('0'+(i%100)/10)) + string(rune('0'+(i%100)%10))
-		store.GetColBERTSegments(ctx, chunkID)
+		_, _ = store.GetColBERTSegments(ctx, chunkID)
 	}
 }

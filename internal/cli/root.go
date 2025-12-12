@@ -172,11 +172,28 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	opts.BM25Weight = bm25Weight
 	opts.UseRerank = enableRerank
 	opts.RerankTopK = rerankTopK
-	// ColBERT can be enabled independently via --colbert, or automatically with --rerank
-	opts.UseColBERT = enableColBERT || enableRerank
 
 	// Create searcher config
 	searchCfg := search.Config{Store: s}
+
+	// Auto-enable ColBERT if MMap segment store exists (fast pre-computed segments)
+	// Can be explicitly enabled via --colbert or automatically with --rerank
+	indexDir := filepath.Dir(indexPath)
+	mmapPath := filepath.Join(indexDir, "colbert_segments.mmap")
+	if _, err := os.Stat(mmapPath); err == nil {
+		mmapStore, err := store.OpenMMapSegmentStore(indexDir, 768) // 768 dims for nomic-embed
+		if err == nil {
+			searchCfg.SegmentStore = mmapStore
+			defer func() { _ = mmapStore.Close() }()
+			// Auto-enable ColBERT when MMap is available (fast pre-computed segments)
+			if !enableColBERT {
+				enableColBERT = true
+				util.Debugf(util.DebugSummary, "Auto-enabled ColBERT (MMap segments available)")
+			}
+			util.Debugf(util.DebugSummary, "Using MMap segment store for ColBERT")
+		}
+	}
+	opts.UseColBERT = enableColBERT || enableRerank
 
 	// Set up reranker if enabled
 	if enableRerank {
@@ -318,6 +335,15 @@ var indexCmd = &cobra.Command{
 			return err
 		}
 
+		// Export vectors to MMap for faster search
+		fmt.Println("\nExporting vectors to MMap store...")
+		vecCount, err := indexer.ExportVectorsToMMap(ctx, indexer.RepoDir())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to export vectors to MMap: %v\n", err)
+		} else {
+			fmt.Printf("Exported %d vectors to MMap store\n", vecCount)
+		}
+
 		// Pre-compute ColBERT segments if requested
 		if indexColBERTPreindex {
 			fmt.Println("\nPre-computing ColBERT segments for fast query-time scoring...")
@@ -326,6 +352,15 @@ var indexCmd = &cobra.Command{
 				return fmt.Errorf("failed to compute ColBERT segments: %w", err)
 			}
 			fmt.Printf("Computed segments for %d chunks\n", processed)
+
+			// Export to MMap for faster query-time access
+			fmt.Println("Exporting segments to MMap store...")
+			segCount, err := indexer.ExportColBERTToMMap(ctx, indexer.RepoDir())
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to export to MMap: %v\n", err)
+			} else {
+				fmt.Printf("Exported %d segments to MMap store\n", segCount)
+			}
 		}
 
 		return nil
@@ -336,7 +371,7 @@ func init() {
 	// Add index-specific flags
 	indexCmd.Flags().IntVar(&indexWorkers, "workers", 0, "Number of parallel workers (default: 2x CPU cores, max 16)")
 	indexCmd.Flags().StringVar(&indexQuantize, "quantize", "int8", "Quantization mode: none (4x size), int8 (1x size), binary (0.125x size)")
-	indexCmd.Flags().BoolVar(&indexColBERTPreindex, "colbert-preindex", false, "Pre-compute ColBERT segment embeddings for fast query-time scoring")
+	indexCmd.Flags().BoolVar(&indexColBERTPreindex, "colbert-preindex", true, "Pre-compute ColBERT segment embeddings for fast query-time scoring (default: true)")
 }
 
 // Watch command

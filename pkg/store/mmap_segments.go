@@ -262,11 +262,11 @@ func (s *MMapSegmentStore) CommitWrite() error {
 
 	// Close existing mmap
 	if s.data != nil {
-		syscall.Munmap(s.data)
+		_ = syscall.Munmap(s.data)
 		s.data = nil
 	}
 	if s.file != nil {
-		s.file.Close()
+		_ = s.file.Close()
 		s.file = nil
 	}
 
@@ -296,7 +296,7 @@ func (s *MMapSegmentStore) CommitWrite() error {
 
 	// Preallocate
 	if err := f.Truncate(int64(totalSize)); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 
@@ -309,7 +309,7 @@ func (s *MMapSegmentStore) CommitWrite() error {
 	binary.LittleEndian.PutUint32(header[16:20], uint32(s.writeBuffer.totalSegs))
 	binary.LittleEndian.PutUint32(header[20:24], uint32(mmapHeaderSize+indexSize))
 	if _, err := f.Write(header); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 
@@ -335,7 +335,7 @@ func (s *MMapSegmentStore) CommitWrite() error {
 			entry = append(entry, make([]byte, 4-len(entry)%4)...)
 		}
 		if _, err := f.Write(entry); err != nil {
-			f.Close()
+			_ = f.Close()
 			return err
 		}
 
@@ -362,13 +362,13 @@ func (s *MMapSegmentStore) CommitWrite() error {
 			copy(segData[s.dims+4:s.dims+8], float32tobytes(seg.QuantMin))
 
 			if _, err := f.Write(segData); err != nil {
-				f.Close()
+				_ = f.Close()
 				return err
 			}
 		}
 	}
 
-	f.Close()
+	_ = f.Close()
 	s.writeBuffer = nil
 
 	// Reload mmap
@@ -381,6 +381,85 @@ func (s *MMapSegmentStore) HasColBERTSegments(ctx context.Context) (bool, error)
 	defer s.mu.RUnlock()
 	return len(s.chunkIndex) > 0, nil
 }
+
+// StoreColBERTSegments stores pre-computed segment embeddings for a chunk.
+// For MMap store, this buffers segments until CommitWrite is called.
+func (s *MMapSegmentStore) StoreColBERTSegments(ctx context.Context, chunkID string, segments []ColBERTSegment) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.writeBuffer == nil {
+		s.writeBuffer = &mmapWriteBuffer{
+			chunks: make(map[string][]ColBERTSegment),
+		}
+	}
+	s.writeBuffer.chunks[chunkID] = segments
+	s.writeBuffer.totalSegs += len(segments)
+	return nil
+}
+
+// StoreColBERTSegmentsBatch stores segments for multiple chunks efficiently.
+func (s *MMapSegmentStore) StoreColBERTSegmentsBatch(ctx context.Context, chunkSegments map[string][]ColBERTSegment) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.writeBuffer == nil {
+		s.writeBuffer = &mmapWriteBuffer{
+			chunks: make(map[string][]ColBERTSegment),
+		}
+	}
+	for chunkID, segments := range chunkSegments {
+		s.writeBuffer.chunks[chunkID] = segments
+		s.writeBuffer.totalSegs += len(segments)
+	}
+	return nil
+}
+
+// DeleteColBERTSegments removes segment embeddings for a chunk.
+// Note: For MMap store, this requires rebuilding the file (expensive).
+// Consider batching deletes or using SQLite for frequent updates.
+func (s *MMapSegmentStore) DeleteColBERTSegments(ctx context.Context, chunkID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// If in write mode, just remove from buffer
+	if s.writeBuffer != nil {
+		if segs, exists := s.writeBuffer.chunks[chunkID]; exists {
+			s.writeBuffer.totalSegs -= len(segs)
+			delete(s.writeBuffer.chunks, chunkID)
+		}
+		return nil
+	}
+
+	// For existing data, we need to rebuild without this chunk
+	// This is expensive but deletion should be rare
+	if _, exists := s.chunkIndex[chunkID]; !exists {
+		return nil // Already doesn't exist
+	}
+
+	// Collect all segments except the deleted chunk
+	allSegments := make(map[string][]ColBERTSegment)
+	for id := range s.chunkIndex {
+		if id == chunkID {
+			continue
+		}
+		segs, err := s.GetColBERTSegments(ctx, id)
+		if err != nil {
+			return err
+		}
+		allSegments[id] = segs
+	}
+
+	// Rebuild the file
+	s.BeginWrite()
+	for id, segs := range allSegments {
+		s.WriteSegments(id, segs)
+	}
+	return s.CommitWrite()
+}
+
+// Ensure MMapSegmentStore implements ColBERTSegmentStorer
+var _ ColBERTSegmentStorer = (*MMapSegmentStore)(nil)
 
 // Helper functions
 func float32tobytes(f float32) []byte {

@@ -847,6 +847,58 @@ func (s *LibSQLStore) VectorCount() int64 {
 	return atomic.LoadInt64(&s.vectorCount)
 }
 
+// ExportAllVectors returns all chunk IDs and their embeddings for MMap export.
+// This implements the VectorExporter interface.
+func (s *LibSQLStore) ExportAllVectors(ctx context.Context) ([]string, [][]float32, error) {
+	// First try in-memory cache if available
+	s.memMu.RLock()
+	if len(s.vectors) > 0 && len(s.docIDs) == len(s.vectors) {
+		// Make copies to avoid holding lock
+		ids := make([]string, len(s.docIDs))
+		vecs := make([][]float32, len(s.vectors))
+		copy(ids, s.docIDs)
+		for i, v := range s.vectors {
+			vecs[i] = make([]float32, len(v))
+			copy(vecs[i], v)
+		}
+		s.memMu.RUnlock()
+		return ids, vecs, nil
+	}
+	s.memMu.RUnlock()
+
+	// Fall back to database query
+	rows, err := s.db.QueryContext(ctx, `SELECT id, vector_extract(embedding) FROM documents WHERE embedding IS NOT NULL`)
+	if err != nil {
+		return nil, nil, fmt.Errorf("query vectors: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var ids []string
+	var vecs [][]float32
+
+	for rows.Next() {
+		var docID string
+		var vecStr string
+		if err := rows.Scan(&docID, &vecStr); err != nil {
+			continue
+		}
+
+		vec := parseVectorString(vecStr)
+		if vec == nil {
+			continue
+		}
+
+		ids = append(ids, docID)
+		vecs = append(vecs, vec)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("iterate vectors: %w", err)
+	}
+
+	return ids, vecs, nil
+}
+
 // Close closes the database.
 func (s *LibSQLStore) Close() error {
 	return s.db.Close()
