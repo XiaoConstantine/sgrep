@@ -7,6 +7,9 @@ import (
 )
 
 func TestProductQuantizer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping PQ test in short mode")
+	}
 	// Create random training vectors - use smaller set for CI speed
 	rng := rand.New(rand.NewSource(42))
 	nVectors := 300 // Reduced from 1000 for faster CI
@@ -98,6 +101,9 @@ func TestProductQuantizer(t *testing.T) {
 }
 
 func TestProductQuantizerSerialization(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping PQ serialization test in short mode")
+	}
 	rng := rand.New(rand.NewSource(42))
 	nVectors := 500
 	dims := 768
@@ -139,6 +145,9 @@ func TestProductQuantizerSerialization(t *testing.T) {
 }
 
 func TestPQRankingAccuracy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping PQ ranking accuracy test in short mode")
+	}
 	// Test if PQ preserves ranking order (most important for reranking)
 	rng := rand.New(rand.NewSource(42))
 	nDocs := 500 // Need at least 256 for k=256 centroids
