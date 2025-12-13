@@ -458,6 +458,13 @@ func (s *MMapSegmentStore) DeleteColBERTSegments(ctx context.Context, chunkID st
 	return s.CommitWrite()
 }
 
+// GetChunksForColBERT is not supported by MMapSegmentStore.
+// MMapSegmentStore only stores pre-computed segment embeddings, not document content.
+// Use LibSQLStore for ColBERT preindexing operations.
+func (s *MMapSegmentStore) GetChunksForColBERT(ctx context.Context, batchSize int, offset int) ([]ChunkInfo, error) {
+	return nil, fmt.Errorf("GetChunksForColBERT not supported by MMapSegmentStore: use LibSQLStore for preindexing")
+}
+
 // Ensure MMapSegmentStore implements ColBERTSegmentStorer
 var _ ColBERTSegmentStorer = (*MMapSegmentStore)(nil)
 

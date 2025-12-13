@@ -1384,3 +1384,33 @@ func (s *LibSQLStore) HasColBERTSegments(ctx context.Context) (bool, error) {
 	return count > 0, nil
 }
 
+// GetChunksForColBERT retrieves chunks in paginated batches for ColBERT preindexing.
+// Uses LIMIT/OFFSET pagination with deterministic ordering by rowid.
+func (s *LibSQLStore) GetChunksForColBERT(ctx context.Context, batchSize int, offset int) ([]ChunkInfo, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, content FROM documents
+		WHERE embedding IS NOT NULL
+		ORDER BY rowid
+		LIMIT ? OFFSET ?
+	`, batchSize, offset)
+	if err != nil {
+		return nil, fmt.Errorf("query chunks: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var chunks []ChunkInfo
+	for rows.Next() {
+		var chunk ChunkInfo
+		if err := rows.Scan(&chunk.ID, &chunk.Content); err != nil {
+			return nil, fmt.Errorf("scan chunk: %w", err)
+		}
+		chunks = append(chunks, chunk)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate chunks: %w", err)
+	}
+
+	return chunks, nil
+}
+

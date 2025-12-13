@@ -70,6 +70,12 @@ type VectorExporter interface {
 	ExportAllVectors(ctx context.Context) (chunkIDs []string, embeddings [][]float32, err error)
 }
 
+// ChunkInfo contains minimal chunk data needed for ColBERT segment computation.
+type ChunkInfo struct {
+	ID      string
+	Content string
+}
+
 // ColBERTSegmentStorer is an optional interface for stores that support pre-computed ColBERT segments.
 // Pre-computing segment embeddings during indexing enables fast MaxSim scoring at query time.
 type ColBERTSegmentStorer interface {
@@ -91,6 +97,11 @@ type ColBERTSegmentStorer interface {
 
 	// HasColBERTSegments checks if ColBERT segments exist for any chunks.
 	HasColBERTSegments(ctx context.Context) (bool, error)
+
+	// GetChunksForColBERT retrieves chunks in paginated batches for ColBERT preindexing.
+	// This avoids memory issues with large repos by not loading all chunks at once.
+	// Returns chunks starting at offset, up to batchSize. Returns empty slice when done.
+	GetChunksForColBERT(ctx context.Context, batchSize int, offset int) ([]ChunkInfo, error)
 }
 
 // ColBERTSegment represents a pre-computed segment embedding for ColBERT scoring.

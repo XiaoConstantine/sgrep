@@ -1094,51 +1094,50 @@ func (idx *Indexer) ComputeColBERTSegments(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("store does not support ColBERT segments")
 	}
 
-	// Get all documents from the store
+	// Get total chunk count for progress reporting
 	stats, err := idx.store.Stats(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get stats: %w", err)
 	}
 
-	fmt.Printf("Computing ColBERT segments for %d chunks...\n", stats.Chunks)
+	totalChunks := int(stats.Chunks)
+	fmt.Printf("Computing ColBERT segments for %d chunks...\n", totalChunks)
 
-	// Query all documents - we need to process them in batches
-	// For now, we'll use a simple approach: load all chunks via store
-	// In the future, this could be optimized with pagination
-
-	// Get chunks by querying with a zero vector (returns all documents up to limit)
-	zeroEmb := make([]float32, 768) // Assume 768 dims
-	allDocs, _, err := idx.store.Search(ctx, zeroEmb, int(stats.Chunks)+100, 1000.0) // High threshold to get all
-	if err != nil {
-		return 0, fmt.Errorf("failed to get documents: %w", err)
-	}
-
-	if len(allDocs) == 0 {
+	if totalChunks == 0 {
 		return 0, nil
 	}
 
-	// Process in batches
-	batchSize := 32 // Process 32 chunks at a time
+	// Process chunks in paginated batches to handle large repos
+	// Fetch 32 chunks at a time from DB, process them, then fetch next batch
+	const fetchBatchSize = 32
 	processed := 0
+	offset := 0
 
-	for i := 0; i < len(allDocs); i += batchSize {
-		end := i + batchSize
-		if end > len(allDocs) {
-			end = len(allDocs)
+	for {
+		// Fetch next batch of chunks from database
+		chunks, err := segmentStore.GetChunksForColBERT(ctx, fetchBatchSize, offset)
+		if err != nil {
+			return processed, fmt.Errorf("failed to get chunks at offset %d: %w", offset, err)
 		}
-		batch := allDocs[i:end]
+
+		// No more chunks to process
+		if len(chunks) == 0 {
+			break
+		}
 
 		// Collect all segments for this batch
 		var allSegmentTexts []string
-		segmentCounts := make([]int, len(batch))
+		segmentCounts := make([]int, len(chunks))
 
-		for j, doc := range batch {
-			segments := decomposeDocumentForColBERT(doc.Content)
+		for j, chunk := range chunks {
+			segments := decomposeDocumentForColBERT(chunk.Content)
 			segmentCounts[j] = len(segments)
 			allSegmentTexts = append(allSegmentTexts, segments...)
 		}
 
 		if len(allSegmentTexts) == 0 {
+			offset += len(chunks)
+			processed += len(chunks)
 			continue
 		}
 
@@ -1146,6 +1145,7 @@ func (idx *Indexer) ComputeColBERTSegments(ctx context.Context) (int, error) {
 		embeddings, err := idx.embedBatchWithRetry(ctx, allSegmentTexts, 3)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to embed segments: %v\n", err)
+			offset += len(chunks)
 			continue
 		}
 
@@ -1159,7 +1159,7 @@ func (idx *Indexer) ComputeColBERTSegments(ctx context.Context) (int, error) {
 		segIdx := 0
 		textIdx := 0
 
-		for j, doc := range batch {
+		for j, chunk := range chunks {
 			count := segmentCounts[j]
 			if count == 0 {
 				continue
@@ -1179,17 +1179,19 @@ func (idx *Indexer) ComputeColBERTSegments(ctx context.Context) (int, error) {
 				segIdx++
 				textIdx++
 			}
-			chunkSegments[doc.ID] = segments
+			chunkSegments[chunk.ID] = segments
 		}
 
 		// Store batch in SQLite
 		if err := segmentStore.StoreColBERTSegmentsBatch(ctx, chunkSegments); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to store segments: %v\n", err)
+			offset += len(chunks)
 			continue
 		}
 
-		processed += len(batch)
-		fmt.Printf("Processed %d/%d chunks...\n", processed, len(allDocs))
+		offset += len(chunks)
+		processed += len(chunks)
+		fmt.Printf("Processed %d/%d chunks...\n", processed, totalChunks)
 	}
 
 	return processed, nil
@@ -1213,30 +1215,6 @@ func (idx *Indexer) ExportColBERTToMMap(ctx context.Context, outputDir string) (
 		return 0, fmt.Errorf("no ColBERT segments found; run with --colbert-preindex first")
 	}
 
-	// Get all documents to find chunk IDs
-	stats, err := idx.store.Stats(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get stats: %w", err)
-	}
-
-	zeroEmb := make([]float32, 768)
-	allDocs, _, err := idx.store.Search(ctx, zeroEmb, int(stats.Chunks)+100, 1000.0)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get documents: %w", err)
-	}
-
-	// Collect all chunk IDs
-	chunkIDs := make([]string, len(allDocs))
-	for i, doc := range allDocs {
-		chunkIDs[i] = doc.ID
-	}
-
-	// Load all segments from SQLite
-	allSegments, err := segmentStore.GetColBERTSegmentsBatch(ctx, chunkIDs)
-	if err != nil {
-		return 0, fmt.Errorf("failed to load segments: %w", err)
-	}
-
 	// Create MMap store
 	mmapStore, err := store.OpenMMapSegmentStore(outputDir, 768)
 	if err != nil {
@@ -1244,12 +1222,52 @@ func (idx *Indexer) ExportColBERTToMMap(ctx context.Context, outputDir string) (
 	}
 	defer func() { _ = mmapStore.Close() }()
 
-	// Write all segments to MMap
 	mmapStore.BeginWrite()
 	totalSegments := 0
-	for chunkID, segments := range allSegments {
-		mmapStore.WriteSegments(chunkID, segments)
-		totalSegments += len(segments)
+
+	// Use paginated chunk retrieval to avoid zero-vector search issues with large repos
+	const fetchBatchSize = 1000
+	const segmentBatchSize = 100
+	offset := 0
+
+	for {
+		// Fetch a batch of chunk IDs
+		chunks, err := segmentStore.GetChunksForColBERT(ctx, fetchBatchSize, offset)
+		if err != nil {
+			return 0, fmt.Errorf("failed to fetch chunks at offset %d: %w", offset, err)
+		}
+
+		if len(chunks) == 0 {
+			break
+		}
+
+		// Process chunks in smaller batches for segment retrieval
+		for i := 0; i < len(chunks); i += segmentBatchSize {
+			end := i + segmentBatchSize
+			if end > len(chunks) {
+				end = len(chunks)
+			}
+
+			batchChunks := chunks[i:end]
+			chunkIDs := make([]string, len(batchChunks))
+			for j, chunk := range batchChunks {
+				chunkIDs[j] = chunk.ID
+			}
+
+			// Load segments for this batch
+			segments, err := segmentStore.GetColBERTSegmentsBatch(ctx, chunkIDs)
+			if err != nil {
+				return 0, fmt.Errorf("failed to load segments: %w", err)
+			}
+
+			// Write segments to MMap
+			for chunkID, chunkSegments := range segments {
+				mmapStore.WriteSegments(chunkID, chunkSegments)
+				totalSegments += len(chunkSegments)
+			}
+		}
+
+		offset += len(chunks)
 	}
 
 	if err := mmapStore.CommitWrite(); err != nil {
