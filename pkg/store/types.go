@@ -72,8 +72,9 @@ type VectorExporter interface {
 
 // ChunkInfo contains minimal chunk data needed for ColBERT segment computation.
 type ChunkInfo struct {
-	ID      string
-	Content string
+	ID          string
+	Content     string
+	Description string
 }
 
 // ColBERTSegmentStorer is an optional interface for stores that support pre-computed ColBERT segments.
@@ -113,9 +114,9 @@ type ColBERTSegment struct {
 
 	// Quantized storage (int8, 768 bytes for 768 dims = 4x compression)
 	// If EmbeddingInt8 is set, Embedding may be nil to save memory during retrieval.
-	EmbeddingInt8 []int8   // Quantized embedding values
-	QuantScale    float32  // Scale factor for dequantization
-	QuantMin      float32  // Minimum value for dequantization
+	EmbeddingInt8 []int8  // Quantized embedding values
+	QuantScale    float32 // Scale factor for dequantization
+	QuantMin      float32 // Minimum value for dequantization
 }
 
 // FileEmbedding represents a document-level embedding for a file.

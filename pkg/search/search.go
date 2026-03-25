@@ -654,8 +654,8 @@ func (s *Searcher) rerankResults(ctx context.Context, query string, docs []*stor
 
 	// CASCADE MODE: ColBERT first (on more docs), then cross-encoder (on fewer docs)
 	// This preserves ColBERT's keyword matching while adding cross-encoder's semantic understanding
-	colbertCandidates := 50  // ColBERT can handle more docs (faster)
-	crossEncoderCandidates := 20  // Cross-encoder only on top results (slower)
+	colbertCandidates := 50      // ColBERT can handle more docs (faster)
+	crossEncoderCandidates := 20 // Cross-encoder only on top results (slower)
 
 	if !hasColBERT {
 		colbertCandidates = 0
@@ -678,7 +678,7 @@ func (s *Searcher) rerankResults(ctx context.Context, query string, docs []*stor
 	contents := make([]string, rerankCount)
 	chunkIDs := make([]string, rerankCount)
 	for i := 0; i < rerankCount; i++ {
-		contents[i] = docs[i].Content
+		contents[i] = lateInteractionText(docs[i])
 		chunkIDs[i] = docs[i].ID
 	}
 
@@ -791,8 +791,8 @@ func (s *Searcher) rerankResults(ctx context.Context, query string, docs []*stor
 		if hasReranker && hasColBERT {
 			// Cross-encoder tends to prefer prose/docs over code, so minimize its weight.
 			// ColBERT preserves keyword matching which is critical for code search.
-			vectorWeight = 0.70 // Hybrid ranking is primary signal
-			rerankWeight = 0.05 // Cross-encoder as tie-breaker only (was 0.15)
+			vectorWeight = 0.70  // Hybrid ranking is primary signal
+			rerankWeight = 0.05  // Cross-encoder as tie-breaker only (was 0.15)
 			colbertWeight = 0.25 // Preserve ColBERT's keyword matching (was 0.15)
 		} else if hasColBERT && !hasReranker {
 			vectorWeight = 0.75
@@ -972,6 +972,28 @@ func computeCodeSignalBoost(filePath string, intent QueryIntent) float64 {
 	}
 
 	return boost
+}
+
+func lateInteractionText(doc *store.Document) string {
+	if doc == nil {
+		return ""
+	}
+
+	description := ""
+	if doc.Metadata != nil {
+		description = doc.Metadata["description"]
+	}
+
+	description = strings.TrimSpace(description)
+	content := strings.TrimSpace(doc.Content)
+	switch {
+	case description == "":
+		return content
+	case content == "":
+		return description
+	default:
+		return description + "\n\n" + content
+	}
 }
 
 // SetReranker sets the reranker for two-stage retrieval.

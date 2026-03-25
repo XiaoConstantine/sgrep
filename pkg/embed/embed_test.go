@@ -70,6 +70,22 @@ func TestNewWithConfig_Defaults(t *testing.T) {
 	}
 }
 
+func TestNewWithConfig_CustomEndpointWithAutoStart(t *testing.T) {
+	cfg := Config{
+		Endpoint:  "http://localhost:8091",
+		AutoStart: true,
+	}
+
+	e := NewWithConfig(cfg)
+
+	if e.endpoint != "http://localhost:8091" {
+		t.Errorf("expected explicit endpoint to be preserved, got %s", e.endpoint)
+	}
+	if e.serverMgr != nil {
+		t.Error("expected default server manager to be disabled for explicit endpoint")
+	}
+}
+
 func TestNew(t *testing.T) {
 	e := New()
 

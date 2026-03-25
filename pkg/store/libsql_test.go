@@ -173,6 +173,99 @@ func TestLibSQLStore_DeleteByPath(t *testing.T) {
 	}
 }
 
+func TestLibSQLStore_DeleteByPath_RemovesLateInteractionArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	s, err := OpenLibSQL(dbPath)
+	if err != nil {
+		t.Fatalf("OpenLibSQL failed: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	ctx := context.Background()
+	docs := []*Document{
+		{
+			ID:        "file1.go:chunk_1",
+			FilePath:  "file1.go",
+			Content:   "func first() {}",
+			StartLine: 1,
+			EndLine:   1,
+			Embedding: makeTestEmbedding(768, 0.1),
+			Metadata:  map[string]string{"description": "func first in file1.go"},
+		},
+		{
+			ID:        "file2.go:chunk_1",
+			FilePath:  "file2.go",
+			Content:   "func second() {}",
+			StartLine: 1,
+			EndLine:   1,
+			Embedding: makeTestEmbedding(768, 0.2),
+			Metadata:  map[string]string{"description": "func second in file2.go"},
+		},
+	}
+
+	if err := s.StoreBatch(ctx, docs); err != nil {
+		t.Fatalf("StoreBatch failed: %v", err)
+	}
+
+	if err := s.StoreFileEmbedding(ctx, &FileEmbedding{
+		FilePath:   "file1.go",
+		Embedding:  makeTestEmbedding(768, 0.15),
+		ChunkCount: 1,
+		TotalLines: 1,
+	}); err != nil {
+		t.Fatalf("StoreFileEmbedding failed: %v", err)
+	}
+
+	if err := s.StoreColBERTSegmentsBatch(ctx, map[string][]ColBERTSegment{
+		"file1.go:chunk_1": {
+			{
+				SegmentIdx: 0,
+				Text:       "func first in file1.go",
+				Embedding:  makeTestEmbedding(768, 0.3),
+			},
+		},
+		"file2.go:chunk_1": {
+			{
+				SegmentIdx: 0,
+				Text:       "func second in file2.go",
+				Embedding:  makeTestEmbedding(768, 0.4),
+			},
+		},
+	}); err != nil {
+		t.Fatalf("StoreColBERTSegmentsBatch failed: %v", err)
+	}
+
+	if err := s.DeleteByPath(ctx, "file1.go"); err != nil {
+		t.Fatalf("DeleteByPath failed: %v", err)
+	}
+
+	var fileEmbeddingCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM file_embeddings WHERE filepath = ?`, "file1.go").Scan(&fileEmbeddingCount); err != nil {
+		t.Fatalf("query file_embeddings failed: %v", err)
+	}
+	if fileEmbeddingCount != 0 {
+		t.Fatalf("expected file embedding to be deleted, got %d rows", fileEmbeddingCount)
+	}
+
+	var segmentCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM colbert_segments WHERE chunk_id LIKE ?`, "file1.go:%").Scan(&segmentCount); err != nil {
+		t.Fatalf("query colbert_segments failed: %v", err)
+	}
+	if segmentCount != 0 {
+		t.Fatalf("expected ColBERT segments to be deleted, got %d rows", segmentCount)
+	}
+
+	remainingSegments, err := s.GetColBERTSegments(ctx, "file2.go:chunk_1")
+	if err != nil {
+		t.Fatalf("GetColBERTSegments failed: %v", err)
+	}
+	if len(remainingSegments) != 1 {
+		t.Fatalf("expected unrelated ColBERT segments to remain, got %d", len(remainingSegments))
+	}
+}
+
 func TestLibSQLStore_Stats(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")

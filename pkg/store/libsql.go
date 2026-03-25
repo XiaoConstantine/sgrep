@@ -781,17 +781,49 @@ func (s *LibSQLStore) HybridSearch(ctx context.Context, embedding []float32, que
 
 // DeleteByPath removes all documents for a file path.
 func (s *LibSQLStore) DeleteByPath(ctx context.Context, filepath string) error {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM documents WHERE filepath = ?`, filepath)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM colbert_segments
+		WHERE chunk_id IN (SELECT id FROM documents WHERE filepath = ?)
+	`, filepath); err != nil {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM file_embeddings WHERE filepath = ?`, filepath); err != nil {
+		return err
+	}
+
+	result, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE filepath = ?`, filepath)
 	if err != nil {
 		return err
 	}
 
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
 	affected, _ := result.RowsAffected()
-	atomic.AddInt64(&s.vectorCount, -affected)
+	newCount := atomic.AddInt64(&s.vectorCount, -affected)
+	if newCount < 0 {
+		newCount = 0
+		atomic.StoreInt64(&s.vectorCount, 0)
+	}
+
+	if newCount == 0 {
+		s.memMu.Lock()
+		s.vectors = nil
+		s.docIDs = nil
+		s.memMu.Unlock()
+		return nil
+	}
 
 	// Reload in-memory cache
-	count := atomic.LoadInt64(&s.vectorCount)
-	if count < inMemoryThreshold && count > 0 {
+	if newCount < inMemoryThreshold {
 		return s.loadVectorsToMemory()
 	}
 
@@ -1388,7 +1420,7 @@ func (s *LibSQLStore) HasColBERTSegments(ctx context.Context) (bool, error) {
 // Uses LIMIT/OFFSET pagination with deterministic ordering by rowid.
 func (s *LibSQLStore) GetChunksForColBERT(ctx context.Context, batchSize int, offset int) ([]ChunkInfo, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, content FROM documents
+		SELECT id, content, metadata FROM documents
 		WHERE embedding IS NOT NULL
 		ORDER BY rowid
 		LIMIT ? OFFSET ?
@@ -1401,9 +1433,11 @@ func (s *LibSQLStore) GetChunksForColBERT(ctx context.Context, batchSize int, of
 	var chunks []ChunkInfo
 	for rows.Next() {
 		var chunk ChunkInfo
-		if err := rows.Scan(&chunk.ID, &chunk.Content); err != nil {
+		var metadata string
+		if err := rows.Scan(&chunk.ID, &chunk.Content, &metadata); err != nil {
 			return nil, fmt.Errorf("scan chunk: %w", err)
 		}
+		chunk.Description = extractDescription(metadata)
 		chunks = append(chunks, chunk)
 	}
 
@@ -1414,3 +1448,15 @@ func (s *LibSQLStore) GetChunksForColBERT(ctx context.Context, batchSize int, of
 	return chunks, nil
 }
 
+func extractDescription(metadata string) string {
+	if metadata == "" {
+		return ""
+	}
+
+	var fields map[string]string
+	if err := json.Unmarshal([]byte(metadata), &fields); err != nil {
+		return ""
+	}
+
+	return fields["description"]
+}

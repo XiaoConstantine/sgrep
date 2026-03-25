@@ -254,8 +254,8 @@ func (idx *Indexer) Index(ctx context.Context) error {
 	}
 
 	fileChan := make(chan string, len(files))
-	chunkChan := make(chan []chunkItem, numWorkers*2)   // Chunks from file readers
-	docChan := make(chan []*store.Document, 256)        // Documents ready for storage (large buffer)
+	chunkChan := make(chan []chunkItem, numWorkers*2) // Chunks from file readers
+	docChan := make(chan []*store.Document, 256)      // Documents ready for storage (large buffer)
 
 	var readerWg sync.WaitGroup
 	var batcherWg sync.WaitGroup
@@ -567,14 +567,34 @@ func (idx *Indexer) prepareFile(ctx context.Context, path string) ([]*store.Docu
 
 // indexFile is a convenience wrapper for single-file indexing (used by Watch).
 func (idx *Indexer) indexFile(ctx context.Context, path string) error {
+	relPath, err := filepath.Rel(idx.rootPath, path)
+	if err != nil {
+		return err
+	}
+
+	refreshColBERT, err := idx.shouldRefreshColBERT(ctx)
+	if err != nil {
+		return err
+	}
+
 	docs, err := idx.prepareFile(ctx, path)
 	if err != nil {
 		return err
 	}
-	if len(docs) == 0 {
-		return nil
+
+	if err := idx.store.DeleteByPath(ctx, relPath); err != nil {
+		return err
 	}
-	return idx.store.StoreBatch(ctx, docs)
+
+	if len(docs) == 0 {
+		return idx.refreshFileArtifacts(ctx, nil, refreshColBERT)
+	}
+
+	if err := idx.store.StoreBatch(ctx, docs); err != nil {
+		return err
+	}
+
+	return idx.refreshFileArtifacts(ctx, docs, refreshColBERT)
 }
 
 // computeFileEmbeddings computes document-level embeddings by averaging chunk embeddings.
@@ -587,6 +607,161 @@ func (idx *Indexer) computeFileEmbeddings(ctx context.Context) (int, error) {
 	}
 
 	return computer.ComputeAndStoreFileEmbeddings(ctx)
+}
+
+func (idx *Indexer) refreshFileArtifacts(ctx context.Context, docs []*store.Document, refreshColBERT bool) error {
+	if len(docs) > 0 {
+		if err := idx.refreshFileEmbedding(ctx, docs); err != nil {
+			return err
+		}
+	}
+
+	if !refreshColBERT {
+		return nil
+	}
+
+	segmentStore, ok := idx.store.(store.ColBERTSegmentStorer)
+	if !ok {
+		return nil
+	}
+
+	if len(docs) > 0 {
+		if err := idx.refreshColBERTSegments(ctx, segmentStore, docs); err != nil {
+			return err
+		}
+	}
+
+	return idx.refreshColBERTMMap(ctx, segmentStore)
+}
+
+func (idx *Indexer) shouldRefreshColBERT(ctx context.Context) (bool, error) {
+	segmentStore, ok := idx.store.(store.ColBERTSegmentStorer)
+	if !ok {
+		return false, nil
+	}
+
+	mmapPath := filepath.Join(idx.repoDir, "colbert_segments.mmap")
+	if _, err := os.Stat(mmapPath); err == nil {
+		return true, nil
+	} else if !os.IsNotExist(err) {
+		return false, err
+	}
+
+	return segmentStore.HasColBERTSegments(ctx)
+}
+
+func (idx *Indexer) refreshFileEmbedding(ctx context.Context, docs []*store.Document) error {
+	fileStore, ok := idx.store.(store.FileEmbeddingStorer)
+	if !ok || len(docs) == 0 {
+		return nil
+	}
+
+	dims := len(docs[0].Embedding)
+	if dims == 0 {
+		return nil
+	}
+
+	meanEmb := make([]float32, dims)
+	maxLine := 0
+	for _, doc := range docs {
+		normEmb := util.NormalizeVectorCopy(doc.Embedding)
+		for i, v := range normEmb {
+			meanEmb[i] += v
+		}
+		if doc.EndLine > maxLine {
+			maxLine = doc.EndLine
+		}
+	}
+
+	scale := float32(1.0 / float64(len(docs)))
+	for i := range meanEmb {
+		meanEmb[i] *= scale
+	}
+
+	return fileStore.StoreFileEmbedding(ctx, &store.FileEmbedding{
+		FilePath:   docs[0].FilePath,
+		Embedding:  meanEmb,
+		ChunkCount: len(docs),
+		TotalLines: maxLine,
+	})
+}
+
+func (idx *Indexer) refreshColBERTSegments(ctx context.Context, segmentStore store.ColBERTSegmentStorer, docs []*store.Document) error {
+	if len(docs) == 0 {
+		return nil
+	}
+
+	var allSegmentTexts []string
+	segmentCounts := make([]int, len(docs))
+
+	for i, doc := range docs {
+		description := ""
+		if doc.Metadata != nil {
+			description = doc.Metadata["description"]
+		}
+		segments := decomposeDocumentForColBERT(colbertSourceText(doc.Content, description))
+		segmentCounts[i] = len(segments)
+		allSegmentTexts = append(allSegmentTexts, segments...)
+	}
+
+	if len(allSegmentTexts) == 0 {
+		return nil
+	}
+
+	embeddings, err := idx.embedBatchWithRetry(ctx, allSegmentTexts, 3)
+	if err != nil {
+		return err
+	}
+
+	for i := range embeddings {
+		embeddings[i] = util.NormalizeVectorCopy(embeddings[i])
+	}
+
+	chunkSegments := make(map[string][]store.ColBERTSegment, len(docs))
+	segIdx := 0
+	textIdx := 0
+
+	for i, doc := range docs {
+		count := segmentCounts[i]
+		if count == 0 {
+			continue
+		}
+
+		segments := make([]store.ColBERTSegment, count)
+		for j := 0; j < count; j++ {
+			quantized, scale, min := util.QuantizeInt8(embeddings[segIdx])
+			segments[j] = store.ColBERTSegment{
+				SegmentIdx:    j,
+				Text:          allSegmentTexts[textIdx],
+				EmbeddingInt8: quantized,
+				QuantScale:    scale,
+				QuantMin:      min,
+			}
+			segIdx++
+			textIdx++
+		}
+		chunkSegments[doc.ID] = segments
+	}
+
+	return segmentStore.StoreColBERTSegmentsBatch(ctx, chunkSegments)
+}
+
+func (idx *Indexer) refreshColBERTMMap(ctx context.Context, segmentStore store.ColBERTSegmentStorer) error {
+	hasSegments, err := segmentStore.HasColBERTSegments(ctx)
+	if err != nil {
+		return err
+	}
+
+	if !hasSegments {
+		mmapPath := filepath.Join(idx.repoDir, "colbert_segments.mmap")
+		if err := os.Remove(mmapPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+
+	_, err = idx.ExportColBERTToMMap(ctx, idx.repoDir)
+	return err
 }
 
 // validateAndRechunk checks chunks for token limit compliance and re-chunks oversized ones.
@@ -800,7 +975,19 @@ func (idx *Indexer) Watch(ctx context.Context) error {
 				} else {
 					// File deleted
 					relPath, _ := filepath.Rel(idx.rootPath, path)
-					_ = idx.store.DeleteByPath(ctx, relPath)
+					refreshColBERT, err := idx.shouldRefreshColBERT(ctx)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "Error checking ColBERT state for %s: %v\n", path, err)
+						continue
+					}
+					if err := idx.store.DeleteByPath(ctx, relPath); err != nil {
+						fmt.Fprintf(os.Stderr, "Error removing %s: %v\n", path, err)
+						continue
+					}
+					if err := idx.refreshFileArtifacts(ctx, nil, refreshColBERT); err != nil {
+						fmt.Fprintf(os.Stderr, "Error refreshing search artifacts for %s: %v\n", path, err)
+						continue
+					}
 					fmt.Printf("Removed: %s\n", relPath)
 				}
 			}
@@ -1130,7 +1317,7 @@ func (idx *Indexer) ComputeColBERTSegments(ctx context.Context) (int, error) {
 		segmentCounts := make([]int, len(chunks))
 
 		for j, chunk := range chunks {
-			segments := decomposeDocumentForColBERT(chunk.Content)
+			segments := decomposeDocumentForColBERT(colbertSourceText(chunk.Content, chunk.Description))
 			segmentCounts[j] = len(segments)
 			allSegmentTexts = append(allSegmentTexts, segments...)
 		}
@@ -1398,4 +1585,18 @@ func decomposeDocumentForColBERT(content string) []string {
 	}
 
 	return segments
+}
+
+func colbertSourceText(content, description string) string {
+	description = strings.TrimSpace(description)
+	content = strings.TrimSpace(content)
+
+	switch {
+	case description == "":
+		return content
+	case content == "":
+		return description
+	default:
+		return description + "\n\n" + content
+	}
 }

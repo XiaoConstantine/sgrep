@@ -26,12 +26,12 @@ const (
 
 // Config holds embedder configuration (dependency injection).
 type Config struct {
-	Endpoint   string
-	Timeout    time.Duration
-	CacheSize  int
-	AutoStart  bool
-	ServerMgr  *server.Manager
-	EventBox   *util.EventBox
+	Endpoint  string
+	Timeout   time.Duration
+	CacheSize int
+	AutoStart bool
+	ServerMgr *server.Manager
+	EventBox  *util.EventBox
 }
 
 // DefaultConfig returns sensible defaults.
@@ -91,11 +91,12 @@ func NewWithConfig(cfg Config) *Embedder {
 	if cfg.AutoStart {
 		if cfg.ServerMgr != nil {
 			mgr = cfg.ServerMgr
-		} else {
-			mgr, _ = server.NewManager()
-		}
-		if mgr != nil {
 			endpoint = mgr.Endpoint()
+		} else if cfg.Endpoint == "" {
+			mgr, _ = server.NewManager()
+			if mgr != nil {
+				endpoint = mgr.Endpoint()
+			}
 		}
 	}
 
