@@ -984,16 +984,7 @@ func lateInteractionText(doc *store.Document) string {
 		description = doc.Metadata["description"]
 	}
 
-	description = strings.TrimSpace(description)
-	content := strings.TrimSpace(doc.Content)
-	switch {
-	case description == "":
-		return content
-	case content == "":
-		return description
-	default:
-		return description + "\n\n" + content
-	}
+	return util.CombineDescriptionContent(doc.Content, description)
 }
 
 // SetReranker sets the reranker for two-stage retrieval.

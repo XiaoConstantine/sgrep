@@ -266,6 +266,59 @@ func TestLibSQLStore_DeleteByPath_RemovesLateInteractionArtifacts(t *testing.T) 
 	}
 }
 
+func TestLibSQLStore_GetChunksForColBERT_LoadsDescriptionViaJSONExtract(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	s, err := OpenLibSQL(dbPath)
+	if err != nil {
+		t.Fatalf("OpenLibSQL failed: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	ctx := context.Background()
+	docs := []*Document{
+		{
+			ID:        "file1.go:chunk_1",
+			FilePath:  "file1.go",
+			Content:   "func first() {}",
+			StartLine: 1,
+			EndLine:   1,
+			Embedding: makeTestEmbedding(768, 0.1),
+			Metadata:  map[string]string{"description": "first helper"},
+		},
+		{
+			ID:        "file2.go:chunk_1",
+			FilePath:  "file2.go",
+			Content:   "func second() {}",
+			StartLine: 1,
+			EndLine:   1,
+			Embedding: makeTestEmbedding(768, 0.2),
+		},
+	}
+
+	if err := s.StoreBatch(ctx, docs); err != nil {
+		t.Fatalf("StoreBatch failed: %v", err)
+	}
+
+	chunks, err := s.GetChunksForColBERT(ctx, 10, 0)
+	if err != nil {
+		t.Fatalf("GetChunksForColBERT failed: %v", err)
+	}
+
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks, got %d", len(chunks))
+	}
+
+	if chunks[0].Description != "first helper" {
+		t.Fatalf("expected first description %q, got %q", "first helper", chunks[0].Description)
+	}
+
+	if chunks[1].Description != "" {
+		t.Fatalf("expected second description to be empty, got %q", chunks[1].Description)
+	}
+}
+
 func TestLibSQLStore_Stats(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")

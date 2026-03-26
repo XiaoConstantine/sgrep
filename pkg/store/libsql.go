@@ -1420,7 +1420,7 @@ func (s *LibSQLStore) HasColBERTSegments(ctx context.Context) (bool, error) {
 // Uses LIMIT/OFFSET pagination with deterministic ordering by rowid.
 func (s *LibSQLStore) GetChunksForColBERT(ctx context.Context, batchSize int, offset int) ([]ChunkInfo, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, content, metadata FROM documents
+		SELECT id, content, COALESCE(json_extract(metadata, '$.description'), '') FROM documents
 		WHERE embedding IS NOT NULL
 		ORDER BY rowid
 		LIMIT ? OFFSET ?
@@ -1433,11 +1433,9 @@ func (s *LibSQLStore) GetChunksForColBERT(ctx context.Context, batchSize int, of
 	var chunks []ChunkInfo
 	for rows.Next() {
 		var chunk ChunkInfo
-		var metadata string
-		if err := rows.Scan(&chunk.ID, &chunk.Content, &metadata); err != nil {
+		if err := rows.Scan(&chunk.ID, &chunk.Content, &chunk.Description); err != nil {
 			return nil, fmt.Errorf("scan chunk: %w", err)
 		}
-		chunk.Description = extractDescription(metadata)
 		chunks = append(chunks, chunk)
 	}
 
@@ -1446,17 +1444,4 @@ func (s *LibSQLStore) GetChunksForColBERT(ctx context.Context, batchSize int, of
 	}
 
 	return chunks, nil
-}
-
-func extractDescription(metadata string) string {
-	if metadata == "" {
-		return ""
-	}
-
-	var fields map[string]string
-	if err := json.Unmarshal([]byte(metadata), &fields); err != nil {
-		return ""
-	}
-
-	return fields["description"]
 }
