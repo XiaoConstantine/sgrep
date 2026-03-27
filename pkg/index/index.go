@@ -565,16 +565,6 @@ func (idx *Indexer) prepareFile(ctx context.Context, path string) ([]*store.Docu
 	return docs, nil
 }
 
-// indexFile is a convenience wrapper for single-file indexing (used by Watch).
-func (idx *Indexer) indexFile(ctx context.Context, path string) error {
-	refreshColBERT, err := idx.shouldRefreshColBERT(ctx)
-	if err != nil {
-		return err
-	}
-
-	return idx.syncFile(ctx, path, refreshColBERT, true)
-}
-
 func (idx *Indexer) syncFile(ctx context.Context, path string, refreshColBERT, rebuildColBERTMMap bool) error {
 	relPath, err := filepath.Rel(idx.rootPath, path)
 	if err != nil {

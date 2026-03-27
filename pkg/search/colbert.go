@@ -25,6 +25,11 @@ type ColBERTScorer struct {
 	cache        *segmentCache
 }
 
+type preparedQueryTerm struct {
+	embedding []float32
+	sum       float64
+}
+
 // segmentCache caches PRE-NORMALIZED segment embeddings to avoid recomputation.
 // Storing normalized vectors enables fast similarity via dot product.
 type segmentCache struct {
@@ -228,6 +233,7 @@ func (c *ColBERTScorer) ScoreBatchWithChunkIDs(ctx context.Context, query string
 	if err != nil {
 		return nil, err
 	}
+	preparedTerms := prepareQueryTerms(queryEmbeddings)
 
 	// Batch load pre-computed segment embeddings for all chunks
 	segmentMap, err := c.segmentStore.GetColBERTSegmentsBatch(ctx, chunkIDs)
@@ -274,8 +280,8 @@ func (c *ColBERTScorer) ScoreBatchWithChunkIDs(ctx context.Context, query string
 
 		// Compute MaxSim score using int8 quantized embeddings if available
 		var totalScore float64
-		for _, qEmb := range queryEmbeddings {
-			maxSim := maxSimInt8(qEmb, segments)
+		for _, term := range preparedTerms {
+			maxSim := maxSimPreparedInt8(term, segments)
 			if maxSim > 0 {
 				totalScore += maxSim
 			}
@@ -584,4 +590,43 @@ func maxSimInt8(qEmb []float32, segments []store.ColBERTSegment) float64 {
 		}
 	}
 	return maxSim
+}
+
+func prepareQueryTerms(queryEmbeddings [][]float32) []preparedQueryTerm {
+	terms := make([]preparedQueryTerm, len(queryEmbeddings))
+	for i, emb := range queryEmbeddings {
+		terms[i] = preparedQueryTerm{
+			embedding: emb,
+			sum:       sumFloat32(emb),
+		}
+	}
+	return terms
+}
+
+func maxSimPreparedInt8(term preparedQueryTerm, segments []store.ColBERTSegment) float64 {
+	if len(segments) == 0 {
+		return -1
+	}
+
+	maxSim := float64(-1)
+	for _, seg := range segments {
+		var sim float64
+		if seg.EmbeddingInt8 != nil {
+			sim = util.DotProductInt8AffinePrepared(term.embedding, seg.EmbeddingInt8, seg.QuantScale, seg.QuantMin, term.sum)
+		} else if seg.Embedding != nil {
+			sim = util.DotProductUnrolled8(term.embedding, seg.Embedding)
+		}
+		if sim > maxSim {
+			maxSim = sim
+		}
+	}
+	return maxSim
+}
+
+func sumFloat32(values []float32) float64 {
+	var sum float64
+	for _, v := range values {
+		sum += float64(v)
+	}
+	return sum
 }

@@ -364,6 +364,41 @@ func DotProductInt8Unrolled8(query []float32, doc []int8, scale, min float32) fl
 	return s0 + s1 + s2 + s3 + s4 + s5 + s6 + s7
 }
 
+// DotProductInt8AffinePrepared computes the exact same score as DotProductInt8Unrolled8,
+// but factors out the affine dequantization so query-specific work can be prepared once:
+//
+//	dot(q, ((doc + 128) * scale + min))
+//	= scale*dot(q, doc) + (128*scale + min)*sum(q)
+func DotProductInt8AffinePrepared(query []float32, doc []int8, scale, min float32, querySum float64) float64 {
+	n := len(query)
+	if n != len(doc) {
+		return 0
+	}
+
+	scale64 := float64(scale)
+	bias := float64(128*scale + min)
+
+	var s0, s1, s2, s3, s4, s5, s6, s7 float64
+
+	i := 0
+	for ; i <= n-8; i += 8 {
+		s0 += float64(query[i]) * float64(doc[i])
+		s1 += float64(query[i+1]) * float64(doc[i+1])
+		s2 += float64(query[i+2]) * float64(doc[i+2])
+		s3 += float64(query[i+3]) * float64(doc[i+3])
+		s4 += float64(query[i+4]) * float64(doc[i+4])
+		s5 += float64(query[i+5]) * float64(doc[i+5])
+		s6 += float64(query[i+6]) * float64(doc[i+6])
+		s7 += float64(query[i+7]) * float64(doc[i+7])
+	}
+
+	for ; i < n; i++ {
+		s0 += float64(query[i]) * float64(doc[i])
+	}
+
+	return scale64*(s0+s1+s2+s3+s4+s5+s6+s7) + bias*querySum
+}
+
 // TopKIndices returns indices of k smallest values in distances (partial sort).
 // Uses indices buffer for zero allocation.
 func TopKIndices(distances []float64, indices []int, k int) []int {

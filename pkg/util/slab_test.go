@@ -220,8 +220,8 @@ func TestL2DistanceBatch(t *testing.T) {
 func TestL2DistanceBatch_DimensionMismatch(t *testing.T) {
 	query := []float32{0.0, 0.0, 0.0}
 	vectors := [][]float32{
-		{0.0, 0.0},       // wrong dims
-		{1.0, 0.0, 0.0},  // correct dims
+		{0.0, 0.0},           // wrong dims
+		{1.0, 0.0, 0.0},      // correct dims
 		{0.0, 3.0, 4.0, 5.0}, // wrong dims
 	}
 	distances := make([]float64, len(vectors))
@@ -237,6 +237,38 @@ func TestL2DistanceBatch_DimensionMismatch(t *testing.T) {
 	if distances[2] != math.MaxFloat64 {
 		t.Errorf("expected MaxFloat64 for dimension mismatch at index 2")
 	}
+}
+
+func TestDotProductInt8AffinePreparedMatchesCurrent(t *testing.T) {
+	rng := rand.New(rand.NewSource(42))
+
+	for caseIdx := 0; caseIdx < 128; caseIdx++ {
+		query := make([]float32, 768)
+		doc := make([]float32, 768)
+		for i := range query {
+			query[i] = rng.Float32()*2 - 1
+			doc[i] = rng.Float32()*2 - 1
+		}
+		query = NormalizeVector(query)
+		doc = NormalizeVector(doc)
+
+		docInt8, scale, min := QuantizeInt8(doc)
+		querySum := sumFloat32Values(query)
+
+		got := DotProductInt8AffinePrepared(query, docInt8, scale, min, querySum)
+		want := DotProductInt8Unrolled8(query, docInt8, scale, min)
+		if diff := math.Abs(got - want); diff > 1e-7 {
+			t.Fatalf("case %d: got %.12f want %.12f diff %.12f", caseIdx, got, want, diff)
+		}
+	}
+}
+
+func sumFloat32Values(values []float32) float64 {
+	var sum float64
+	for _, v := range values {
+		sum += float64(v)
+	}
+	return sum
 }
 
 func TestTopKIndices(t *testing.T) {

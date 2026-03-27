@@ -1,7 +1,11 @@
 package search
 
 import (
+	"math"
 	"testing"
+
+	"github.com/XiaoConstantine/sgrep/pkg/store"
+	"github.com/XiaoConstantine/sgrep/pkg/util"
 )
 
 func TestDecomposeQuery(t *testing.T) {
@@ -29,22 +33,22 @@ func TestDecomposeQuery(t *testing.T) {
 
 func TestDecomposeDocument(t *testing.T) {
 	tests := []struct {
-		name     string
-		content  string
-		minSegs  int
-		maxSegs  int
+		name    string
+		content string
+		minSegs int
+		maxSegs int
 	}{
 		{
-			name:     "empty",
-			content:  "",
-			minSegs:  0,
-			maxSegs:  0,
+			name:    "empty",
+			content: "",
+			minSegs: 0,
+			maxSegs: 0,
 		},
 		{
-			name:     "single line",
-			content:  "func main() {}",
-			minSegs:  1,
-			maxSegs:  1,
+			name:    "single line",
+			content: "func main() {}",
+			minSegs: 1,
+			maxSegs: 1,
 		},
 		{
 			name: "multiple functions",
@@ -220,4 +224,52 @@ func TestSegmentCache(t *testing.T) {
 
 	// At least one of the original keys should be evicted
 	// Note: eviction is simple and clears half, so behavior may vary
+}
+
+func TestPrepareQueryTerms(t *testing.T) {
+	embeddings := [][]float32{
+		{0.25, -0.5, 0.75},
+		{-0.25, 0.5, -0.75},
+	}
+
+	terms := prepareQueryTerms(embeddings)
+	if len(terms) != len(embeddings) {
+		t.Fatalf("prepareQueryTerms returned %d terms, want %d", len(terms), len(embeddings))
+	}
+
+	for i, term := range terms {
+		if len(term.embedding) != len(embeddings[i]) {
+			t.Fatalf("term %d embedding len = %d, want %d", i, len(term.embedding), len(embeddings[i]))
+		}
+		if diff := math.Abs(term.sum - sumFloat32(embeddings[i])); diff > 1e-9 {
+			t.Fatalf("term %d sum diff = %.12f", i, diff)
+		}
+	}
+}
+
+func TestMaxSimPreparedInt8MatchesCurrent(t *testing.T) {
+	query := util.NormalizeVector([]float32{0.9, -0.3, 0.2, 0.1})
+	segments := make([]store.ColBERTSegment, 3)
+
+	rawSegments := [][]float32{
+		util.NormalizeVector([]float32{0.8, -0.25, 0.25, 0.15}),
+		util.NormalizeVector([]float32{-0.4, 0.9, -0.1, 0.05}),
+		util.NormalizeVector([]float32{0.2, -0.1, 0.95, -0.05}),
+	}
+
+	for i, emb := range rawSegments {
+		quantized, scale, min := util.QuantizeInt8(emb)
+		segments[i] = store.ColBERTSegment{
+			SegmentIdx:    i,
+			EmbeddingInt8: quantized,
+			QuantScale:    scale,
+			QuantMin:      min,
+		}
+	}
+
+	current := maxSimInt8(query, segments)
+	prepared := maxSimPreparedInt8(prepareQueryTerms([][]float32{query})[0], segments)
+	if diff := math.Abs(current - prepared); diff > 1e-7 {
+		t.Fatalf("prepared scorer mismatch: current %.12f prepared %.12f diff %.12f", current, prepared, diff)
+	}
 }

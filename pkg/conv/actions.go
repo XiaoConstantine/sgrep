@@ -328,16 +328,16 @@ func formatContextOutput(result *ContextResult, format string) string {
 	switch format {
 	case "markdown":
 		sb.WriteString("## Previous Session Context\n\n")
-		sb.WriteString(fmt.Sprintf("**Project:** %s\n", result.Project))
-		sb.WriteString(fmt.Sprintf("**Date:** %s (%s)\n", result.Date.Format("2006-01-02"), relativeTime(result.Date)))
-		sb.WriteString(fmt.Sprintf("**Agent:** %s\n", result.Agent))
+		fmt.Fprintf(&sb, "**Project:** %s\n", result.Project)
+		fmt.Fprintf(&sb, "**Date:** %s (%s)\n", result.Date.Format("2006-01-02"), relativeTime(result.Date))
+		fmt.Fprintf(&sb, "**Agent:** %s\n", result.Agent)
 		if result.Topic != "" {
-			sb.WriteString(fmt.Sprintf("**Topic:** %s\n", result.Topic))
+			fmt.Fprintf(&sb, "**Topic:** %s\n", result.Topic)
 		}
 		sb.WriteString("\n")
 
 		if result.Summary != "" {
-			sb.WriteString(fmt.Sprintf("### Summary\n%s\n\n", result.Summary))
+			fmt.Fprintf(&sb, "### Summary\n%s\n\n", result.Summary)
 		}
 
 		if len(result.KeyPoints) > 0 {
