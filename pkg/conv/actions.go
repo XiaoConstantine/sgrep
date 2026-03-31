@@ -343,46 +343,46 @@ func formatContextOutput(result *ContextResult, format string) string {
 		if len(result.KeyPoints) > 0 {
 			sb.WriteString("### Key Decisions\n")
 			for _, point := range result.KeyPoints {
-				sb.WriteString(fmt.Sprintf("- %s\n", point))
+				fmt.Fprintf(&sb, "- %s\n", point)
 			}
 			sb.WriteString("\n")
 		}
 
 		for i, turn := range result.LastTurns {
-			sb.WriteString(fmt.Sprintf("### Turn %d\n", i+1))
-			sb.WriteString(fmt.Sprintf("**USER:** %s\n\n", turn.UserContent))
-			sb.WriteString(fmt.Sprintf("**ASSISTANT:** %s\n\n", turn.AssistContent))
+			fmt.Fprintf(&sb, "### Turn %d\n", i+1)
+			fmt.Fprintf(&sb, "**USER:** %s\n\n", turn.UserContent)
+			fmt.Fprintf(&sb, "**ASSISTANT:** %s\n\n", turn.AssistContent)
 		}
 
 		sb.WriteString("---\n")
-		sb.WriteString(fmt.Sprintf("*Resume: %s*\n", result.ResumeCommand))
+		fmt.Fprintf(&sb, "*Resume: %s*\n", result.ResumeCommand)
 
 	case "prompt":
 		sb.WriteString("## Previous Session Context\n\n")
-		sb.WriteString(fmt.Sprintf("**Project:** %s\n", result.Project))
-		sb.WriteString(fmt.Sprintf("**Date:** %s (%s)\n", result.Date.Format("2006-01-02"), relativeTime(result.Date)))
-		sb.WriteString(fmt.Sprintf("**Agent:** %s\n", result.Agent))
+		fmt.Fprintf(&sb, "**Project:** %s\n", result.Project)
+		fmt.Fprintf(&sb, "**Date:** %s (%s)\n", result.Date.Format("2006-01-02"), relativeTime(result.Date))
+		fmt.Fprintf(&sb, "**Agent:** %s\n", result.Agent)
 		if result.Topic != "" {
-			sb.WriteString(fmt.Sprintf("**Topic:** %s\n\n", result.Topic))
+			fmt.Fprintf(&sb, "**Topic:** %s\n\n", result.Topic)
 		}
 
 		// Show last turns in condensed format
 		for i, turn := range result.LastTurns {
-			sb.WriteString(fmt.Sprintf("### Exchange %d\n", i+1))
-			sb.WriteString(fmt.Sprintf("USER: %s\n\n", turn.UserContent))
+			fmt.Fprintf(&sb, "### Exchange %d\n", i+1)
+			fmt.Fprintf(&sb, "USER: %s\n\n", turn.UserContent)
 			// Truncate long assistant responses
 			assistContent := turn.AssistContent
 			if len(assistContent) > 500 {
 				assistContent = assistContent[:497] + "..."
 			}
-			sb.WriteString(fmt.Sprintf("ASSISTANT: %s\n\n", assistContent))
+			fmt.Fprintf(&sb, "ASSISTANT: %s\n\n", assistContent)
 		}
 
 		sb.WriteString("---\n")
-		sb.WriteString(fmt.Sprintf("*Continue from this context. Session: %s*\n", result.SessionID))
+		fmt.Fprintf(&sb, "*Continue from this context. Session: %s*\n", result.SessionID)
 
 	default: // json is handled elsewhere
-		sb.WriteString(fmt.Sprintf("Session: %s\nProject: %s\n", result.SessionID, result.Project))
+		fmt.Fprintf(&sb, "Session: %s\nProject: %s\n", result.SessionID, result.Project)
 	}
 
 	return sb.String()
@@ -391,19 +391,19 @@ func formatContextOutput(result *ContextResult, format string) string {
 func exportMarkdown(session *Session) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("# Conversation: %s\n\n", session.ProjectName))
-	sb.WriteString(fmt.Sprintf("**Agent:** %s\n", session.Agent))
-	sb.WriteString(fmt.Sprintf("**Project:** %s\n", session.ProjectPath))
-	sb.WriteString(fmt.Sprintf("**Date:** %s\n", session.StartedAt.Format("2006-01-02 15:04:05")))
+	fmt.Fprintf(&sb, "# Conversation: %s\n\n", session.ProjectName)
+	fmt.Fprintf(&sb, "**Agent:** %s\n", session.Agent)
+	fmt.Fprintf(&sb, "**Project:** %s\n", session.ProjectPath)
+	fmt.Fprintf(&sb, "**Date:** %s\n", session.StartedAt.Format("2006-01-02 15:04:05"))
 	if session.GitBranch != "" {
-		sb.WriteString(fmt.Sprintf("**Branch:** %s\n", session.GitBranch))
+		fmt.Fprintf(&sb, "**Branch:** %s\n", session.GitBranch)
 	}
 	sb.WriteString("\n---\n\n")
 
 	for i, turn := range session.Turns {
-		sb.WriteString(fmt.Sprintf("## Turn %d\n\n", i+1))
-		sb.WriteString(fmt.Sprintf("### User\n\n%s\n\n", turn.UserContent))
-		sb.WriteString(fmt.Sprintf("### Assistant\n\n%s\n\n", turn.AssistContent))
+		fmt.Fprintf(&sb, "## Turn %d\n\n", i+1)
+		fmt.Fprintf(&sb, "### User\n\n%s\n\n", turn.UserContent)
+		fmt.Fprintf(&sb, "### Assistant\n\n%s\n\n", turn.AssistContent)
 		sb.WriteString("---\n\n")
 	}
 
@@ -424,7 +424,7 @@ func exportHTML(session *Session) string {
 
 	sb.WriteString("<!DOCTYPE html>\n<html>\n<head>\n")
 	sb.WriteString("<meta charset=\"UTF-8\">\n")
-	sb.WriteString(fmt.Sprintf("<title>Conversation: %s</title>\n", session.ProjectName))
+	fmt.Fprintf(&sb, "<title>Conversation: %s</title>\n", session.ProjectName)
 	sb.WriteString("<style>\n")
 	sb.WriteString("body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }\n")
 	sb.WriteString(".turn { margin-bottom: 20px; }\n")
@@ -433,18 +433,18 @@ func exportHTML(session *Session) string {
 	sb.WriteString("pre { background: #263238; color: #fff; padding: 10px; border-radius: 4px; overflow-x: auto; }\n")
 	sb.WriteString("</style>\n</head>\n<body>\n")
 
-	sb.WriteString(fmt.Sprintf("<h1>%s</h1>\n", session.ProjectName))
-	sb.WriteString(fmt.Sprintf("<p><strong>Agent:</strong> %s | <strong>Date:</strong> %s</p>\n",
-		session.Agent, session.StartedAt.Format("2006-01-02")))
+	fmt.Fprintf(&sb, "<h1>%s</h1>\n", session.ProjectName)
+	fmt.Fprintf(&sb, "<p><strong>Agent:</strong> %s | <strong>Date:</strong> %s</p>\n",
+		session.Agent, session.StartedAt.Format("2006-01-02"))
 	sb.WriteString("<hr>\n")
 
 	for i, turn := range session.Turns {
 		sb.WriteString("<div class=\"turn\">\n")
-		sb.WriteString(fmt.Sprintf("<h3>Turn %d</h3>\n", i+1))
-		sb.WriteString(fmt.Sprintf("<div class=\"user\"><strong>User:</strong><br>%s</div>\n",
-			escapeHTML(turn.UserContent)))
-		sb.WriteString(fmt.Sprintf("<div class=\"assistant\"><strong>Assistant:</strong><br>%s</div>\n",
-			formatHTMLContent(turn.AssistContent)))
+		fmt.Fprintf(&sb, "<h3>Turn %d</h3>\n", i+1)
+		fmt.Fprintf(&sb, "<div class=\"user\"><strong>User:</strong><br>%s</div>\n",
+			escapeHTML(turn.UserContent))
+		fmt.Fprintf(&sb, "<div class=\"assistant\"><strong>Assistant:</strong><br>%s</div>\n",
+			formatHTMLContent(turn.AssistContent))
 		sb.WriteString("</div>\n")
 	}
 

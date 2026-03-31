@@ -28,12 +28,14 @@ jobs:
       - name: Run tests (with FTS5 for hybrid search)
         env:
           CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
+          CGO_LDFLAGS: "-lm"
         run: go test -tags=sqlite_vec -short -v ./...
 
       - name: Build Linux binary (with hybrid search)
         env:
           CGO_ENABLED: 1
           CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
+          CGO_LDFLAGS: "-lm"
           GOOS: linux
           GOARCH: amd64
         run: |
