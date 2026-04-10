@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -25,6 +26,11 @@ type Manager struct {
 	sgrepHome string
 	port      int
 	host      string
+}
+
+type launchConfig struct {
+	device    string
+	gpuLayers string
 }
 
 // NewManager creates a server manager.
@@ -88,13 +94,6 @@ func (m *Manager) Start() error {
 	// Clean up stale PID file
 	m.cleanStalePID()
 
-	// Start the server
-	logPath := filepath.Join(m.sgrepHome, "server.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open log file: %w", err)
-	}
-
 	// Calculate optimal settings based on CPU
 	// Reference: https://github.com/ggml-org/llama.cpp/discussions/4130
 	numCPU := runtime.NumCPU()
@@ -117,21 +116,28 @@ func (m *Manager) Start() error {
 	// Benchmarks show identical quality (NDCG@10=0.6218) with 2.5x faster indexing
 	contextSize := parallelSlots * 256
 
-	// Build command with GPU support if available
-	args := []string{
-		"-m", modelPath,
-		"--embedding",
-		"--port", strconv.Itoa(m.port),
-		"--host", m.host,
-		"-c", strconv.Itoa(contextSize),
-		"-b", "2048",  // batch size (match typical input)
-		"-ub", "2048", // microbatch (equal to -b for embeddings)
-		"--threads", strconv.Itoa(threads),
-		"-ngl", "99",  // Use GPU (Metal on Mac, CUDA on Linux) - offload all layers
-		"-np", strconv.Itoa(parallelSlots),
-		"-cb", // Continuous batching - CRITICAL for parallel to work!
+	var startErrs []string
+	for _, cfg := range m.launchConfigs() {
+		if err := m.startWithConfig(llamaPath, modelPath, threads, parallelSlots, contextSize, cfg); err == nil {
+			return nil
+		} else {
+			startErrs = append(startErrs, err.Error())
+			_ = m.Stop()
+		}
 	}
 
+	return fmt.Errorf("failed to start llama-server: %s", strings.Join(startErrs, "; "))
+}
+
+func (m *Manager) startWithConfig(llamaPath, modelPath string, threads, parallelSlots, contextSize int, cfg launchConfig) error {
+	logPath := filepath.Join(m.sgrepHome, "server.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open log file: %w", err)
+	}
+	defer func() { _ = logFile.Close() }()
+
+	args := m.buildArgs(modelPath, threads, parallelSlots, contextSize, cfg)
 	cmd := exec.Command(llamaPath, args...)
 
 	cmd.Stdout = logFile
@@ -141,7 +147,6 @@ func (m *Manager) Start() error {
 	}
 
 	if err := cmd.Start(); err != nil {
-		_ = logFile.Close()
 		return fmt.Errorf("failed to start llama-server: %w", err)
 	}
 
@@ -152,14 +157,66 @@ func (m *Manager) Start() error {
 		fmt.Fprintf(os.Stderr, "warning: failed to write PID file: %v\n", err)
 	}
 
-	// Wait for server to be ready
 	if err := m.waitForReady(); err != nil {
-		// Try to kill the server if it didn't start properly
-		_ = m.Stop()
-		return err
+		return fmt.Errorf("device=%q gpu_layers=%s: %w", cfg.device, cfg.gpuLayers, err)
 	}
 
 	return nil
+}
+
+func (m *Manager) buildArgs(modelPath string, threads, parallelSlots, contextSize int, cfg launchConfig) []string {
+	args := []string{
+		"-m", modelPath,
+		"--embedding",
+		"--port", strconv.Itoa(m.port),
+		"--host", m.host,
+		"-c", strconv.Itoa(contextSize),
+		"-b", "2048",  // batch size (match typical input)
+		"-ub", "2048", // microbatch (equal to -b for embeddings)
+		"--threads", strconv.Itoa(threads),
+		"-ngl", cfg.gpuLayers,
+		"-np", strconv.Itoa(parallelSlots),
+		"-cb", // Continuous batching - CRITICAL for parallel to work!
+	}
+
+	if cfg.device != "" {
+		args = append(args, "--device", cfg.device)
+	}
+
+	return args
+}
+
+func (m *Manager) launchConfigs() []launchConfig {
+	device := strings.TrimSpace(serverDevice())
+	gpuLayers := strings.TrimSpace(serverGPULayers(device))
+	if device != "" {
+		return []launchConfig{{device: device, gpuLayers: gpuLayers}}
+	}
+
+	return []launchConfig{
+		{gpuLayers: gpuLayers},
+		{device: "none", gpuLayers: "0"},
+	}
+}
+
+func serverDevice() string {
+	if device := strings.TrimSpace(os.Getenv("SGREP_DEVICE")); device != "" {
+		return device
+	}
+	return strings.TrimSpace(os.Getenv("LLAMA_ARG_DEVICE"))
+}
+
+func serverGPULayers(device string) string {
+	if layers := strings.TrimSpace(os.Getenv("SGREP_N_GPU_LAYERS")); layers != "" {
+		return layers
+	}
+	if layers := strings.TrimSpace(os.Getenv("LLAMA_ARG_N_GPU_LAYERS")); layers != "" {
+		return layers
+	}
+	if device == "none" {
+		return "0"
+	}
+	return "99"
 }
 
 // Stop stops the llama.cpp server.

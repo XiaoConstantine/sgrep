@@ -229,6 +229,51 @@ func TestManager_FindLlamaServer(t *testing.T) {
 	_, _ = mgr.findLlamaServer()
 }
 
+func TestManager_LaunchConfigs_DefaultFallback(t *testing.T) {
+	t.Setenv("SGREP_DEVICE", "")
+	t.Setenv("LLAMA_ARG_DEVICE", "")
+	t.Setenv("SGREP_N_GPU_LAYERS", "")
+	t.Setenv("LLAMA_ARG_N_GPU_LAYERS", "")
+
+	mgr := &Manager{}
+	configs := mgr.launchConfigs()
+	if len(configs) != 2 {
+		t.Fatalf("got %d configs, want 2", len(configs))
+	}
+	if configs[0].device != "" || configs[0].gpuLayers != "99" {
+		t.Fatalf("unexpected primary config: %+v", configs[0])
+	}
+	if configs[1].device != "none" || configs[1].gpuLayers != "0" {
+		t.Fatalf("unexpected fallback config: %+v", configs[1])
+	}
+}
+
+func TestManager_LaunchConfigs_ExplicitDevice(t *testing.T) {
+	t.Setenv("SGREP_DEVICE", "none")
+	t.Setenv("SGREP_N_GPU_LAYERS", "")
+
+	mgr := &Manager{}
+	configs := mgr.launchConfigs()
+	if len(configs) != 1 {
+		t.Fatalf("got %d configs, want 1", len(configs))
+	}
+	if configs[0].device != "none" || configs[0].gpuLayers != "0" {
+		t.Fatalf("unexpected config: %+v", configs[0])
+	}
+}
+
+func TestManager_BuildArgs_UsesDeviceAndGPULayers(t *testing.T) {
+	mgr := &Manager{port: 8080, host: "localhost"}
+	args := mgr.buildArgs("/tmp/model.gguf", 8, 32, 8192, launchConfig{device: "none", gpuLayers: "0"})
+
+	if !containsPair(args, "-ngl", "0") {
+		t.Fatalf("args missing gpu layers override: %v", args)
+	}
+	if !containsPair(args, "--device", "none") {
+		t.Fatalf("args missing device override: %v", args)
+	}
+}
+
 func TestManager_ModelExists(t *testing.T) {
 	dir := t.TempDir()
 	mgr := &Manager{sgrepHome: dir}
@@ -274,4 +319,13 @@ func mustPort(url string) int {
 		}
 	}
 	return 0
+}
+
+func containsPair(args []string, key, value string) bool {
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == key && args[i+1] == value {
+			return true
+		}
+	}
+	return false
 }
