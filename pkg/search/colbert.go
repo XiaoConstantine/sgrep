@@ -20,9 +20,10 @@ import (
 // 1. Pre-computed segments: Load from store (fast, ~1-5ms per query)
 // 2. On-demand embedding: Generate at query time (slow, ~100ms per doc)
 type ColBERTScorer struct {
-	embedder     *embed.Embedder
-	segmentStore store.ColBERTSegmentStorer // Optional: for pre-computed segments
-	cache        *segmentCache
+	embedder         *embed.Embedder
+	segmentStore     store.ColBERTSegmentStorer // Optional: for pre-computed segments
+	cache            *segmentCache
+	adaptiveSegments bool
 }
 
 type preparedQueryTerm struct {
@@ -83,6 +84,11 @@ func (c *ColBERTScorer) SetSegmentStore(s store.ColBERTSegmentStorer) {
 	c.segmentStore = s
 }
 
+// SetAdaptiveSegments enables token-aware sqrt(M) segment budgets.
+func (c *ColBERTScorer) SetAdaptiveSegments(enabled bool) {
+	c.adaptiveSegments = enabled
+}
+
 // Score computes ColBERT-style MaxSim score between query and document.
 // Returns a score where higher = more relevant.
 func (c *ColBERTScorer) Score(ctx context.Context, query string, docContent string) (float64, error) {
@@ -93,7 +99,7 @@ func (c *ColBERTScorer) Score(ctx context.Context, query string, docContent stri
 	}
 
 	// Decompose document into segments
-	docSegments := decomposeDocument(docContent)
+	docSegments := c.documentSegments(docContent)
 	if len(docSegments) == 0 {
 		return 0, nil
 	}
@@ -175,7 +181,7 @@ func (c *ColBERTScorer) ScoreBatch(ctx context.Context, query string, documents 
 			default:
 			}
 
-			docSegments := decomposeDocument(doc)
+			docSegments := c.documentSegments(doc)
 			if len(docSegments) == 0 {
 				return
 			}
@@ -264,7 +270,7 @@ func (c *ColBERTScorer) ScoreBatchWithChunkIDs(ctx context.Context, query string
 		segments := segmentMap[chunkID]
 		if len(segments) == 0 {
 			// Fall back to on-demand for this document
-			docSegments := decomposeDocument(documents[i])
+			docSegments := c.documentSegments(documents[i])
 			if len(docSegments) == 0 {
 				continue
 			}
@@ -383,12 +389,74 @@ func decomposeQuery(query string) []string {
 // Uses sentence boundaries and code structure hints.
 // Exported for use during indexing to pre-compute segment embeddings.
 func DecomposeDocument(content string) []string {
-	return decomposeDocument(content)
+	return decomposeDocumentWithBudget(content, legacyMaxDocumentSegments)
 }
 
-// decomposeDocument splits a document into meaningful segments.
-// Uses sentence boundaries and code structure hints.
-func decomposeDocument(content string) []string {
+// DecomposeDocumentAdaptive splits a document using a raw-segment-aware sqrt(M)
+// budget. Chunks at or below the legacy cap are left unchanged.
+func DecomposeDocumentAdaptive(content string) []string {
+	raw := DecomposeDocumentRaw(content)
+	if len(raw) == 0 {
+		return nil
+	}
+	return sampleSegmentsToBudget(raw, AdaptiveSegmentBudgetFromRawCount(len(raw)))
+}
+
+// DecomposeDocumentRaw splits a document into all natural segments without applying
+// a representative budget cap. This is used by indexing paths that pool segments
+// after embedding rather than sampling at the text level.
+func DecomposeDocumentRaw(content string) []string {
+	return decomposeDocumentWithBudget(content, 0)
+}
+
+// DecomposeDocumentWithMode selects legacy or adaptive document decomposition.
+func DecomposeDocumentWithMode(content string, adaptive bool) []string {
+	if adaptive {
+		return DecomposeDocumentAdaptive(content)
+	}
+	return DecomposeDocument(content)
+}
+
+// AdaptiveSegmentBudget returns the adaptive representative budget for a
+// document based on its raw segment count.
+func AdaptiveSegmentBudget(content string) int {
+	return AdaptiveSegmentBudgetFromRawCount(len(DecomposeDocumentRaw(content)))
+}
+
+// AdaptiveSegmentBudgetFromRawCount returns the compression-only adaptive budget
+// for a chunk with the given number of raw segments. Chunks at or below the
+// legacy cap are left unchanged; only over-cap chunks are pooled down.
+func AdaptiveSegmentBudgetFromRawCount(rawCount int) int {
+	if rawCount <= 0 {
+		return 0
+	}
+	if rawCount <= legacyMaxDocumentSegments {
+		return rawCount
+	}
+
+	budget := int(math.Ceil(math.Sqrt(float64(rawCount))))
+	if budget < adaptiveMinDocumentSegments {
+		budget = adaptiveMinDocumentSegments
+	}
+	if budget > adaptiveMaxDocumentSegments {
+		budget = adaptiveMaxDocumentSegments
+	}
+	return budget
+}
+
+const (
+	legacyMaxDocumentSegments   = 10
+	adaptiveMinDocumentSegments = 3
+	adaptiveMaxDocumentSegments = legacyMaxDocumentSegments
+)
+
+func (c *ColBERTScorer) documentSegments(content string) []string {
+	return DecomposeDocumentWithMode(content, c != nil && c.adaptiveSegments)
+}
+
+// decomposeDocumentWithBudget splits a document into meaningful segments and caps
+// the representative set to a caller-provided budget.
+func decomposeDocumentWithBudget(content string, maxSegments int) []string {
 	content = strings.TrimSpace(content)
 	if content == "" {
 		return nil
@@ -445,26 +513,39 @@ func decomposeDocument(content string) []string {
 		segments = append(segments, strings.TrimSpace(currentSegment.String()))
 	}
 
-	// Limit segments to avoid explosion
-	if len(segments) > 10 {
-		// Keep first, last, and sample from middle
-		sampled := make([]string, 0, 10)
-		sampled = append(sampled, segments[0])
-		step := len(segments) / 8
-		if step < 1 {
-			step = 1
-		}
-		for i := step; i < len(segments)-1; i += step {
-			sampled = append(sampled, segments[i])
-			if len(sampled) >= 9 {
-				break
-			}
-		}
-		sampled = append(sampled, segments[len(segments)-1])
-		segments = sampled
+	return sampleSegmentsToBudget(segments, maxSegments)
+}
+
+func sampleSegmentsToBudget(segments []string, maxSegments int) []string {
+	if maxSegments <= 0 || len(segments) <= maxSegments {
+		return segments
+	}
+	// Keep first, last, and sample from the middle to preserve coverage.
+	sampled := make([]string, 0, maxSegments)
+	sampled = append(sampled, segments[0])
+	middleBudget := maxSegments - 2
+	if middleBudget <= 0 {
+		return sampled
 	}
 
-	return segments
+	lastIdx := len(segments) - 1
+	prevIdx := 0
+	for i := 1; i <= middleBudget; i++ {
+		idx := (i * lastIdx) / (middleBudget + 1)
+		if idx <= prevIdx {
+			idx = prevIdx + 1
+		}
+		if idx >= lastIdx {
+			idx = lastIdx - 1
+		}
+		if idx <= prevIdx || idx >= lastIdx {
+			break
+		}
+		sampled = append(sampled, segments[idx])
+		prevIdx = idx
+	}
+	sampled = append(sampled, segments[len(segments)-1])
+	return sampled
 }
 
 // tokenize splits text into lowercase tokens.

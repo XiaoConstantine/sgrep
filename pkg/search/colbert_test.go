@@ -1,7 +1,9 @@
 package search
 
 import (
+	"fmt"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/XiaoConstantine/sgrep/pkg/store"
@@ -78,12 +80,95 @@ func main() {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			segments := decomposeDocument(tt.content)
+			segments := DecomposeDocument(tt.content)
 			if len(segments) < tt.minSegs || len(segments) > tt.maxSegs {
 				t.Errorf("decomposeDocument() = %d segments, want %d-%d", len(segments), tt.minSegs, tt.maxSegs)
 			}
 		})
 	}
+}
+
+func TestAdaptiveSegments(t *testing.T) {
+	t.Run("short content keeps available segments", func(t *testing.T) {
+		content := "func main() {}"
+
+		budget := AdaptiveSegmentBudget(content)
+		if budget != 1 {
+			t.Fatalf("AdaptiveSegmentBudget(short) = %d, want 1", budget)
+		}
+
+		segments := DecomposeDocumentAdaptive(content)
+		if len(segments) != 1 {
+			t.Fatalf("DecomposeDocumentAdaptive(short) = %d segments, want 1", len(segments))
+		}
+		if len(segments) > budget {
+			t.Fatalf("adaptive short segments %d exceed budget %d", len(segments), budget)
+		}
+	})
+
+	t.Run("punctuation only keeps available segment", func(t *testing.T) {
+		content := "// --------"
+
+		budget := AdaptiveSegmentBudget(content)
+		if budget != 1 {
+			t.Fatalf("AdaptiveSegmentBudget(punctuation) = %d, want 1", budget)
+		}
+
+		segments := DecomposeDocumentAdaptive(content)
+		if len(segments) != 1 {
+			t.Fatalf("DecomposeDocumentAdaptive(punctuation) = %d segments, want 1", len(segments))
+		}
+		if len(segments) > budget {
+			t.Fatalf("adaptive punctuation segments %d exceed budget %d", len(segments), budget)
+		}
+	})
+
+	t.Run("long content compresses below legacy cap", func(t *testing.T) {
+		var b strings.Builder
+		for i := 0; i < 64; i++ {
+			fmt.Fprintf(&b, "// handler %d\nfunc handler%d() error {\n\tif err := step%d(); err != nil {\n\t\treturn err\n\t}\n\treturn nil\n}\n\n", i, i, i)
+		}
+		content := b.String()
+
+		raw := DecomposeDocumentRaw(content)
+		legacy := DecomposeDocument(content)
+		adaptive := DecomposeDocumentAdaptive(content)
+		budget := AdaptiveSegmentBudget(content)
+
+		if len(legacy) != legacyMaxDocumentSegments {
+			t.Fatalf("legacy decomposition = %d, want %d", len(legacy), legacyMaxDocumentSegments)
+		}
+		if len(raw) <= legacyMaxDocumentSegments {
+			t.Fatalf("raw decomposition = %d, want > %d for long content", len(raw), legacyMaxDocumentSegments)
+		}
+		if budget >= len(legacy) {
+			t.Fatalf("adaptive budget = %d, want < legacy %d for over-cap content", budget, len(legacy))
+		}
+		if len(adaptive) != budget {
+			t.Fatalf("adaptive decomposition = %d, want budget %d", len(adaptive), budget)
+		}
+		if len(adaptive) >= len(legacy) {
+			t.Fatalf("adaptive decomposition = %d, want < legacy %d", len(adaptive), len(legacy))
+		}
+	})
+
+	t.Run("huge content clamps at max budget", func(t *testing.T) {
+		var b strings.Builder
+		for i := 0; i < 256; i++ {
+			fmt.Fprintf(&b, "// service %d\nfunc service%d() error {\n\tvalue := config%d + retry%d + timeout%d\n\tif value == 0 {\n\t\treturn errDefault\n\t}\n\treturn nil\n}\n\n", i, i, i, i, i)
+		}
+		content := b.String()
+
+		budget := AdaptiveSegmentBudget(content)
+		if budget != adaptiveMaxDocumentSegments {
+			t.Fatalf("AdaptiveSegmentBudget(huge) = %d, want %d", budget, adaptiveMaxDocumentSegments)
+		}
+
+		segments := DecomposeDocumentAdaptive(content)
+		if len(segments) != adaptiveMaxDocumentSegments {
+			t.Fatalf("huge adaptive decomposition = %d, want %d", len(segments), adaptiveMaxDocumentSegments)
+		}
+	})
 }
 
 func TestTokenize(t *testing.T) {

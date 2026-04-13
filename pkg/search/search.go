@@ -136,14 +136,15 @@ type cachedResult struct {
 
 // Config holds searcher configuration (dependency injection pattern).
 type Config struct {
-	Store         store.Storer
-	SegmentStore  store.ColBERTSegmentStorer // Optional: dedicated segment store (e.g., MMap), overrides Store for ColBERT
-	Embedder      *embed.Embedder
-	Reranker      *rerank.Reranker // Optional cross-encoder reranker
-	ColBERTScorer *ColBERTScorer   // Optional ColBERT-style late interaction scorer
-	CacheSize     int
-	CacheTTL      time.Duration
-	EventBox      *util.EventBox
+	Store            store.Storer
+	SegmentStore     store.ColBERTSegmentStorer // Optional: dedicated segment store (e.g., MMap), overrides Store for ColBERT
+	Embedder         *embed.Embedder
+	Reranker         *rerank.Reranker // Optional cross-encoder reranker
+	ColBERTScorer    *ColBERTScorer   // Optional ColBERT-style late interaction scorer
+	AdaptiveSegments bool             // Enable token-aware sqrt(M) segment budgets
+	CacheSize        int
+	CacheTTL         time.Duration
+	EventBox         *util.EventBox
 }
 
 // Searcher handles semantic search with caching.
@@ -205,6 +206,7 @@ func NewWithConfig(cfg Config) *Searcher {
 	// Configure ColBERT scorer with segment store if available
 	// Priority: dedicated SegmentStore > Store (if it implements the interface)
 	if colbertScorer != nil {
+		colbertScorer.SetAdaptiveSegments(cfg.AdaptiveSegments)
 		if cfg.SegmentStore != nil {
 			colbertScorer.SetSegmentStore(cfg.SegmentStore)
 			util.Debugf(util.DebugSummary, "ColBERT: using dedicated segment store (MMap)")

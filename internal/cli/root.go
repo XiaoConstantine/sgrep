@@ -21,24 +21,26 @@ import (
 
 var (
 	// Global flags
-	limit          int
-	showContext    bool
-	jsonOutput     bool
-	quiet          bool
-	threshold      float64
-	includeTests   bool
-	allChunks      bool
-	hybridSearch   bool
-	semanticWeight float64
-	bm25Weight     float64
-	enableRerank   bool
-	enableColBERT  bool
-	rerankTopK     int
+	limit                   int
+	showContext             bool
+	jsonOutput              bool
+	quiet                   bool
+	threshold               float64
+	includeTests            bool
+	allChunks               bool
+	hybridSearch            bool
+	semanticWeight          float64
+	bm25Weight              float64
+	enableRerank            bool
+	enableColBERT           bool
+	colbertAdaptiveSegments bool
+	rerankTopK              int
 
 	// Index flags
-	indexWorkers         int
-	indexQuantize        string
-	indexColBERTPreindex bool
+	indexWorkers                 int
+	indexQuantize                string
+	indexColBERTPreindex         bool
+	indexColBERTAdaptiveSegments bool
 
 	// Debug flags
 	debugLevel   int    // 0=off, 1=summary, 2=detailed (set via -d count)
@@ -120,6 +122,7 @@ func init() {
 	rootCmd.Flags().Float64Var(&bm25Weight, "bm25-weight", 0.4, "Weight for BM25 score in hybrid mode")
 	rootCmd.Flags().BoolVar(&enableRerank, "rerank", false, "Enable cross-encoder reranking (requires reranker model)")
 	rootCmd.Flags().BoolVar(&enableColBERT, "colbert", false, "Enable ColBERT late interaction scoring (no extra model needed)")
+	rootCmd.Flags().BoolVar(&colbertAdaptiveSegments, "colbert-adaptive-segments", false, "Use adaptive sqrt(M) segment budgets for ColBERT scoring (experimental)")
 	rootCmd.Flags().IntVar(&rerankTopK, "rerank-topk", 50, "Number of candidates to fetch for reranking")
 
 	// Add subcommands
@@ -174,7 +177,10 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	opts.RerankTopK = rerankTopK
 
 	// Create searcher config
-	searchCfg := search.Config{Store: s}
+	searchCfg := search.Config{
+		Store:            s,
+		AdaptiveSegments: colbertAdaptiveSegments,
+	}
 
 	// Auto-enable ColBERT if MMap segment store exists (fast pre-computed segments)
 	// Can be explicitly enabled via --colbert or automatically with --rerank
@@ -323,6 +329,7 @@ var indexCmd = &cobra.Command{
 		if indexQuantize != "" {
 			cfg.Quantization = store.ParseQuantizationMode(indexQuantize)
 		}
+		cfg.AdaptiveColBERTSegments = indexColBERTAdaptiveSegments
 
 		ctx := context.Background()
 		indexer, err := index.NewWithConfig(path, cfg)
@@ -372,6 +379,7 @@ func init() {
 	indexCmd.Flags().IntVar(&indexWorkers, "workers", 0, "Number of parallel workers (default: 2x CPU cores, max 16)")
 	indexCmd.Flags().StringVar(&indexQuantize, "quantize", "int8", "Quantization mode: none (4x size), int8 (1x size), binary (0.125x size)")
 	indexCmd.Flags().BoolVar(&indexColBERTPreindex, "colbert-preindex", true, "Pre-compute ColBERT segment embeddings for fast query-time scoring (default: true)")
+	indexCmd.Flags().BoolVar(&indexColBERTAdaptiveSegments, "colbert-adaptive-segments", false, "Use adaptive sqrt(M) segment budgets during ColBERT preindexing (experimental)")
 }
 
 // Watch command

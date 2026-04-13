@@ -1,9 +1,15 @@
 package index
 
 import (
+	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	searchpkg "github.com/XiaoConstantine/sgrep/pkg/search"
+	"github.com/XiaoConstantine/sgrep/pkg/util"
 )
 
 func TestGetSgrepHome(t *testing.T) {
@@ -105,7 +111,7 @@ func TestIgnoreRules(t *testing.T) {
 
 func TestIgnoreRules_LoadMissing(t *testing.T) {
 	ir := &IgnoreRules{rootPath: "/nonexistent"}
-	ir.loadIgnoreFile("/nonexistent/.gitignore")
+	ir.ensureRulesLoaded("/nonexistent")
 }
 
 func TestIndexer_Fields(t *testing.T) {
@@ -131,6 +137,99 @@ func TestDefaultIndexConfig(t *testing.T) {
 	}
 	if cfg.EmbedConcurrency > 16 {
 		t.Errorf("EmbedConcurrency should be capped at 16, got %d", cfg.EmbedConcurrency)
+	}
+}
+
+func TestDecomposeDocumentForColBERT_AdaptiveUsesRawSegments(t *testing.T) {
+	content := makeSegmentedContent(16)
+
+	raw := searchpkg.DecomposeDocumentRaw(content)
+	adaptive := decomposeDocumentForColBERT(content, true)
+	legacy := decomposeDocumentForColBERT(content, false)
+	budget := searchpkg.AdaptiveSegmentBudget(content)
+
+	if len(raw) <= budget {
+		t.Fatalf("test content did not exceed adaptive budget: raw=%d budget=%d", len(raw), budget)
+	}
+	if len(adaptive) != len(raw) {
+		t.Fatalf("adaptive decomposition should keep raw segments before pooling: got %d want %d", len(adaptive), len(raw))
+	}
+	if len(legacy) >= len(adaptive) {
+		t.Fatalf("legacy decomposition should stay capped below raw adaptive split: legacy=%d adaptive=%d", len(legacy), len(adaptive))
+	}
+}
+
+func TestBuildStoredColBERTSegments_AdaptivePoolsToBudget(t *testing.T) {
+	segmentTexts := make([]string, 16)
+	embeddings := make([][]float32, len(segmentTexts))
+	budget := searchpkg.AdaptiveSegmentBudgetFromRawCount(len(segmentTexts))
+
+	rng := rand.New(rand.NewSource(42))
+	for i := range segmentTexts {
+		segmentTexts[i] = fmt.Sprintf("segment %d", i)
+		embeddings[i] = randomNormalizedEmbedding(rng, 768)
+	}
+
+	segments := buildStoredColBERTSegments(segmentTexts, embeddings, true)
+
+	if len(segments) > budget {
+		t.Fatalf("adaptive pooling exceeded budget: got %d want <= %d", len(segments), budget)
+	}
+	if len(segments) >= len(segmentTexts) {
+		t.Fatalf("adaptive pooling did not reduce segment count: got %d from %d", len(segments), len(segmentTexts))
+	}
+	for i, seg := range segments {
+		if seg.SegmentIdx != i {
+			t.Fatalf("segment %d has idx %d", i, seg.SegmentIdx)
+		}
+	}
+}
+
+func TestBuildStoredColBERTSegments_AdaptiveKeepsLegacySizedChunks(t *testing.T) {
+	segmentTexts := make([]string, 6)
+	embeddings := make([][]float32, len(segmentTexts))
+
+	rng := rand.New(rand.NewSource(99))
+	for i := range segmentTexts {
+		segmentTexts[i] = fmt.Sprintf("segment %d", i)
+		embeddings[i] = randomNormalizedEmbedding(rng, 768)
+	}
+
+	segments := buildStoredColBERTSegments(segmentTexts, embeddings, true)
+	if len(segments) != len(segmentTexts) {
+		t.Fatalf("legacy-sized chunk should remain unchanged: got %d want %d", len(segments), len(segmentTexts))
+	}
+}
+
+func TestBuildStoredColBERTSegments_AdaptiveMergesSimilarSegments(t *testing.T) {
+	rng := rand.New(rand.NewSource(7))
+	baseA := randomNormalizedEmbedding(rng, 768)
+	baseB := randomNormalizedEmbedding(rng, 768)
+	baseC := randomNormalizedEmbedding(rng, 768)
+	baseD := randomNormalizedEmbedding(rng, 768)
+
+	segmentTexts := []string{"a0", "a1", "a2", "b0", "b1", "b2", "c0", "c1", "c2", "d0", "d1", "d2"}
+	embeddings := [][]float32{
+		perturbEmbedding(baseA, 0.002),
+		perturbEmbedding(baseA, 0.003),
+		perturbEmbedding(baseA, 0.004),
+		perturbEmbedding(baseB, 0.002),
+		perturbEmbedding(baseB, 0.003),
+		perturbEmbedding(baseB, 0.004),
+		perturbEmbedding(baseC, 0.002),
+		perturbEmbedding(baseC, 0.003),
+		perturbEmbedding(baseC, 0.004),
+		perturbEmbedding(baseD, 0.002),
+		perturbEmbedding(baseD, 0.003),
+		perturbEmbedding(baseD, 0.004),
+	}
+
+	segments := buildStoredColBERTSegments(segmentTexts, embeddings, true)
+	if len(segments) >= len(segmentTexts) {
+		t.Fatalf("adaptive merge did not collapse similar segments: got %d from %d", len(segments), len(segmentTexts))
+	}
+	if len(segments) > searchpkg.AdaptiveSegmentBudgetFromRawCount(len(segmentTexts)) {
+		t.Fatalf("expected merged result to respect adaptive budget, got %d", len(segments))
 	}
 }
 
@@ -195,6 +294,38 @@ func TestIsTestFile(t *testing.T) {
 			}
 		})
 	}
+}
+
+func makeSegmentedContent(n int) string {
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&b, "func segment%d() {\n", i)
+		fmt.Fprintf(&b, "    value%d := %d\n", i, i)
+		fmt.Fprintf(&b, "    return value%d\n", i)
+		b.WriteString("}\n\n")
+	}
+	return b.String()
+}
+
+func randomNormalizedEmbedding(rng *rand.Rand, dims int) []float32 {
+	emb := make([]float32, dims)
+	for i := range emb {
+		emb[i] = rng.Float32()*2 - 1
+	}
+	return util.NormalizeVector(emb)
+}
+
+func perturbEmbedding(base []float32, noise float32) []float32 {
+	emb := make([]float32, len(base))
+	copy(emb, base)
+	for i := range emb {
+		delta := noise
+		if i%2 == 0 {
+			delta = -noise
+		}
+		emb[i] += delta
+	}
+	return util.NormalizeVector(emb)
 }
 
 func TestTruncateAtBoundary(t *testing.T) {
@@ -330,5 +461,59 @@ func TestIgnoreRules_EmptyLines(t *testing.T) {
 	}
 	if !ir.ShouldIgnore(filepath.Join(dir, "temp.tmp")) {
 		t.Error("should ignore .tmp files")
+	}
+}
+
+func TestIgnoreRules_NestedGitignore(t *testing.T) {
+	dir := t.TempDir()
+	genDir := filepath.Join(dir, "pkg", "generated")
+	if err := os.MkdirAll(genDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pkg", ".gitignore"), []byte("generated/\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ir := NewIgnoreRules(dir)
+
+	if !ir.ShouldIgnore(filepath.Join(genDir, "client.go")) {
+		t.Fatal("nested .gitignore directory rule should ignore descendants")
+	}
+	if ir.ShouldIgnore(filepath.Join(dir, "pkg", "service.go")) {
+		t.Fatal("nested .gitignore should not ignore siblings outside the rule")
+	}
+}
+
+func TestIgnoreRules_Negation(t *testing.T) {
+	dir := t.TempDir()
+	content := "*.go\n!keep.go\n"
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ir := NewIgnoreRules(dir)
+
+	if !ir.ShouldIgnore(filepath.Join(dir, "drop.go")) {
+		t.Fatal("expected generic ignore pattern to match")
+	}
+	if ir.ShouldIgnore(filepath.Join(dir, "keep.go")) {
+		t.Fatal("negated rule should re-include keep.go")
+	}
+}
+
+func TestIgnoreRules_AnchoredPattern(t *testing.T) {
+	dir := t.TempDir()
+	content := "/generated/\n"
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ir := NewIgnoreRules(dir)
+
+	if !ir.ShouldIgnorePath(filepath.Join(dir, "generated"), true) {
+		t.Fatal("anchored root directory should be ignored")
+	}
+	if ir.ShouldIgnorePath(filepath.Join(dir, "pkg", "generated"), true) {
+		t.Fatal("anchored pattern should not match nested directory")
 	}
 }

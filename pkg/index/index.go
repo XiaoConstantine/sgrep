@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	pathpkg "path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/XiaoConstantine/sgrep/pkg/chunk"
 	"github.com/XiaoConstantine/sgrep/pkg/embed"
+	searchpkg "github.com/XiaoConstantine/sgrep/pkg/search"
 	"github.com/XiaoConstantine/sgrep/pkg/store"
 	"github.com/XiaoConstantine/sgrep/pkg/util"
 	"github.com/fsnotify/fsnotify"
@@ -23,15 +26,18 @@ import (
 
 // IndexConfig holds indexer configuration.
 type IndexConfig struct {
-	Workers          int                    // Number of parallel file readers (default: 16)
-	EmbedConcurrency int                    // Concurrent embedding requests per batch (default: 8)
-	EmbedBatchSize   int                    // Number of chunks to batch for embedding (default: 64)
-	Quantization     store.QuantizationMode // Vector quantization mode (none, int8, binary)
-	SmartSkip        bool                   // Enable smart skipping for large repos (default: true)
+	Workers                 int                    // Number of parallel file readers (default: 16)
+	EmbedConcurrency        int                    // Concurrent embedding requests per batch (default: 8)
+	EmbedBatchSize          int                    // Number of chunks to batch for embedding (default: 64)
+	Quantization            store.QuantizationMode // Vector quantization mode (none, int8, binary)
+	SmartSkip               bool                   // Enable smart skipping for large repos (default: true)
+	AdaptiveColBERTSegments bool                   // Enable token-aware sqrt(M) ColBERT segment budgets
 }
 
 // Large repo threshold - above this we enable smart skipping
 const largeRepoThreshold = 1000
+
+const adaptiveColBERTPoolMinSim = 0.90
 
 // DefaultIndexConfig returns sensible defaults for indexing.
 func DefaultIndexConfig() *IndexConfig {
@@ -47,11 +53,12 @@ func DefaultIndexConfig() *IndexConfig {
 	embedBatchSize := 128
 
 	return &IndexConfig{
-		Workers:          workers,
-		EmbedConcurrency: embedConcurrency,
-		EmbedBatchSize:   embedBatchSize,
-		Quantization:     store.QuantizeInt8, // Default to int8 for 4x storage savings
-		SmartSkip:        true,               // Enable smart skipping for large repos
+		Workers:                 workers,
+		EmbedConcurrency:        embedConcurrency,
+		EmbedBatchSize:          embedBatchSize,
+		Quantization:            store.QuantizeInt8, // Default to int8 for 4x storage savings
+		SmartSkip:               true,               // Enable smart skipping for large repos
+		AdaptiveColBERTSegments: false,
 	}
 }
 
@@ -195,7 +202,7 @@ func (idx *Indexer) Index(ctx context.Context) error {
 
 		// Skip directories
 		if d.IsDir() {
-			if idx.ignore.ShouldIgnore(path) {
+			if idx.ignore.ShouldIgnorePath(path, true) {
 				skippedDirs++
 				return filepath.SkipDir
 			}
@@ -203,7 +210,7 @@ func (idx *Indexer) Index(ctx context.Context) error {
 		}
 
 		// Skip ignored files
-		if idx.ignore.ShouldIgnore(path) {
+		if idx.ignore.ShouldIgnorePath(path, false) {
 			skippedFiles++
 			return nil
 		}
@@ -689,56 +696,25 @@ func (idx *Indexer) refreshColBERTSegments(ctx context.Context, segmentStore sto
 		return nil
 	}
 
-	var allSegmentTexts []string
-	segmentCounts := make([]int, len(docs))
-
-	for i, doc := range docs {
+	chunks := make([]store.ChunkInfo, 0, len(docs))
+	for _, doc := range docs {
 		description := ""
 		if doc.Metadata != nil {
 			description = doc.Metadata["description"]
 		}
-		segments := decomposeDocumentForColBERT(util.CombineDescriptionContent(doc.Content, description))
-		segmentCounts[i] = len(segments)
-		allSegmentTexts = append(allSegmentTexts, segments...)
+		chunks = append(chunks, store.ChunkInfo{
+			ID:          doc.ID,
+			Content:     doc.Content,
+			Description: description,
+		})
 	}
 
-	if len(allSegmentTexts) == 0 {
-		return nil
-	}
-
-	embeddings, err := idx.embedBatchWithRetry(ctx, allSegmentTexts, 3)
+	chunkSegments, err := idx.buildColBERTChunkSegments(ctx, chunks)
 	if err != nil {
 		return err
 	}
-
-	for i := range embeddings {
-		embeddings[i] = util.NormalizeVectorCopy(embeddings[i])
-	}
-
-	chunkSegments := make(map[string][]store.ColBERTSegment, len(docs))
-	segIdx := 0
-	textIdx := 0
-
-	for i, doc := range docs {
-		count := segmentCounts[i]
-		if count == 0 {
-			continue
-		}
-
-		segments := make([]store.ColBERTSegment, count)
-		for j := 0; j < count; j++ {
-			quantized, scale, min := util.QuantizeInt8(embeddings[segIdx])
-			segments[j] = store.ColBERTSegment{
-				SegmentIdx:    j,
-				Text:          allSegmentTexts[textIdx],
-				EmbeddingInt8: quantized,
-				QuantScale:    scale,
-				QuantMin:      min,
-			}
-			segIdx++
-			textIdx++
-		}
-		chunkSegments[doc.ID] = segments
+	if len(chunkSegments) == 0 {
+		return nil
 	}
 
 	return segmentStore.StoreColBERTSegmentsBatch(ctx, chunkSegments)
@@ -935,7 +911,7 @@ func (idx *Indexer) Watch(ctx context.Context) error {
 		if err != nil {
 			return nil
 		}
-		if d.IsDir() && !idx.ignore.ShouldIgnore(path) {
+		if d.IsDir() && !idx.ignore.ShouldIgnorePath(path, true) {
 			return watcher.Add(path)
 		}
 		return nil
@@ -965,8 +941,9 @@ func (idx *Indexer) Watch(ctx context.Context) error {
 		}
 
 		for _, path := range files {
-			if isCodeFile(path) && !idx.ignore.ShouldIgnore(path) {
-				if _, err := os.Stat(path); err == nil {
+			info, statErr := os.Stat(path)
+			if isCodeFile(path) && !idx.ignore.ShouldIgnorePath(path, statErr == nil && info.IsDir()) {
+				if statErr == nil {
 					if err := idx.syncFile(ctx, path, refreshColBERT, false); err != nil {
 						fmt.Fprintf(os.Stderr, "Error indexing %s: %v\n", path, err)
 					} else {
@@ -1034,96 +1011,298 @@ func (idx *Indexer) Store() (store.Storer, error) {
 
 // IgnoreRules handles .gitignore and .sgrepignore patterns.
 type IgnoreRules struct {
-	patterns []string
-	rootPath string
+	rootPath   string
+	mu         sync.Mutex
+	loadedDirs map[string]bool
+	rules      []ignoreRule
+}
+
+type ignoreRule struct {
+	baseRel  string
+	pattern  string
+	negated  bool
+	dirOnly  bool
+	anchored bool
+	hasSlash bool
 }
 
 func NewIgnoreRules(rootPath string) *IgnoreRules {
-	ir := &IgnoreRules{rootPath: rootPath}
+	rootPath = filepath.Clean(rootPath)
+	ir := &IgnoreRules{
+		rootPath:   rootPath,
+		loadedDirs: make(map[string]bool),
+	}
 
 	// Default ignores
-	ir.patterns = append(ir.patterns,
-		".git",
-		".sgrep",
-		"node_modules",
-		"vendor",
-		"__pycache__",
-		".idea",
-		".vscode",
-		"dist",
-		"build",
+	ir.addRule("", ".git/")
+	ir.addRule("", ".sgrep/")
+	ir.addRule("", "node_modules/")
+	ir.addRule("", "vendor/")
+	ir.addRule("", "__pycache__/")
+	ir.addRule("", ".idea/")
+	ir.addRule("", ".vscode/")
+	ir.addRule("", "dist/")
+	ir.addRule("", "build/")
+	for _, pattern := range []string{
 		"*.min.js",
 		"*.bundle.js",
 		"go.sum",
 		"package-lock.json",
 		"yarn.lock",
-	)
+	} {
+		ir.addRule("", pattern)
+	}
 
-	// Load .gitignore
-	ir.loadIgnoreFile(filepath.Join(rootPath, ".gitignore"))
-
-	// Load .sgrepignore
-	ir.loadIgnoreFile(filepath.Join(rootPath, ".sgrepignore"))
+	ir.ensureRulesLoaded(rootPath)
 
 	return ir
 }
 
-func (ir *IgnoreRules) loadIgnoreFile(path string) {
+func (ir *IgnoreRules) addRule(baseRel, raw string) {
+	if rule, ok := parseIgnoreRule(baseRel, raw); ok {
+		ir.rules = append(ir.rules, rule)
+	}
+}
+
+func parseIgnoreRule(baseRel, line string) (ignoreRule, bool) {
+	line = strings.TrimSpace(strings.TrimRight(line, "\r"))
+	if line == "" {
+		return ignoreRule{}, false
+	}
+	if strings.HasPrefix(line, `\#`) || strings.HasPrefix(line, `\!`) {
+		line = line[1:]
+	}
+	if strings.HasPrefix(line, "#") {
+		return ignoreRule{}, false
+	}
+
+	negated := strings.HasPrefix(line, "!")
+	if negated {
+		line = strings.TrimPrefix(line, "!")
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return ignoreRule{}, false
+	}
+
+	dirOnly := strings.HasSuffix(line, "/")
+	line = strings.TrimSuffix(line, "/")
+	anchored := strings.HasPrefix(line, "/")
+	line = strings.TrimPrefix(line, "/")
+	line = filepath.ToSlash(filepath.Clean(line))
+	if line == "." || line == "" {
+		return ignoreRule{}, false
+	}
+
+	return ignoreRule{
+		baseRel:  normalizeIgnoreRel(baseRel),
+		pattern:  line,
+		negated:  negated,
+		dirOnly:  dirOnly,
+		anchored: anchored,
+		hasSlash: strings.Contains(line, "/"),
+	}, true
+}
+
+func normalizeIgnoreRel(rel string) string {
+	rel = filepath.ToSlash(filepath.Clean(rel))
+	if rel == "." {
+		return ""
+	}
+	return rel
+}
+
+func (ir *IgnoreRules) ensureRulesLoaded(targetPath string) {
+	targetPath = filepath.Clean(targetPath)
+	dirPath := targetPath
+	if info, err := os.Stat(targetPath); err == nil && !info.IsDir() {
+		dirPath = filepath.Dir(targetPath)
+	}
+
+	relDir, err := filepath.Rel(ir.rootPath, dirPath)
+	if err != nil || strings.HasPrefix(relDir, "..") {
+		return
+	}
+	relDir = normalizeIgnoreRel(relDir)
+
+	ir.mu.Lock()
+	defer ir.mu.Unlock()
+	if ir.loadedDirs == nil {
+		ir.loadedDirs = make(map[string]bool)
+	}
+
+	current := ir.rootPath
+	ir.loadIgnoreFilesInDirLocked(current)
+	if relDir == "" {
+		return
+	}
+
+	for _, part := range strings.Split(relDir, "/") {
+		current = filepath.Join(current, part)
+		ir.loadIgnoreFilesInDirLocked(current)
+	}
+}
+
+func (ir *IgnoreRules) loadIgnoreFilesInDirLocked(dir string) {
+	dir = filepath.Clean(dir)
+	if ir.loadedDirs[dir] {
+		return
+	}
+	ir.loadIgnoreFileLocked(filepath.Join(dir, ".gitignore"), dir)
+	ir.loadIgnoreFileLocked(filepath.Join(dir, ".sgrepignore"), dir)
+	ir.loadedDirs[dir] = true
+}
+
+func (ir *IgnoreRules) loadIgnoreFileLocked(path string, baseDir string) {
 	f, err := os.Open(path)
 	if err != nil {
 		return
 	}
 	defer func() { _ = f.Close() }()
 
+	baseRel, err := filepath.Rel(ir.rootPath, baseDir)
+	if err != nil {
+		return
+	}
+
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" && !strings.HasPrefix(line, "#") {
-			ir.patterns = append(ir.patterns, line)
-		}
+		ir.addRule(baseRel, scanner.Text())
 	}
 }
 
 func (ir *IgnoreRules) ShouldIgnore(path string) bool {
+	info, err := os.Stat(path)
+	return ir.ShouldIgnorePath(path, err == nil && info.IsDir())
+}
+
+func (ir *IgnoreRules) ShouldIgnorePath(path string, isDir bool) bool {
+	ir.ensureRulesLoaded(path)
+
 	relPath, err := filepath.Rel(ir.rootPath, path)
-	if err != nil {
+	if err != nil || strings.HasPrefix(relPath, "..") {
 		return false
 	}
+	relPath = normalizeIgnoreRel(relPath)
 
 	// Never ignore root
 	if relPath == "." {
 		return false
 	}
 
-	base := filepath.Base(path)
+	ir.mu.Lock()
+	defer ir.mu.Unlock()
 
-	for _, pattern := range ir.patterns {
-		// Skip patterns that would match regular files (like binary names)
-		// Only match if it looks like a directory pattern or glob
-		if !strings.Contains(pattern, "*") && !strings.Contains(pattern, "/") {
-			// For simple names, only match hidden dirs or known dirs
-			if !strings.HasPrefix(pattern, ".") && !isKnownIgnoreDir(pattern) {
-				continue
+	ignored := false
+	for _, rule := range ir.rules {
+		if !pathWithinIgnoreBase(relPath, rule.baseRel) {
+			continue
+		}
+		candidate := relPath
+		if rule.baseRel != "" {
+			if relPath == rule.baseRel {
+				candidate = ""
+			} else {
+				candidate = strings.TrimPrefix(relPath, rule.baseRel+"/")
 			}
 		}
-
-		// Check base name exact match
-		if matched, _ := filepath.Match(pattern, base); matched {
-			return true
-		}
-		// Check if path component matches (not substring)
-		parts := strings.Split(relPath, string(filepath.Separator))
-		for _, part := range parts {
-			if part == pattern {
-				return true
-			}
-			if matched, _ := filepath.Match(pattern, part); matched {
-				return true
-			}
+		if rule.matches(candidate, isDir) {
+			ignored = !rule.negated
 		}
 	}
 
+	return ignored
+}
+
+func pathWithinIgnoreBase(relPath, baseRel string) bool {
+	if baseRel == "" {
+		return true
+	}
+	return relPath == baseRel || strings.HasPrefix(relPath, baseRel+"/")
+}
+
+func (r ignoreRule) matches(candidate string, isDir bool) bool {
+	if candidate == "" {
+		return false
+	}
+	if r.dirOnly {
+		for _, prefix := range directoryPrefixes(candidate, isDir) {
+			if r.matchesPath(prefix) {
+				return true
+			}
+		}
+		return false
+	}
+	return r.matchesPath(candidate)
+}
+
+func (r ignoreRule) matchesPath(candidate string) bool {
+	if candidate == "" {
+		return false
+	}
+	candidate = filepath.ToSlash(candidate)
+
+	if r.hasSlash {
+		return matchIgnoreGlob(r.pattern, candidate)
+	}
+	if r.anchored {
+		if strings.Contains(candidate, "/") {
+			return false
+		}
+		return matchIgnoreGlob(r.pattern, candidate)
+	}
+
+	for _, part := range strings.Split(candidate, "/") {
+		if matchIgnoreGlob(r.pattern, part) {
+			return true
+		}
+	}
 	return false
+}
+
+func directoryPrefixes(candidate string, isDir bool) []string {
+	parts := strings.Split(filepath.ToSlash(candidate), "/")
+	limit := len(parts)
+	if !isDir && limit == 0 {
+		return nil
+	}
+
+	prefixes := make([]string, 0, limit)
+	for i := 1; i <= limit; i++ {
+		prefixes = append(prefixes, strings.Join(parts[:i], "/"))
+	}
+	return prefixes
+}
+
+func matchIgnoreGlob(pattern, candidate string) bool {
+	if strings.Contains(pattern, "**") {
+		return doublestarMatch(pattern, candidate)
+	}
+	matched, err := pathpkg.Match(pattern, candidate)
+	return err == nil && matched
+}
+
+func doublestarMatch(pattern, candidate string) bool {
+	var re strings.Builder
+	re.WriteString("^")
+	for i := 0; i < len(pattern); i++ {
+		switch pattern[i] {
+		case '*':
+			if i+1 < len(pattern) && pattern[i+1] == '*' {
+				re.WriteString(".*")
+				i++
+			} else {
+				re.WriteString(`[^/]*`)
+			}
+		case '?':
+			re.WriteString(`[^/]`)
+		default:
+			re.WriteString(regexp.QuoteMeta(string(pattern[i])))
+		}
+	}
+	re.WriteString("$")
+	matched, err := regexp.MatchString(re.String(), candidate)
+	return err == nil && matched
 }
 
 // isKnownIgnoreDir returns true for directory names that should always be ignored.
@@ -1313,61 +1492,17 @@ func (idx *Indexer) ComputeColBERTSegments(ctx context.Context) (int, error) {
 			break
 		}
 
-		// Collect all segments for this batch
-		var allSegmentTexts []string
-		segmentCounts := make([]int, len(chunks))
-
-		for j, chunk := range chunks {
-			segments := decomposeDocumentForColBERT(util.CombineDescriptionContent(chunk.Content, chunk.Description))
-			segmentCounts[j] = len(segments)
-			allSegmentTexts = append(allSegmentTexts, segments...)
+		chunkSegments, err := idx.buildColBERTChunkSegments(ctx, chunks)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to build segments: %v\n", err)
+			offset += len(chunks)
+			continue
 		}
 
-		if len(allSegmentTexts) == 0 {
+		if len(chunkSegments) == 0 {
 			offset += len(chunks)
 			processed += len(chunks)
 			continue
-		}
-
-		// Embed all segments in one batch
-		embeddings, err := idx.embedBatchWithRetry(ctx, allSegmentTexts, 3)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to embed segments: %v\n", err)
-			offset += len(chunks)
-			continue
-		}
-
-		// Normalize embeddings
-		for k := range embeddings {
-			embeddings[k] = util.NormalizeVectorCopy(embeddings[k])
-		}
-
-		// Group segments by chunk with int8 quantization for efficient storage
-		chunkSegments := make(map[string][]store.ColBERTSegment)
-		segIdx := 0
-		textIdx := 0
-
-		for j, chunk := range chunks {
-			count := segmentCounts[j]
-			if count == 0 {
-				continue
-			}
-
-			segments := make([]store.ColBERTSegment, count)
-			for k := 0; k < count; k++ {
-				// Quantize to int8 for 4x storage savings
-				quantized, scale, min := util.QuantizeInt8(embeddings[segIdx])
-				segments[k] = store.ColBERTSegment{
-					SegmentIdx:    k,
-					Text:          allSegmentTexts[textIdx],
-					EmbeddingInt8: quantized,
-					QuantScale:    scale,
-					QuantMin:      min,
-				}
-				segIdx++
-				textIdx++
-			}
-			chunkSegments[chunk.ID] = segments
 		}
 
 		// Store batch in SQLite
@@ -1528,83 +1663,99 @@ func (idx *Indexer) ExportVectorsToMMap(ctx context.Context, outputDir string) (
 	return mmapStore.VectorCount(), nil
 }
 
-// decomposeDocumentForColBERT splits a document into meaningful segments for ColBERT.
-// Uses the same logic as the search package's DecomposeDocument.
-func decomposeDocumentForColBERT(content string) []string {
-	content = strings.TrimSpace(content)
-	if content == "" {
-		return nil
+func (idx *Indexer) useAdaptiveColBERTSegments() bool {
+	return idx.indexCfg != nil && idx.indexCfg.AdaptiveColBERTSegments
+}
+
+func (idx *Indexer) buildColBERTChunkSegments(ctx context.Context, chunks []store.ChunkInfo) (map[string][]store.ColBERTSegment, error) {
+	if len(chunks) == 0 {
+		return nil, nil
 	}
 
-	var segments []string
+	chunkTexts := make([][]string, len(chunks))
+	var allSegmentTexts []string
 
-	// Split by newlines first (code structure)
-	lines := strings.Split(content, "\n")
+	for i, chunk := range chunks {
+		combined := util.CombineDescriptionContent(chunk.Content, chunk.Description)
+		segments := decomposeDocumentForColBERT(combined, idx.useAdaptiveColBERTSegments())
+		chunkTexts[i] = segments
+		allSegmentTexts = append(allSegmentTexts, segments...)
+	}
 
-	var currentSegment strings.Builder
-	currentLen := 0
+	if len(allSegmentTexts) == 0 {
+		return map[string][]store.ColBERTSegment{}, nil
+	}
 
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			// Empty line: flush current segment if substantial
-			if currentLen > 20 {
-				segments = append(segments, strings.TrimSpace(currentSegment.String()))
-				currentSegment.Reset()
-				currentLen = 0
-			}
+	embeddings, err := idx.embedBatchWithRetry(ctx, allSegmentTexts, 3)
+	if err != nil {
+		return nil, err
+	}
+
+	for i := range embeddings {
+		embeddings[i] = util.NormalizeVectorCopy(embeddings[i])
+	}
+
+	chunkSegments := make(map[string][]store.ColBERTSegment, len(chunks))
+	segIdx := 0
+	adaptive := idx.useAdaptiveColBERTSegments()
+
+	for i, chunk := range chunks {
+		segmentTexts := chunkTexts[i]
+		count := len(segmentTexts)
+		if count == 0 {
 			continue
 		}
 
-		// Check if this line starts a new logical unit
-		isNewUnit := strings.HasPrefix(line, "func ") ||
-			strings.HasPrefix(line, "type ") ||
-			strings.HasPrefix(line, "//") ||
-			strings.HasPrefix(line, "def ") ||
-			strings.HasPrefix(line, "class ") ||
-			strings.HasPrefix(line, "#")
+		chunkSegments[chunk.ID] = buildStoredColBERTSegments(
+			segmentTexts,
+			embeddings[segIdx:segIdx+count],
+			adaptive,
+		)
+		segIdx += count
+	}
 
-		if isNewUnit && currentLen > 20 {
-			segments = append(segments, strings.TrimSpace(currentSegment.String()))
-			currentSegment.Reset()
-			currentLen = 0
-		}
+	return chunkSegments, nil
+}
 
-		currentSegment.WriteString(line)
-		currentSegment.WriteString(" ")
-		currentLen += len(line)
+func buildStoredColBERTSegments(segmentTexts []string, embeddings [][]float32, adaptive bool) []store.ColBERTSegment {
+	if len(segmentTexts) == 0 {
+		return nil
+	}
 
-		// Flush if segment is getting long
-		if currentLen > 200 {
-			segments = append(segments, strings.TrimSpace(currentSegment.String()))
-			currentSegment.Reset()
-			currentLen = 0
+	segments := make([]store.ColBERTSegment, len(segmentTexts))
+	for i := range segmentTexts {
+		quantized, scale, min := util.QuantizeInt8(embeddings[i])
+		segments[i] = store.ColBERTSegment{
+			SegmentIdx:    i,
+			Text:          segmentTexts[i],
+			EmbeddingInt8: quantized,
+			QuantScale:    scale,
+			QuantMin:      min,
 		}
 	}
 
-	// Flush remaining
-	if currentLen > 10 {
-		segments = append(segments, strings.TrimSpace(currentSegment.String()))
+	if !adaptive {
+		return segments
 	}
 
-	// Limit segments to avoid explosion
-	if len(segments) > 10 {
-		// Keep first, last, and sample from middle
-		sampled := make([]string, 0, 10)
-		sampled = append(sampled, segments[0])
-		step := len(segments) / 8
-		if step < 1 {
-			step = 1
-		}
-		for i := step; i < len(segments)-1; i += step {
-			sampled = append(sampled, segments[i])
-			if len(sampled) >= 9 {
-				break
-			}
-		}
-		sampled = append(sampled, segments[len(segments)-1])
-		segments = sampled
+	target := searchpkg.AdaptiveSegmentBudgetFromRawCount(len(segmentTexts))
+	if len(segments) <= target {
+		return segments
 	}
 
+	pooler := store.NewSegmentPooler(target, adaptiveColBERTPoolMinSim)
+	segments = pooler.PoolAndMerge(segments)
+	for i := range segments {
+		segments[i].SegmentIdx = i
+	}
 	return segments
+}
+
+// decomposeDocumentForColBERT splits a document into meaningful segments for ColBERT.
+// Adaptive mode keeps the raw decomposition and relies on embedding-aware pooling.
+func decomposeDocumentForColBERT(content string, adaptive bool) []string {
+	if adaptive {
+		return searchpkg.DecomposeDocumentRaw(content)
+	}
+	return searchpkg.DecomposeDocument(content)
 }

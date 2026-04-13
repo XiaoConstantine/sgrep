@@ -334,7 +334,7 @@ func validateToken(token string) (*jwt.Claims, error) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			_ = decomposeDocument(shortDoc)
+			_ = DecomposeDocument(shortDoc)
 		}
 	})
 
@@ -342,7 +342,7 @@ func validateToken(token string) (*jwt.Claims, error) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			_ = decomposeDocument(longDoc)
+			_ = DecomposeDocument(longDoc)
 		}
 	})
 }
