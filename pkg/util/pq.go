@@ -17,13 +17,13 @@ import (
 //   - k=256 centroids (8-bit codes)
 //   - Result: 96 bytes per vector
 type ProductQuantizer struct {
-	dims        int         // Original vector dimensions (e.g., 768)
-	m           int         // Number of subspaces (e.g., 96)
-	k           int         // Centroids per subspace (e.g., 256)
-	subDims     int         // Dimensions per subspace (dims/m)
-	centroids   [][]float32 // [m][k*subDims] - codebook for each subspace
-	trained     bool
-	trainingMu  sync.Mutex
+	dims       int         // Original vector dimensions (e.g., 768)
+	m          int         // Number of subspaces (e.g., 96)
+	k          int         // Centroids per subspace (e.g., 256)
+	subDims    int         // Dimensions per subspace (dims/m)
+	centroids  [][]float32 // [m][k*subDims] - codebook for each subspace
+	trained    bool
+	trainingMu sync.Mutex
 }
 
 // PQConfig holds Product Quantization configuration.
@@ -91,40 +91,50 @@ func (pq *ProductQuantizer) Train(vectors [][]float32, iterations int) error {
 		iterations = 25
 	}
 
-	// Train each subspace independently
-	for sub := 0; sub < pq.m; sub++ {
-		// Extract subvectors for this subspace
-		subvectors := make([][]float32, len(vectors))
-		for i, vec := range vectors {
-			if len(vec) != pq.dims {
-				return fmt.Errorf("vector %d has wrong dims: %d (expected %d)", i, len(vec), pq.dims)
-			}
-			start := sub * pq.subDims
-			subvectors[i] = vec[start : start+pq.subDims]
-		}
-
-		// Run k-means clustering
-		centers := pq.kmeans(subvectors, pq.k, iterations)
-
-		// Store centroids in flat array
-		for c := 0; c < pq.k; c++ {
-			copy(pq.centroids[sub][c*pq.subDims:(c+1)*pq.subDims], centers[c])
+	for i, vec := range vectors {
+		if len(vec) != pq.dims {
+			return fmt.Errorf("vector %d has wrong dims: %d (expected %d)", i, len(vec), pq.dims)
 		}
 	}
 
+	var wg sync.WaitGroup
+
+	// Train each subspace independently.
+	for sub := 0; sub < pq.m; sub++ {
+		sub := sub
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			subvectors := make([][]float32, len(vectors))
+			start := sub * pq.subDims
+			end := start + pq.subDims
+			for i, vec := range vectors {
+				subvectors[i] = vec[start:end]
+			}
+
+			rng := rand.New(rand.NewSource(int64(42 + sub)))
+			centers := pq.kmeans(subvectors, pq.k, iterations, rng)
+			for c := 0; c < pq.k; c++ {
+				copy(pq.centroids[sub][c*pq.subDims:(c+1)*pq.subDims], centers[c])
+			}
+		}()
+	}
+
+	wg.Wait()
 	pq.trained = true
 	return nil
 }
 
 // kmeans runs k-means clustering on subvectors.
-func (pq *ProductQuantizer) kmeans(subvectors [][]float32, k, iterations int) [][]float32 {
+func (pq *ProductQuantizer) kmeans(subvectors [][]float32, k, iterations int, rng *rand.Rand) [][]float32 {
 	n := len(subvectors)
 	d := pq.subDims
 
 	// Initialize centroids with k-means++ for better convergence
 	centers := make([][]float32, k)
 	centers[0] = make([]float32, d)
-	copy(centers[0], subvectors[rand.Intn(n)])
+	copy(centers[0], subvectors[rng.Intn(n)])
 
 	// K-means++ initialization
 	distances := make([]float64, n)
@@ -144,7 +154,7 @@ func (pq *ProductQuantizer) kmeans(subvectors [][]float32, k, iterations int) []
 		}
 
 		// Sample proportional to distance squared
-		r := rand.Float64() * totalDist
+		r := rng.Float64() * totalDist
 		var cumulative float64
 		selected := 0
 		for i, d := range distances {

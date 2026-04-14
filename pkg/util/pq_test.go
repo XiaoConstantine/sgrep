@@ -365,3 +365,39 @@ func BenchmarkPQVsInt8(b *testing.B) {
 	b.Logf("Int8: %d bytes", dims)
 	b.Logf("PQ: %d bytes", len(docPQ))
 }
+
+func BenchmarkPQTrainColBERT(b *testing.B) {
+	rng := rand.New(rand.NewSource(42))
+	const (
+		nVectors   = 4096
+		dims       = 768
+		subspaces  = 6
+		centroids  = 256
+		iterations = 10
+	)
+
+	vectors := make([][]float32, nVectors)
+	for i := range vectors {
+		vectors[i] = make([]float32, dims)
+		for j := range vectors[i] {
+			vectors[i][j] = rng.Float32()*2 - 1
+		}
+		vectors[i] = NormalizeVector(vectors[i])
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		pq, err := NewProductQuantizer(PQConfig{
+			Dims:       dims,
+			Subspaces:  subspaces,
+			Centroids:  centroids,
+			Iterations: iterations,
+		})
+		if err != nil {
+			b.Fatalf("NewProductQuantizer: %v", err)
+		}
+		if err := pq.Train(vectors, iterations); err != nil {
+			b.Fatalf("Train: %v", err)
+		}
+	}
+}

@@ -294,6 +294,7 @@ func (idx *Indexer) Index(ctx context.Context) error {
 	var readerWg sync.WaitGroup
 	var batcherWg sync.WaitGroup
 	var writerWg sync.WaitGroup
+	var chunkEmbedWall atomic.Int64
 
 	// Stage 3: Single DB writer goroutine
 	// Note: This goroutine exits when docChan is closed (done after embedWg.Wait())
@@ -333,6 +334,7 @@ func (idx *Indexer) Index(ctx context.Context) error {
 				embedTimer := util.NewTimer("embedding")
 				embeddings, err := idx.embedBatchWithRetry(ctx, texts, 3)
 				embedDuration := embedTimer.Stop()
+				chunkEmbedWall.Add(embedDuration.Nanoseconds())
 				stats.RecordOp("embedding", embedDuration, int64(len(texts)))
 
 				if err != nil {
@@ -373,6 +375,7 @@ func (idx *Indexer) Index(ctx context.Context) error {
 			embedTimer := util.NewTimer("embedding")
 			embeddings, err := idx.embedBatchWithRetry(ctx, texts, 3)
 			embedDuration := embedTimer.Stop()
+			chunkEmbedWall.Add(embedDuration.Nanoseconds())
 			stats.RecordOp("embedding", embedDuration, int64(len(texts)))
 
 			if err != nil {
@@ -445,6 +448,7 @@ func (idx *Indexer) Index(ctx context.Context) error {
 	close(chunkChan) // Signal batcher that no more chunks coming
 	batcherWg.Wait() // Batcher closes docChan when done
 	writerWg.Wait()  // Writer exits when docChan is closed
+	fmt.Printf("Chunk embedding wall time: %v\n", time.Duration(chunkEmbedWall.Load()).Round(time.Millisecond))
 
 	// Flush any remaining buffered embeddings
 	flushTimer := util.NewTimer("flush")
@@ -1673,6 +1677,7 @@ func (idx *Indexer) computeFreshPQSegmentsFromScratch(ctx context.Context, segme
 	rng := rand.New(rand.NewSource(42))
 	sample := make([][]float32, 0, colbertPQSampleSize)
 	totalVectors := 0
+	scratchBuildStart := time.Now()
 
 	for {
 		chunks, err := segmentStore.GetChunksForColBERT(ctx, fetchBatchSize, offset)
@@ -1716,6 +1721,7 @@ func (idx *Indexer) computeFreshPQSegmentsFromScratch(ctx context.Context, segme
 	if err := scratch.Close(); err != nil {
 		return processed, fmt.Errorf("close ColBERT PQ scratch file: %w", err)
 	}
+	fmt.Printf("ColBERT scratch build wall time: %v\n", time.Since(scratchBuildStart).Round(time.Millisecond))
 
 	if totalVectors < colbertPQMinTrainingVectors {
 		fmt.Printf("Skipping PQ6: only %d segment vectors available, keeping int8\n", totalVectors)
@@ -1741,9 +1747,11 @@ func (idx *Indexer) computeFreshPQSegmentsFromScratch(ctx context.Context, segme
 	if err != nil {
 		return processed, fmt.Errorf("create colbert pq: %w", err)
 	}
+	trainStart := time.Now()
 	if err := pq.Train(sample, colbertPQTrainIterations); err != nil {
 		return processed, fmt.Errorf("train colbert pq: %w", err)
 	}
+	fmt.Printf("ColBERT PQ train wall time: %v\n", time.Since(trainStart).Round(time.Millisecond))
 
 	idx.colbertPQ = pq
 	written, err := idx.rewriteScratchColBERTSegments(ctx, segmentStore, scratchPath, totalChunks)
