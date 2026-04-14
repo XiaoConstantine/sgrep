@@ -137,11 +137,12 @@ func (s *MMapSegmentStore) load() error {
 		return fmt.Errorf("invalid magic: %s", string(data[0:4]))
 	}
 	version := binary.LittleEndian.Uint32(data[4:8])
-	headerSize := mmapHeaderSizeV1
-	indexOffset := mmapHeaderSizeV1
+	headerSize := 0
+	indexOffset := 0
 	dataOffset := 0
 	switch version {
 	case mmapVersionV1:
+		indexOffset = mmapHeaderSizeV1
 		s.codec = ColBERTCodecInt8
 		s.pq = nil
 		s.dims = int(binary.LittleEndian.Uint32(data[8:12]))

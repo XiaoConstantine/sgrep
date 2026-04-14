@@ -136,29 +136,24 @@ func (pq *ProductQuantizer) kmeans(subvectors [][]float32, k, iterations int, rn
 	centers[0] = make([]float32, d)
 	copy(centers[0], subvectors[rng.Intn(n)])
 
-	// K-means++ initialization
+	// K-means++ initialization. Track each point's distance to its nearest
+	// chosen centroid so we can update incrementally instead of recomputing the
+	// full nearest-centroid search on every centroid add.
 	distances := make([]float64, n)
-	for c := 1; c < k; c++ {
-		// Compute distance to nearest centroid for each point
-		var totalDist float64
-		for i, sv := range subvectors {
-			minDist := math.MaxFloat64
-			for j := 0; j < c; j++ {
-				dist := pq.l2DistanceSquared(sv, centers[j])
-				if dist < minDist {
-					minDist = dist
-				}
-			}
-			distances[i] = minDist
-			totalDist += minDist
-		}
+	var totalDist float64
+	for i, sv := range subvectors {
+		dist := pq.l2DistanceSquared(sv, centers[0])
+		distances[i] = dist
+		totalDist += dist
+	}
 
+	for c := 1; c < k; c++ {
 		// Sample proportional to distance squared
 		r := rng.Float64() * totalDist
 		var cumulative float64
-		selected := 0
-		for i, d := range distances {
-			cumulative += d
+		selected := n - 1
+		for i, dist := range distances {
+			cumulative += dist
 			if cumulative >= r {
 				selected = i
 				break
@@ -167,6 +162,18 @@ func (pq *ProductQuantizer) kmeans(subvectors [][]float32, k, iterations int, rn
 
 		centers[c] = make([]float32, d)
 		copy(centers[c], subvectors[selected])
+		if c == k-1 {
+			break
+		}
+
+		totalDist = 0
+		for i, sv := range subvectors {
+			dist := pq.l2DistanceSquared(sv, centers[c])
+			if dist < distances[i] {
+				distances[i] = dist
+			}
+			totalDist += distances[i]
+		}
 	}
 
 	// K-means iterations

@@ -2052,10 +2052,6 @@ func (idx *Indexer) useAdaptiveColBERTSegments() bool {
 	return idx.indexCfg != nil && idx.indexCfg.AdaptiveColBERTSegments
 }
 
-func (idx *Indexer) usePQColBERTCodec() bool {
-	return idx.colbertCodec == store.ColBERTCodecPQ6 && idx.colbertPQ != nil
-}
-
 func (idx *Indexer) buildColBERTChunkSegments(ctx context.Context, chunks []store.ChunkInfo) (map[string][]store.ColBERTSegment, error) {
 	floatSegments, err := idx.buildFloat32ColBERTChunkSegments(ctx, chunks)
 	if err != nil {
