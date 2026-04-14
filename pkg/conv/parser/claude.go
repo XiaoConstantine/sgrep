@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"bufio"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -19,16 +18,16 @@ type ClaudeParser struct {
 
 // claudeMessage represents a single message in Claude Code JSONL format.
 type claudeMessage struct {
-	ParentUUID   *string `json:"parentUuid"`
-	IsSidechain  bool    `json:"isSidechain"`
-	UserType     string  `json:"userType"`
-	CWD          string  `json:"cwd"`
-	SessionID    string  `json:"sessionId"`
-	Version      string  `json:"version"`
-	GitBranch    string  `json:"gitBranch"`
-	GitCommit    string  `json:"gitCommit"`
-	Type         string  `json:"type"`
-	Message      struct {
+	ParentUUID  *string `json:"parentUuid"`
+	IsSidechain bool    `json:"isSidechain"`
+	UserType    string  `json:"userType"`
+	CWD         string  `json:"cwd"`
+	SessionID   string  `json:"sessionId"`
+	Version     string  `json:"version"`
+	GitBranch   string  `json:"gitBranch"`
+	GitCommit   string  `json:"gitCommit"`
+	Type        string  `json:"type"`
+	Message     struct {
 		Role    string `json:"role"`
 		Content any    `json:"content"` // Can be string or []interface{} (tool use)
 	} `json:"message"`
@@ -92,27 +91,17 @@ func (p *ClaudeParser) Parse(sourcePath string) ([]*conv.Session, error) {
 	// Group messages by session ID
 	sessionMessages := make(map[string][]claudeMessage)
 
-	scanner := bufio.NewScanner(file)
-	// Increase buffer size for long lines (Claude conversations can have very large content)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 64*1024*1024) // 64MB max
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if len(line) == 0 {
-			continue
-		}
-
+	err = forEachJSONLLine(file, func(line []byte) error {
 		var msg claudeMessage
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+		if err := json.Unmarshal(line, &msg); err != nil {
 			// Skip malformed lines
-			continue
+			return nil
 		}
 
 		sessionMessages[msg.SessionID] = append(sessionMessages[msg.SessionID], msg)
-	}
-
-	if err := scanner.Err(); err != nil {
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
 

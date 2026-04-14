@@ -18,6 +18,68 @@ func TestNewStore(t *testing.T) {
 	defer func() { _ = store.Close() }()
 }
 
+func TestNewStore_DoesNotCreateLegacyVectorIndex(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := NewStore(StoreConfig{DBPath: dbPath, Dims: defaultDims})
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	var count int
+	err = store.db.QueryRow(`
+		SELECT COUNT(*) FROM sqlite_master
+		WHERE name IN ('idx_turn_embeddings_vec', 'idx_turn_embeddings_vec_shadow', 'idx_turn_embeddings_vec_shadow_idx')
+	`).Scan(&count)
+	if err != nil {
+		t.Fatalf("failed to inspect sqlite_master: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected no legacy vector index artifacts, found %d", count)
+	}
+}
+
+func TestNewStore_DropsLegacyVectorIndexArtifacts(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := NewStore(StoreConfig{DBPath: dbPath, Dims: defaultDims})
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	legacyStatements := []string{
+		`CREATE INDEX idx_turn_embeddings_vec ON conv_turn_embeddings(turn_id)`,
+		`CREATE TABLE idx_turn_embeddings_vec_shadow (index_key INTEGER PRIMARY KEY, data BLOB)`,
+		`CREATE INDEX idx_turn_embeddings_vec_shadow_idx ON idx_turn_embeddings_vec_shadow(index_key)`,
+	}
+	for _, stmt := range legacyStatements {
+		if _, err := store.db.Exec(stmt); err != nil {
+			t.Fatalf("failed to seed legacy artifact: %v", err)
+		}
+	}
+	if _, err := store.db.Exec(`INSERT OR REPLACE INTO conv_metadata (key, value) VALUES ('schema_version', 1)`); err != nil {
+		t.Fatalf("failed to seed schema version: %v", err)
+	}
+	if err := store.initSchema(); err != nil {
+		t.Fatalf("failed to rerun initSchema: %v", err)
+	}
+
+	var count int
+	err = store.db.QueryRow(`
+		SELECT COUNT(*) FROM sqlite_master
+		WHERE name IN ('idx_turn_embeddings_vec', 'idx_turn_embeddings_vec_shadow', 'idx_turn_embeddings_vec_shadow_idx')
+	`).Scan(&count)
+	if err != nil {
+		t.Fatalf("failed to inspect sqlite_master after migration: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected legacy vector artifacts to be removed, found %d", count)
+	}
+}
+
 func TestStore_StoreAndGetSession(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")

@@ -2,6 +2,11 @@
 package parser
 
 import (
+	"bufio"
+	"bytes"
+	"io"
+	"os"
+
 	"github.com/XiaoConstantine/sgrep/pkg/conv"
 )
 
@@ -81,4 +86,27 @@ func ParseAll() ([]*conv.Session, error) {
 	}
 
 	return allSessions, nil
+}
+
+// forEachJSONLLine streams a JSONL file line by line without the token-size
+// limit imposed by bufio.Scanner.
+func forEachJSONLLine(file *os.File, fn func([]byte) error) error {
+	reader := bufio.NewReader(file)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			line = bytes.TrimRight(line, "\r\n")
+			if len(line) > 0 {
+				if err := fn(line); err != nil {
+					return err
+				}
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+	}
 }

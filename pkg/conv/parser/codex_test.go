@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -296,5 +297,51 @@ func TestCodexParser_Discover(t *testing.T) {
 	}
 	if len(paths) != 1 {
 		t.Errorf("expected 1 path, got %d", len(paths))
+	}
+}
+
+func TestCodexParser_ParseLargeJSONLLine(t *testing.T) {
+	tmpDir := t.TempDir()
+	testFile := filepath.Join(tmpDir, "large.jsonl")
+
+	now := time.Now().Format(time.RFC3339)
+	largeContent := strings.Repeat("x", 2*1024*1024)
+
+	userMsg := codexMessage{Role: "user", Content: largeContent}
+	userMsgJSON, _ := json.Marshal(userMsg)
+	assistMsg := codexMessage{Role: "assistant", Content: "ok"}
+	assistMsgJSON, _ := json.Marshal(assistMsg)
+
+	entries := []codexEntry{
+		{Timestamp: now, Type: "message", Payload: userMsgJSON},
+		{Timestamp: now, Type: "message", Payload: assistMsgJSON},
+	}
+
+	f, err := os.Create(testFile)
+	if err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	enc := json.NewEncoder(f)
+	for _, entry := range entries {
+		if err := enc.Encode(entry); err != nil {
+			t.Fatalf("failed to encode entry: %v", err)
+		}
+	}
+	_ = f.Close()
+
+	p := NewCodexParserWithPath(tmpDir)
+	sessions, err := p.Parse(testFile)
+	if err != nil {
+		t.Fatalf("unexpected error parsing large JSONL line: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	if len(sessions[0].Turns) != 1 {
+		t.Fatalf("expected 1 turn, got %d", len(sessions[0].Turns))
+	}
+	if sessions[0].Turns[0].UserContent != largeContent {
+		t.Fatalf("expected large user content to round-trip, got length %d", len(sessions[0].Turns[0].UserContent))
 	}
 }

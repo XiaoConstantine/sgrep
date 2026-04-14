@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"bufio"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -107,24 +106,14 @@ func (p *CodexParser) Parse(sourcePath string) ([]*conv.Session, error) {
 	defer func() { _ = file.Close() }()
 
 	var entries []codexEntry
-	scanner := bufio.NewScanner(file)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if len(line) == 0 {
-			continue
-		}
-
+	err = forEachJSONLLine(file, func(line []byte) error {
 		var entry codexEntry
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			continue
+		if err := json.Unmarshal(line, &entry); err == nil {
+			entries = append(entries, entry)
 		}
-		entries = append(entries, entry)
-	}
-
-	if err := scanner.Err(); err != nil {
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
 

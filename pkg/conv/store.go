@@ -15,7 +15,7 @@ import (
 
 const (
 	// Schema version for migrations
-	schemaVersion = 1
+	schemaVersion = 2
 	// Default embedding dimensions for nomic-embed-text
 	defaultDims = 768
 )
@@ -105,6 +105,10 @@ func (s *Store) Close() error {
 
 // initSchema creates the database schema.
 func (s *Store) initSchema() error {
+	if err := s.applyPragmas(); err != nil {
+		return err
+	}
+
 	// Execute schema statements individually for better compatibility
 	statements := []string{
 		// Metadata table for schema version
@@ -185,20 +189,78 @@ func (s *Store) initSchema() error {
 		}
 	}
 
-	// Create vector index for embeddings
-	// libSQL uses libsql_vector_idx for DiskANN-based search
-	_, _ = s.db.Exec(`
-		CREATE INDEX IF NOT EXISTS idx_turn_embeddings_vec
-		ON conv_turn_embeddings(libsql_vector_idx(embedding))
-	`)
+	vacuumNeeded, err := s.dropLegacyVectorIndex()
+	if err != nil {
+		return err
+	}
+	if vacuumNeeded {
+		if _, err := s.db.Exec(`VACUUM`); err != nil {
+			return fmt.Errorf("failed to vacuum conversation store after dropping legacy vector index: %w", err)
+		}
+	}
 
 	// Set schema version
-	_, err := s.db.Exec(`
+	_, err = s.db.Exec(`
 		INSERT OR REPLACE INTO conv_metadata (key, value)
 		VALUES ('schema_version', ?)
 	`, schemaVersion)
 
 	return err
+}
+
+func (s *Store) applyPragmas() error {
+	pragmas := []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA synchronous=NORMAL",
+		"PRAGMA temp_store=MEMORY",
+		"PRAGMA cache_size=-50000",
+		"PRAGMA busy_timeout=10000",
+	}
+
+	for _, pragma := range pragmas {
+		if sqliteDriverName == "libsql" {
+			rows, err := s.db.Query(pragma)
+			if err != nil {
+				return fmt.Errorf("failed to set pragma %q: %w", pragma, err)
+			}
+			_ = rows.Close()
+			continue
+		}
+
+		if _, err := s.db.Exec(pragma); err != nil {
+			return fmt.Errorf("failed to set pragma %q: %w", pragma, err)
+		}
+	}
+
+	return nil
+}
+
+func (s *Store) dropLegacyVectorIndex() (bool, error) {
+	const legacyCountQuery = `
+		SELECT COUNT(*) FROM sqlite_master
+		WHERE name IN ('idx_turn_embeddings_vec', 'idx_turn_embeddings_vec_shadow', 'idx_turn_embeddings_vec_shadow_idx')
+	`
+
+	var legacyCount int
+	if err := s.db.QueryRow(legacyCountQuery).Scan(&legacyCount); err != nil {
+		return false, fmt.Errorf("failed to inspect legacy conversation vector index: %w", err)
+	}
+	if legacyCount == 0 {
+		return false, nil
+	}
+
+	drops := []string{
+		`DROP INDEX IF EXISTS idx_turn_embeddings_vec`,
+		`DROP INDEX IF EXISTS idx_turn_embeddings_vec_shadow_idx`,
+		`DROP TABLE IF EXISTS idx_turn_embeddings_vec_shadow`,
+	}
+	for _, stmt := range drops {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return false, fmt.Errorf("failed to drop legacy conversation vector artifact: %w", err)
+		}
+	}
+
+	return true, nil
 }
 
 // StoreSession stores a session and its turns.
@@ -207,7 +269,12 @@ func (s *Store) StoreSession(ctx context.Context, session *Session) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 
 	// Insert session
 	_, err = tx.ExecContext(ctx, `
@@ -249,7 +316,12 @@ func (s *Store) StoreSession(ctx context.Context, session *Session) error {
 		}
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	committed = true
+	return nil
 }
 
 // StoreTurnEmbedding stores an embedding for a turn.
@@ -281,7 +353,12 @@ func (s *Store) StoreTurnEmbeddingBatch(ctx context.Context, turnIDs []string, e
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 
 	var stmtSQL string
 	if sqliteDriverName == "libsql" {
@@ -304,7 +381,12 @@ func (s *Store) StoreTurnEmbeddingBatch(ctx context.Context, turnIDs []string, e
 		}
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	committed = true
+	return nil
 }
 
 // GetSession retrieves a session by ID.
