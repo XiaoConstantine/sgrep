@@ -264,6 +264,81 @@ func TestMMapSegmentStore(t *testing.T) {
 	t.Logf("MMap store test passed with 3 chunks, 16 total segments")
 }
 
+func TestMMapSegmentStore_PQRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	dims := 4
+
+	pq, err := util.NewProductQuantizer(util.PQConfig{
+		Dims:       dims,
+		Subspaces:  2,
+		Centroids:  4,
+		Iterations: 4,
+	})
+	if err != nil {
+		t.Fatalf("NewProductQuantizer failed: %v", err)
+	}
+	training := [][]float32{
+		{1, 0, 0, 0},
+		{0, 1, 0, 0},
+		{0, 0, 1, 0},
+		{0, 0, 0, 1},
+	}
+	if err := pq.Train(training, 4); err != nil {
+		t.Fatalf("Train failed: %v", err)
+	}
+	codesA, err := pq.Encode([]float32{1, 0, 0, 0})
+	if err != nil {
+		t.Fatalf("Encode A failed: %v", err)
+	}
+	codesB, err := pq.Encode([]float32{0, 1, 0, 0})
+	if err != nil {
+		t.Fatalf("Encode B failed: %v", err)
+	}
+
+	store, err := OpenMMapSegmentStore(tmpDir, dims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.SetColBERTCodec(ColBERTCodecPQ6, pq)
+	store.BeginWrite()
+	store.WriteSegments("chunk-pq", []ColBERTSegment{
+		{SegmentIdx: 0, PQCodes: codesA},
+		{SegmentIdx: 1, PQCodes: codesB},
+	})
+	if err := store.CommitWrite(); err != nil {
+		t.Fatalf("CommitWrite failed: %v", err)
+	}
+	_ = store.Close()
+
+	store2, err := OpenMMapSegmentStore(tmpDir, dims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store2.Close() }()
+
+	if store2.ColBERTCodec() != ColBERTCodecPQ6 {
+		t.Fatalf("expected codec %q, got %q", ColBERTCodecPQ6, store2.ColBERTCodec())
+	}
+	if store2.ProductQuantizer() == nil || store2.ProductQuantizer().CodeSize() != pq.CodeSize() {
+		t.Fatalf("expected persisted PQ codebook with code size %d", pq.CodeSize())
+	}
+
+	segs, err := store2.GetColBERTSegments(ctx, "chunk-pq")
+	if err != nil {
+		t.Fatalf("GetColBERTSegments failed: %v", err)
+	}
+	if len(segs) != 2 {
+		t.Fatalf("expected 2 segments, got %d", len(segs))
+	}
+	if len(segs[0].PQCodes) != pq.CodeSize() {
+		t.Fatalf("expected %d-byte PQ codes, got %d", pq.CodeSize(), len(segs[0].PQCodes))
+	}
+	if len(segs[0].EmbeddingInt8) != 0 {
+		t.Fatalf("expected PQ-only segment payload")
+	}
+}
+
 func createTestSegments(t *testing.T, dims int, count int) []ColBERTSegment {
 	segments := make([]ColBERTSegment, count)
 	for i := range segments {

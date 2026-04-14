@@ -18,6 +18,46 @@ type mockStore struct {
 	mu        sync.Mutex
 }
 
+type mockSegmentStore struct {
+	pq *util.ProductQuantizer
+}
+
+func (m *mockSegmentStore) StoreColBERTSegments(ctx context.Context, chunkID string, segments []store.ColBERTSegment) error {
+	return nil
+}
+
+func (m *mockSegmentStore) StoreColBERTSegmentsBatch(ctx context.Context, chunkSegments map[string][]store.ColBERTSegment) error {
+	return nil
+}
+
+func (m *mockSegmentStore) GetColBERTSegments(ctx context.Context, chunkID string) ([]store.ColBERTSegment, error) {
+	return nil, nil
+}
+
+func (m *mockSegmentStore) GetColBERTSegmentsBatch(ctx context.Context, chunkIDs []string) (map[string][]store.ColBERTSegment, error) {
+	return map[string][]store.ColBERTSegment{}, nil
+}
+
+func (m *mockSegmentStore) DeleteColBERTSegments(ctx context.Context, chunkID string) error {
+	return nil
+}
+
+func (m *mockSegmentStore) HasColBERTSegments(ctx context.Context) (bool, error) {
+	return false, nil
+}
+
+func (m *mockSegmentStore) GetChunksForColBERT(ctx context.Context, batchSize int, offset int) ([]store.ChunkInfo, error) {
+	return nil, nil
+}
+
+func (m *mockSegmentStore) ColBERTCodec() store.ColBERTCodec {
+	return store.ColBERTCodecPQ6
+}
+
+func (m *mockSegmentStore) ProductQuantizer() *util.ProductQuantizer {
+	return m.pq
+}
+
 func (m *mockStore) Store(ctx context.Context, doc *store.Document) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -121,6 +161,72 @@ func TestNewWithConfig(t *testing.T) {
 	}
 	if s.eventBox != eb {
 		t.Error("eventBox should be set")
+	}
+}
+
+func TestNewWithConfig_LoadsProductQuantizerFromSegmentStore(t *testing.T) {
+	pq, err := util.NewProductQuantizer(util.PQConfig{
+		Dims:       4,
+		Subspaces:  2,
+		Centroids:  4,
+		Iterations: 4,
+	})
+	if err != nil {
+		t.Fatalf("NewProductQuantizer failed: %v", err)
+	}
+	if err := pq.Train([][]float32{
+		{1, 0, 0, 0},
+		{0, 1, 0, 0},
+		{0, 0, 1, 0},
+		{0, 0, 0, 1},
+	}, 4); err != nil {
+		t.Fatalf("Train failed: %v", err)
+	}
+
+	s := NewWithConfig(Config{
+		Store:         &mockStore{},
+		SegmentStore:  &mockSegmentStore{pq: pq},
+		ColBERTScorer: NewColBERTScorer(nil),
+	})
+	if s.colbertScorer == nil || s.colbertScorer.pq == nil {
+		t.Fatal("expected searcher to load PQ codebook from segment store")
+	}
+	if s.colbertScorer.pqExactRescoreK != defaultColBERTPQExactRescoreTopK {
+		t.Fatalf("expected PQ exact rescore top-k %d, got %d", defaultColBERTPQExactRescoreTopK, s.colbertScorer.pqExactRescoreK)
+	}
+}
+
+func TestNewWithConfig_RespectsPQExactRescoreEnvOverride(t *testing.T) {
+	t.Setenv("SGREP_COLBERT_PQ_EXACT_RESCORE_TOPK", "37")
+
+	pq, err := util.NewProductQuantizer(util.PQConfig{
+		Dims:       4,
+		Subspaces:  2,
+		Centroids:  4,
+		Iterations: 4,
+	})
+	if err != nil {
+		t.Fatalf("NewProductQuantizer failed: %v", err)
+	}
+	if err := pq.Train([][]float32{
+		{1, 0, 0, 0},
+		{0, 1, 0, 0},
+		{0, 0, 1, 0},
+		{0, 0, 0, 1},
+	}, 4); err != nil {
+		t.Fatalf("Train failed: %v", err)
+	}
+
+	s := NewWithConfig(Config{
+		Store:         &mockStore{},
+		SegmentStore:  &mockSegmentStore{pq: pq},
+		ColBERTScorer: NewColBERTScorer(nil),
+	})
+	if s.colbertScorer == nil {
+		t.Fatal("expected ColBERT scorer")
+	}
+	if s.colbertScorer.pqExactRescoreK != 37 {
+		t.Fatalf("expected env override to set PQ exact rescore top-k to 37, got %d", s.colbertScorer.pqExactRescoreK)
 	}
 }
 
@@ -461,7 +567,7 @@ func TestSearcher_SearchWithOptions_Deduplicate(t *testing.T) {
 		docs: []*store.Document{
 			{ID: "chunk1", FilePath: "/main.go", Content: "func foo()", StartLine: 1, EndLine: 5},
 			{ID: "chunk2", FilePath: "/main.go", Content: "func bar()", StartLine: 10, EndLine: 15}, // non-overlapping with chunk1
-			{ID: "chunk3", FilePath: "/main.go", Content: "func foo2()", StartLine: 2, EndLine: 6}, // overlaps with chunk1
+			{ID: "chunk3", FilePath: "/main.go", Content: "func foo2()", StartLine: 2, EndLine: 6},  // overlaps with chunk1
 			{ID: "chunk4", FilePath: "/other.go", Content: "func baz()", StartLine: 1, EndLine: 5},
 		},
 		distances: []float64{0.3, 0.5, 0.6, 0.4},
@@ -568,7 +674,7 @@ func TestDeduplicateResults_KeepsNonOverlapping(t *testing.T) {
 	// Non-overlapping chunks from same file should be kept
 	results := []Result{
 		{FilePath: "/a.go", StartLine: 1, EndLine: 10, Score: 0.3},
-		{FilePath: "/a.go", StartLine: 50, EndLine: 60, Score: 0.4}, // Different part of file
+		{FilePath: "/a.go", StartLine: 50, EndLine: 60, Score: 0.4},   // Different part of file
 		{FilePath: "/a.go", StartLine: 100, EndLine: 110, Score: 0.5}, // Another part
 		{FilePath: "/b.go", StartLine: 1, EndLine: 10, Score: 0.2},
 	}

@@ -20,14 +20,27 @@ import (
 //
 // File format:
 //
-//	Header (32 bytes):
-//	  - Magic: 4 bytes ("SGCS")
-//	  - Version: 4 bytes (1)
-//	  - Dims: 4 bytes (768)
-//	  - ChunkCount: 4 bytes
-//	  - SegmentCount: 4 bytes
-//	  - DataOffset: 4 bytes
-//	  - Reserved: 8 bytes
+//	v1 int8:
+//	  Header (32 bytes):
+//	    - Magic: 4 bytes ("SGCS")
+//	    - Version: 4 bytes (1)
+//	    - Dims: 4 bytes
+//	    - ChunkCount: 4 bytes
+//	    - SegmentCount: 4 bytes
+//	    - DataOffset: 4 bytes
+//	    - Reserved: 8 bytes
+//
+//	v2 PQ:
+//	  Header (40 bytes):
+//	    - Magic: 4 bytes ("SGCS")
+//	    - Version: 4 bytes (2)
+//	    - Dims: 4 bytes
+//	    - ChunkCount: 4 bytes
+//	    - SegmentCount: 4 bytes
+//	    - HeaderSize: 4 bytes
+//	    - DataOffset: 4 bytes
+//	    - Codec: 4 bytes
+//	    - CodebookSize: 4 bytes
 //	Index (20 bytes per chunk):
 //	  - ChunkID hash: 8 bytes
 //	  - DataOffset: 4 bytes
@@ -35,13 +48,16 @@ import (
 //	  - ChunkIDLen: 2 bytes
 //	  - ChunkID: variable (padded to 4-byte alignment)
 //	Data (variable):
-//	  - Per segment: dims bytes (int8) + 4 bytes (scale:f32) + 4 bytes (min:f32)
+//	  - v1 per segment: dims bytes (int8) + 4 bytes (scale:f32) + 4 bytes (min:f32)
+//	  - v2 per segment: m bytes of PQ codes
 type MMapSegmentStore struct {
-	path string
-	dims int
-	data []byte // memory-mapped file
-	file *os.File
-	mu   sync.RWMutex
+	path  string
+	dims  int
+	data  []byte // memory-mapped file
+	file  *os.File
+	mu    sync.RWMutex
+	codec ColBERTCodec
+	pq    *util.ProductQuantizer
 
 	// In-memory index for fast chunk lookup
 	chunkIndex map[string]chunkLoc
@@ -56,14 +72,18 @@ type chunkLoc struct {
 }
 
 type mmapWriteBuffer struct {
-	chunks   map[string][]ColBERTSegment
+	chunks    map[string][]ColBERTSegment
 	totalSegs int
 }
 
 const (
-	mmapMagic      = "SGCS" // Sgrep ColBERT Segments
-	mmapVersion    = 1
-	mmapHeaderSize = 32
+	mmapMagic        = "SGCS" // Sgrep ColBERT Segments
+	mmapVersionV1    = 1
+	mmapVersionV2    = 2
+	mmapHeaderSizeV1 = 32
+	mmapHeaderSizeV2 = 40
+	mmapCodecInt8    = 1
+	mmapCodecPQ6     = 2
 )
 
 // OpenMMapSegmentStore opens or creates a memory-mapped segment store.
@@ -73,6 +93,7 @@ func OpenMMapSegmentStore(dir string, dims int) (*MMapSegmentStore, error) {
 	store := &MMapSegmentStore{
 		path:       path,
 		dims:       dims,
+		codec:      ColBERTCodecInt8,
 		chunkIndex: make(map[string]chunkLoc),
 	}
 
@@ -99,7 +120,7 @@ func (s *MMapSegmentStore) load() error {
 		return err
 	}
 
-	if stat.Size() < mmapHeaderSize {
+	if stat.Size() < mmapHeaderSizeV1 {
 		return fmt.Errorf("file too small: %d", stat.Size())
 	}
 
@@ -116,15 +137,50 @@ func (s *MMapSegmentStore) load() error {
 		return fmt.Errorf("invalid magic: %s", string(data[0:4]))
 	}
 	version := binary.LittleEndian.Uint32(data[4:8])
-	if version != mmapVersion {
+	headerSize := mmapHeaderSizeV1
+	indexOffset := mmapHeaderSizeV1
+	dataOffset := 0
+	switch version {
+	case mmapVersionV1:
+		s.codec = ColBERTCodecInt8
+		s.pq = nil
+		s.dims = int(binary.LittleEndian.Uint32(data[8:12]))
+		dataOffset = int(binary.LittleEndian.Uint32(data[20:24]))
+	case mmapVersionV2:
+		if len(data) < mmapHeaderSizeV2 {
+			return fmt.Errorf("file too small for v2 header: %d", len(data))
+		}
+		s.dims = int(binary.LittleEndian.Uint32(data[8:12]))
+		headerSize = int(binary.LittleEndian.Uint32(data[20:24]))
+		dataOffset = int(binary.LittleEndian.Uint32(data[24:28]))
+		codecID := binary.LittleEndian.Uint32(data[28:32])
+		codebookSize := int(binary.LittleEndian.Uint32(data[32:36]))
+		if len(data) < headerSize+codebookSize {
+			return fmt.Errorf("v2 header out of bounds")
+		}
+		switch codecID {
+		case mmapCodecPQ6:
+			s.codec = ColBERTCodecPQ6
+		default:
+			s.codec = ColBERTCodecInt8
+		}
+		if s.codec == ColBERTCodecPQ6 && codebookSize > 0 {
+			pq, err := util.DeserializeCodebook(data[headerSize : headerSize+codebookSize])
+			if err != nil {
+				return fmt.Errorf("deserialize mmap codebook: %w", err)
+			}
+			s.pq = pq
+		} else {
+			s.pq = nil
+		}
+		indexOffset = headerSize + codebookSize
+	default:
 		return fmt.Errorf("unsupported version: %d", version)
 	}
-	s.dims = int(binary.LittleEndian.Uint32(data[8:12]))
 	chunkCount := int(binary.LittleEndian.Uint32(data[12:16]))
-	dataOffset := int(binary.LittleEndian.Uint32(data[20:24]))
 
 	// Build chunk index
-	offset := mmapHeaderSize
+	offset := indexOffset
 	for i := 0; i < chunkCount; i++ {
 		if offset+12 > len(data) {
 			break
@@ -150,6 +206,40 @@ func (s *MMapSegmentStore) load() error {
 	}
 
 	return nil
+}
+
+// SetColBERTCodec configures the codec used by the next write transaction.
+func (s *MMapSegmentStore) SetColBERTCodec(codec ColBERTCodec, pq *util.ProductQuantizer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.codec = ResolveColBERTCodec(codec, ColBERTCodecUnspecified)
+	s.pq = pq
+}
+
+// ColBERTCodec reports the codec stored in the mmap artifact.
+func (s *MMapSegmentStore) ColBERTCodec() ColBERTCodec {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.codec
+}
+
+// ProductQuantizer returns the mmap-embedded PQ codebook when present.
+func (s *MMapSegmentStore) ProductQuantizer() *util.ProductQuantizer {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.pq
+}
+
+func (s *MMapSegmentStore) segmentSize() (int, error) {
+	switch s.codec {
+	case ColBERTCodecPQ6:
+		if s.pq == nil {
+			return 0, fmt.Errorf("pq mmap missing codebook")
+		}
+		return s.pq.CodeSize(), nil
+	default:
+		return s.dims + 8, nil
+	}
 }
 
 // Close unmaps and closes the file.
@@ -186,7 +276,10 @@ func (s *MMapSegmentStore) GetColBERTSegments(ctx context.Context, chunkID strin
 		return nil, fmt.Errorf("mmap not loaded")
 	}
 
-	segSize := s.dims + 8 // int8 embedding + scale(4) + min(4)
+	segSize, err := s.segmentSize()
+	if err != nil {
+		return nil, err
+	}
 	segments := make([]ColBERTSegment, loc.count)
 
 	for i := 0; i < loc.count; i++ {
@@ -194,22 +287,26 @@ func (s *MMapSegmentStore) GetColBERTSegments(ctx context.Context, chunkID strin
 		if segOffset+segSize > len(s.data) {
 			return nil, fmt.Errorf("segment out of bounds")
 		}
-
-		// Read int8 embedding
-		embInt8 := make([]int8, s.dims)
-		for j := 0; j < s.dims; j++ {
-			embInt8[j] = int8(s.data[segOffset+j])
-		}
-
-		// Read scale and min
-		scale := float32frombytes(s.data[segOffset+s.dims : segOffset+s.dims+4])
-		min := float32frombytes(s.data[segOffset+s.dims+4 : segOffset+s.dims+8])
-
-		segments[i] = ColBERTSegment{
-			SegmentIdx:    i,
-			EmbeddingInt8: embInt8,
-			QuantScale:    scale,
-			QuantMin:      min,
+		switch s.codec {
+		case ColBERTCodecPQ6:
+			codes := append([]byte(nil), s.data[segOffset:segOffset+segSize]...)
+			segments[i] = ColBERTSegment{
+				SegmentIdx: i,
+				PQCodes:    codes,
+			}
+		default:
+			embInt8 := make([]int8, s.dims)
+			for j := 0; j < s.dims; j++ {
+				embInt8[j] = int8(s.data[segOffset+j])
+			}
+			scale := float32frombytes(s.data[segOffset+s.dims : segOffset+s.dims+4])
+			min := float32frombytes(s.data[segOffset+s.dims+4 : segOffset+s.dims+8])
+			segments[i] = ColBERTSegment{
+				SegmentIdx:    i,
+				EmbeddingInt8: embInt8,
+				QuantScale:    scale,
+				QuantMin:      min,
+			}
 		}
 	}
 
@@ -277,16 +374,47 @@ func (s *MMapSegmentStore) CommitWrite() error {
 	}
 	sort.Strings(chunkIDs)
 
+	codec := s.codec
+	if codec == ColBERTCodecUnspecified && len(chunkIDs) > 0 {
+		first := s.writeBuffer.chunks[chunkIDs[0]]
+		if len(first) > 0 && len(first[0].PQCodes) > 0 {
+			codec = ColBERTCodecPQ6
+		} else {
+			codec = ColBERTCodecInt8
+		}
+	}
+	if codec == ColBERTCodecUnspecified {
+		codec = ColBERTCodecInt8
+	}
+	if codec == ColBERTCodecPQ6 && s.pq == nil {
+		return fmt.Errorf("pq mmap write requires a codebook")
+	}
+
 	// Calculate sizes
 	segSize := s.dims + 8
+	if codec == ColBERTCodecPQ6 {
+		segSize = s.pq.CodeSize()
+	}
 	indexSize := 0
 	for _, id := range chunkIDs {
 		entrySize := 16 + len(id)
 		entrySize = (entrySize + 3) & ^3
 		indexSize += entrySize
 	}
+	headerSize := mmapHeaderSizeV1
+	version := uint32(mmapVersionV1)
+	var codebook []byte
+	if codec == ColBERTCodecPQ6 {
+		headerSize = mmapHeaderSizeV2
+		version = mmapVersionV2
+		var err error
+		codebook, err = s.pq.SerializeCodebook()
+		if err != nil {
+			return fmt.Errorf("serialize mmap codebook: %w", err)
+		}
+	}
 	dataSize := s.writeBuffer.totalSegs * segSize
-	totalSize := mmapHeaderSize + indexSize + dataSize
+	totalSize := headerSize + len(codebook) + indexSize + dataSize
 
 	// Create file
 	f, err := os.Create(s.path)
@@ -301,16 +429,29 @@ func (s *MMapSegmentStore) CommitWrite() error {
 	}
 
 	// Write header
-	header := make([]byte, mmapHeaderSize)
+	header := make([]byte, headerSize)
 	copy(header[0:4], mmapMagic)
-	binary.LittleEndian.PutUint32(header[4:8], mmapVersion)
+	binary.LittleEndian.PutUint32(header[4:8], version)
 	binary.LittleEndian.PutUint32(header[8:12], uint32(s.dims))
 	binary.LittleEndian.PutUint32(header[12:16], uint32(len(chunkIDs)))
 	binary.LittleEndian.PutUint32(header[16:20], uint32(s.writeBuffer.totalSegs))
-	binary.LittleEndian.PutUint32(header[20:24], uint32(mmapHeaderSize+indexSize))
+	if version == mmapVersionV1 {
+		binary.LittleEndian.PutUint32(header[20:24], uint32(headerSize+indexSize))
+	} else {
+		binary.LittleEndian.PutUint32(header[20:24], uint32(headerSize))
+		binary.LittleEndian.PutUint32(header[24:28], uint32(headerSize+len(codebook)+indexSize))
+		binary.LittleEndian.PutUint32(header[28:32], mmapCodecPQ6)
+		binary.LittleEndian.PutUint32(header[32:36], uint32(len(codebook)))
+	}
 	if _, err := f.Write(header); err != nil {
 		_ = f.Close()
 		return err
+	}
+	if len(codebook) > 0 {
+		if _, err := f.Write(codebook); err != nil {
+			_ = f.Close()
+			return err
+		}
 	}
 
 	// Write index and data
@@ -340,7 +481,7 @@ func (s *MMapSegmentStore) CommitWrite() error {
 		}
 
 		s.chunkIndex[chunkID] = chunkLoc{
-			offset: mmapHeaderSize + indexSize + dataOffset,
+			offset: headerSize + len(codebook) + indexSize + dataOffset,
 			count:  len(segments),
 		}
 		dataOffset += len(segments) * segSize
@@ -351,16 +492,16 @@ func (s *MMapSegmentStore) CommitWrite() error {
 		segments := s.writeBuffer.chunks[chunkID]
 		for _, seg := range segments {
 			segData := make([]byte, segSize)
-
-			// Write int8 embedding
-			for j, v := range seg.EmbeddingInt8 {
-				segData[j] = byte(v)
+			switch codec {
+			case ColBERTCodecPQ6:
+				copy(segData, seg.PQCodes)
+			default:
+				for j, v := range seg.EmbeddingInt8 {
+					segData[j] = byte(v)
+				}
+				copy(segData[s.dims:s.dims+4], float32tobytes(seg.QuantScale))
+				copy(segData[s.dims+4:s.dims+8], float32tobytes(seg.QuantMin))
 			}
-
-			// Write scale and min
-			copy(segData[s.dims:s.dims+4], float32tobytes(seg.QuantScale))
-			copy(segData[s.dims+4:s.dims+8], float32tobytes(seg.QuantMin))
-
 			if _, err := f.Write(segData); err != nil {
 				_ = f.Close()
 				return err
@@ -370,6 +511,7 @@ func (s *MMapSegmentStore) CommitWrite() error {
 
 	_ = f.Close()
 	s.writeBuffer = nil
+	s.codec = codec
 
 	// Reload mmap
 	return s.load()
@@ -514,7 +656,7 @@ func (p *SegmentPooler) Pool(segments []ColBERTSegment) []ColBERTSegment {
 		if seg.EmbeddingInt8 != nil {
 			embeddings[i] = util.DequantizeInt8(seg.EmbeddingInt8, seg.QuantScale, seg.QuantMin)
 		} else if seg.Embedding != nil {
-			embeddings[i] = seg.Embedding
+			embeddings[i] = append([]float32(nil), seg.Embedding...)
 		} else {
 			// Skip segments without embeddings
 			continue
@@ -681,15 +823,10 @@ func (p *SegmentPooler) MergeBySimilarity(segments []ColBERTSegment) []ColBERTSe
 			}
 			avgEmb = util.NormalizeVector(avgEmb)
 
-			// Quantize back to int8
-			quantized, scale, min := util.QuantizeInt8(avgEmb)
-
 			result = append(result, ColBERTSegment{
-				SegmentIdx:    len(result),
-				Text:          texts[0], // Keep first text as representative
-				EmbeddingInt8: quantized,
-				QuantScale:    scale,
-				QuantMin:      min,
+				SegmentIdx: len(result),
+				Text:       texts[0], // Keep first text as representative
+				Embedding:  avgEmb,
 			})
 		}
 	}

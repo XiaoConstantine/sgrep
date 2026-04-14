@@ -117,6 +117,10 @@ type ColBERTSegment struct {
 	EmbeddingInt8 []int8  // Quantized embedding values
 	QuantScale    float32 // Scale factor for dequantization
 	QuantMin      float32 // Minimum value for dequantization
+
+	// Product quantized storage (for example m=6 => 6 bytes/vector).
+	// Query-time scoring uses ADC tables via pkg/util/pq.go.
+	PQCodes []byte
 }
 
 // FileEmbedding represents a document-level embedding for a file.

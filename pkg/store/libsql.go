@@ -26,10 +26,12 @@ import (
 // - libsql_vector_idx() for DiskANN indexing
 // - vector_top_k() for approximate nearest neighbor search
 type LibSQLStore struct {
-	db       *sql.DB
-	dims     int
-	dbPath   string
-	quantize QuantizationMode
+	db           *sql.DB
+	dims         int
+	dbPath       string
+	quantize     QuantizationMode
+	colbertCodec ColBERTCodec
+	colbertPQ    *util.ProductQuantizer
 
 	// In-memory cache for small datasets (< inMemoryThreshold)
 	memMu       sync.RWMutex
@@ -94,12 +96,13 @@ func OpenLibSQL(path string, opts ...LibSQLStoreOption) (*LibSQLStore, error) {
 
 	dims := getDims()
 	s := &LibSQLStore{
-		db:         db,
-		dims:       dims,
-		dbPath:     path,
-		quantize:   QuantizeNone,
-		partitions: partitions,
-		slabPool:   util.NewSlabPool(partitions, 10000, dims),
+		db:           db,
+		dims:         dims,
+		dbPath:       path,
+		quantize:     QuantizeNone,
+		colbertCodec: ColBERTCodecInt8,
+		partitions:   partitions,
+		slabPool:     util.NewSlabPool(partitions, 10000, dims),
 	}
 
 	for _, opt := range opts {
@@ -112,6 +115,10 @@ func OpenLibSQL(path string, opts ...LibSQLStoreOption) (*LibSQLStore, error) {
 	}
 
 	if err := s.initSearchMode(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := s.reloadColBERTMetadata(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -170,15 +177,25 @@ func (s *LibSQLStore) init() error {
 			embedding BLOB,
 			quant_scale REAL,
 			quant_min REAL,
+			pq_codes BLOB,
 			PRIMARY KEY (chunk_id, segment_idx)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_colbert_segments_chunk ON colbert_segments(chunk_id)`,
+		`CREATE TABLE IF NOT EXISTS colbert_metadata (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			codec TEXT NOT NULL,
+			pq_codebook BLOB
+		)`,
 	}
 
 	for _, q := range queries {
 		if _, err := s.db.Exec(q); err != nil {
 			return fmt.Errorf("failed to init schema: %w", err)
 		}
+	}
+	if _, err := s.db.Exec(`ALTER TABLE colbert_segments ADD COLUMN pq_codes BLOB`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("failed to migrate colbert_segments: %w", err)
 	}
 
 	// Create DiskANN vector index with compression based on quantization mode
@@ -290,6 +307,84 @@ func (s *LibSQLStore) initFTS5() error {
 	return nil
 }
 
+// ColBERTCodec reports the active stored late-interaction codec for this repo.
+func (s *LibSQLStore) ColBERTCodec() ColBERTCodec {
+	return s.colbertCodec
+}
+
+// ProductQuantizer returns the persisted PQ codebook when the repo uses PQ.
+func (s *LibSQLStore) ProductQuantizer() *util.ProductQuantizer {
+	return s.colbertPQ
+}
+
+// SaveColBERTMetadata persists the repo-level late-interaction codec metadata.
+func (s *LibSQLStore) SaveColBERTMetadata(ctx context.Context, codec ColBERTCodec, pq *util.ProductQuantizer) error {
+	var codebook []byte
+	var err error
+	if codec == ColBERTCodecPQ6 {
+		if pq == nil {
+			return fmt.Errorf("pq6 codec requires a trained codebook")
+		}
+		codebook, err = pq.SerializeCodebook()
+		if err != nil {
+			return fmt.Errorf("serialize codebook: %w", err)
+		}
+	}
+
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO colbert_metadata (id, codec, pq_codebook)
+		VALUES (1, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET codec = excluded.codec, pq_codebook = excluded.pq_codebook
+	`, codec.String(), codebook); err != nil {
+		return fmt.Errorf("save colbert metadata: %w", err)
+	}
+
+	s.colbertCodec = ResolveColBERTCodec(codec, ColBERTCodecUnspecified)
+	s.colbertPQ = pq
+	return nil
+}
+
+// LoadColBERTMetadata loads the repo-level late-interaction codec metadata.
+func (s *LibSQLStore) LoadColBERTMetadata(ctx context.Context) (ColBERTCodec, *util.ProductQuantizer, error) {
+	var codecText string
+	var codebook []byte
+	err := s.db.QueryRowContext(ctx, `
+		SELECT codec, pq_codebook
+		FROM colbert_metadata
+		WHERE id = 1
+	`).Scan(&codecText, &codebook)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return ColBERTCodecInt8, nil, nil
+		}
+		return ColBERTCodecInt8, nil, fmt.Errorf("load colbert metadata: %w", err)
+	}
+
+	codec := ParseColBERTCodec(codecText)
+	if codec == ColBERTCodecUnspecified {
+		codec = ColBERTCodecInt8
+	}
+	if codec != ColBERTCodecPQ6 || len(codebook) == 0 {
+		return codec, nil, nil
+	}
+
+	pq, err := util.DeserializeCodebook(codebook)
+	if err != nil {
+		return ColBERTCodecInt8, nil, fmt.Errorf("deserialize codebook: %w", err)
+	}
+	return codec, pq, nil
+}
+
+func (s *LibSQLStore) reloadColBERTMetadata(ctx context.Context) error {
+	codec, pq, err := s.LoadColBERTMetadata(ctx)
+	if err != nil {
+		return err
+	}
+	s.colbertCodec = codec
+	s.colbertPQ = pq
+	return nil
+}
+
 func (s *LibSQLStore) initSearchMode() error {
 	var count int64
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM documents`).Scan(&count)
@@ -391,6 +486,27 @@ func bytesToInt8Slice(b []byte) []int8 {
 		s[i] = int8(v)
 	}
 	return s
+}
+
+func serializeColBERTSegment(seg ColBERTSegment) (embBytes []byte, pqCodes []byte, scale float32, min float32) {
+	if len(seg.PQCodes) > 0 {
+		return nil, append([]byte(nil), seg.PQCodes...), 0, 0
+	}
+	if seg.EmbeddingInt8 != nil {
+		return int8SliceToBytes(seg.EmbeddingInt8), nil, seg.QuantScale, seg.QuantMin
+	}
+	if seg.Embedding != nil {
+		quantized, scale, min := util.QuantizeInt8(seg.Embedding)
+		return int8SliceToBytes(quantized), nil, scale, min
+	}
+	return nil, nil, 0, 0
+}
+
+func nullableQuantFloat(v float32, valid bool) sql.NullFloat64 {
+	if !valid {
+		return sql.NullFloat64{}
+	}
+	return sql.NullFloat64{Float64: float64(v), Valid: true}
 }
 
 // Store saves a document with its embedding.
@@ -1225,7 +1341,6 @@ func (s *LibSQLStore) ComputeAndStoreFileEmbeddings(ctx context.Context) (int, e
 // ============================================================
 
 // StoreColBERTSegments stores pre-computed segment embeddings for a chunk.
-// Uses int8 quantization for 4x storage compression.
 func (s *LibSQLStore) StoreColBERTSegments(ctx context.Context, chunkID string, segments []ColBERTSegment) error {
 	if len(segments) == 0 {
 		return nil
@@ -1243,18 +1358,16 @@ func (s *LibSQLStore) StoreColBERTSegments(ctx context.Context, chunkID string, 
 	}
 
 	stmt, err := tx.PrepareContext(ctx,
-		`INSERT INTO colbert_segments (chunk_id, segment_idx, segment_text, embedding, quant_scale, quant_min) VALUES (?, ?, ?, ?, ?, ?)`)
+		`INSERT INTO colbert_segments (chunk_id, segment_idx, segment_text, embedding, quant_scale, quant_min, pq_codes) VALUES (?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = stmt.Close() }()
 
 	for _, seg := range segments {
-		// Quantize embedding to int8
-		quantized, scale, min := util.QuantizeInt8(seg.Embedding)
-		// Convert []int8 to []byte for BLOB storage
-		embBytes := int8SliceToBytes(quantized)
-		if _, err := stmt.ExecContext(ctx, chunkID, seg.SegmentIdx, seg.Text, embBytes, scale, min); err != nil {
+		embBytes, pqCodes, scale, min := serializeColBERTSegment(seg)
+		hasInt8 := len(embBytes) > 0
+		if _, err := stmt.ExecContext(ctx, chunkID, seg.SegmentIdx, seg.Text, embBytes, nullableQuantFloat(scale, hasInt8), nullableQuantFloat(min, hasInt8), pqCodes); err != nil {
 			return err
 		}
 	}
@@ -1263,7 +1376,6 @@ func (s *LibSQLStore) StoreColBERTSegments(ctx context.Context, chunkID string, 
 }
 
 // StoreColBERTSegmentsBatch stores segments for multiple chunks efficiently.
-// Uses int8 quantization for 4x storage compression.
 func (s *LibSQLStore) StoreColBERTSegmentsBatch(ctx context.Context, chunkSegments map[string][]ColBERTSegment) error {
 	if len(chunkSegments) == 0 {
 		return nil
@@ -1283,7 +1395,7 @@ func (s *LibSQLStore) StoreColBERTSegmentsBatch(ctx context.Context, chunkSegmen
 	defer func() { _ = deleteStmt.Close() }()
 
 	insertStmt, err := tx.PrepareContext(ctx,
-		`INSERT INTO colbert_segments (chunk_id, segment_idx, segment_text, embedding, quant_scale, quant_min) VALUES (?, ?, ?, ?, ?, ?)`)
+		`INSERT INTO colbert_segments (chunk_id, segment_idx, segment_text, embedding, quant_scale, quant_min, pq_codes) VALUES (?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -1311,19 +1423,9 @@ func (s *LibSQLStore) StoreColBERTSegmentsBatch(ctx context.Context, chunkSegmen
 
 		// Insert new segments with quantized embeddings
 		for _, seg := range segments {
-			var embBytes []byte
-			var scale, min float32
-			if seg.EmbeddingInt8 != nil {
-				embBytes = int8SliceToBytes(seg.EmbeddingInt8)
-				scale = seg.QuantScale
-				min = seg.QuantMin
-			} else if seg.Embedding != nil {
-				quantized, s, m := util.QuantizeInt8(seg.Embedding)
-				embBytes = int8SliceToBytes(quantized)
-				scale = s
-				min = m
-			}
-			if _, err := insertStmt.ExecContext(ctx, chunkID, seg.SegmentIdx, seg.Text, embBytes, scale, min); err != nil {
+			embBytes, pqCodes, scale, min := serializeColBERTSegment(seg)
+			hasInt8 := len(embBytes) > 0
+			if _, err := insertStmt.ExecContext(ctx, chunkID, seg.SegmentIdx, seg.Text, embBytes, nullableQuantFloat(scale, hasInt8), nullableQuantFloat(min, hasInt8), pqCodes); err != nil {
 				return err
 			}
 		}
@@ -1333,10 +1435,9 @@ func (s *LibSQLStore) StoreColBERTSegmentsBatch(ctx context.Context, chunkSegmen
 }
 
 // GetColBERTSegments retrieves pre-computed segment embeddings for a chunk.
-// Returns segments with quantized int8 embeddings for efficient MaxSim computation.
 func (s *LibSQLStore) GetColBERTSegments(ctx context.Context, chunkID string) ([]ColBERTSegment, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT segment_idx, segment_text, embedding, quant_scale, quant_min FROM colbert_segments WHERE chunk_id = ? ORDER BY segment_idx`,
+		`SELECT segment_idx, segment_text, embedding, quant_scale, quant_min, pq_codes FROM colbert_segments WHERE chunk_id = ? ORDER BY segment_idx`,
 		chunkID)
 	if err != nil {
 		return nil, err
@@ -1347,10 +1448,23 @@ func (s *LibSQLStore) GetColBERTSegments(ctx context.Context, chunkID string) ([
 	for rows.Next() {
 		var seg ColBERTSegment
 		var embBytes []byte
-		if err := rows.Scan(&seg.SegmentIdx, &seg.Text, &embBytes, &seg.QuantScale, &seg.QuantMin); err != nil {
+		var pqCodes []byte
+		var scale, min sql.NullFloat64
+		if err := rows.Scan(&seg.SegmentIdx, &seg.Text, &embBytes, &scale, &min, &pqCodes); err != nil {
 			return nil, err
 		}
-		seg.EmbeddingInt8 = bytesToInt8Slice(embBytes)
+		if scale.Valid {
+			seg.QuantScale = float32(scale.Float64)
+		}
+		if min.Valid {
+			seg.QuantMin = float32(min.Float64)
+		}
+		if len(embBytes) > 0 {
+			seg.EmbeddingInt8 = bytesToInt8Slice(embBytes)
+		}
+		if len(pqCodes) > 0 {
+			seg.PQCodes = append([]byte(nil), pqCodes...)
+		}
 		segments = append(segments, seg)
 	}
 
@@ -1358,7 +1472,6 @@ func (s *LibSQLStore) GetColBERTSegments(ctx context.Context, chunkID string) ([
 }
 
 // GetColBERTSegmentsBatch retrieves segments for multiple chunks efficiently.
-// Returns segments with quantized int8 embeddings for efficient MaxSim computation.
 func (s *LibSQLStore) GetColBERTSegmentsBatch(ctx context.Context, chunkIDs []string) (map[string][]ColBERTSegment, error) {
 	if len(chunkIDs) == 0 {
 		return make(map[string][]ColBERTSegment), nil
@@ -1373,7 +1486,7 @@ func (s *LibSQLStore) GetColBERTSegmentsBatch(ctx context.Context, chunkIDs []st
 	}
 
 	query := fmt.Sprintf(
-		`SELECT chunk_id, segment_idx, segment_text, embedding, quant_scale, quant_min
+		`SELECT chunk_id, segment_idx, segment_text, embedding, quant_scale, quant_min, pq_codes
 		 FROM colbert_segments
 		 WHERE chunk_id IN (%s)
 		 ORDER BY chunk_id, segment_idx`,
@@ -1390,10 +1503,23 @@ func (s *LibSQLStore) GetColBERTSegmentsBatch(ctx context.Context, chunkIDs []st
 		var chunkID string
 		var seg ColBERTSegment
 		var embBytes []byte
-		if err := rows.Scan(&chunkID, &seg.SegmentIdx, &seg.Text, &embBytes, &seg.QuantScale, &seg.QuantMin); err != nil {
+		var pqCodes []byte
+		var scale, min sql.NullFloat64
+		if err := rows.Scan(&chunkID, &seg.SegmentIdx, &seg.Text, &embBytes, &scale, &min, &pqCodes); err != nil {
 			return nil, err
 		}
-		seg.EmbeddingInt8 = bytesToInt8Slice(embBytes)
+		if scale.Valid {
+			seg.QuantScale = float32(scale.Float64)
+		}
+		if min.Valid {
+			seg.QuantMin = float32(min.Float64)
+		}
+		if len(embBytes) > 0 {
+			seg.EmbeddingInt8 = bytesToInt8Slice(embBytes)
+		}
+		if len(pqCodes) > 0 {
+			seg.PQCodes = append([]byte(nil), pqCodes...)
+		}
 		result[chunkID] = append(result[chunkID], seg)
 	}
 

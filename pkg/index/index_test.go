@@ -1,7 +1,9 @@
 package index
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -9,8 +11,48 @@ import (
 	"testing"
 
 	searchpkg "github.com/XiaoConstantine/sgrep/pkg/search"
+	"github.com/XiaoConstantine/sgrep/pkg/store"
 	"github.com/XiaoConstantine/sgrep/pkg/util"
 )
+
+type segmentCountTestStore struct {
+	chunks []store.ChunkInfo
+}
+
+func (s *segmentCountTestStore) StoreColBERTSegments(ctx context.Context, chunkID string, segments []store.ColBERTSegment) error {
+	return nil
+}
+
+func (s *segmentCountTestStore) StoreColBERTSegmentsBatch(ctx context.Context, chunkSegments map[string][]store.ColBERTSegment) error {
+	return nil
+}
+
+func (s *segmentCountTestStore) GetColBERTSegments(ctx context.Context, chunkID string) ([]store.ColBERTSegment, error) {
+	return nil, nil
+}
+
+func (s *segmentCountTestStore) GetColBERTSegmentsBatch(ctx context.Context, chunkIDs []string) (map[string][]store.ColBERTSegment, error) {
+	return map[string][]store.ColBERTSegment{}, nil
+}
+
+func (s *segmentCountTestStore) DeleteColBERTSegments(ctx context.Context, chunkID string) error {
+	return nil
+}
+
+func (s *segmentCountTestStore) HasColBERTSegments(ctx context.Context) (bool, error) {
+	return false, nil
+}
+
+func (s *segmentCountTestStore) GetChunksForColBERT(ctx context.Context, batchSize int, offset int) ([]store.ChunkInfo, error) {
+	if offset >= len(s.chunks) {
+		return nil, nil
+	}
+	end := offset + batchSize
+	if end > len(s.chunks) {
+		end = len(s.chunks)
+	}
+	return append([]store.ChunkInfo(nil), s.chunks[offset:end]...), nil
+}
 
 func TestGetSgrepHome(t *testing.T) {
 	t.Run("from_env", func(t *testing.T) {
@@ -170,7 +212,7 @@ func TestBuildStoredColBERTSegments_AdaptivePoolsToBudget(t *testing.T) {
 		embeddings[i] = randomNormalizedEmbedding(rng, 768)
 	}
 
-	segments := buildStoredColBERTSegments(segmentTexts, embeddings, true)
+	segments := buildStoredColBERTSegments("chunk-a", segmentTexts, embeddings, true, store.ColBERTCodecInt8, nil)
 
 	if len(segments) > budget {
 		t.Fatalf("adaptive pooling exceeded budget: got %d want <= %d", len(segments), budget)
@@ -195,9 +237,89 @@ func TestBuildStoredColBERTSegments_AdaptiveKeepsLegacySizedChunks(t *testing.T)
 		embeddings[i] = randomNormalizedEmbedding(rng, 768)
 	}
 
-	segments := buildStoredColBERTSegments(segmentTexts, embeddings, true)
+	segments := buildStoredColBERTSegments("chunk-b", segmentTexts, embeddings, true, store.ColBERTCodecInt8, nil)
 	if len(segments) != len(segmentTexts) {
 		t.Fatalf("legacy-sized chunk should remain unchanged: got %d want %d", len(segments), len(segmentTexts))
+	}
+}
+
+func TestApplyPQCodecSizeGate_DowngradesSmallCorpus(t *testing.T) {
+	chunks := make([]store.ChunkInfo, 100)
+	for i := range chunks {
+		chunks[i] = store.ChunkInfo{
+			ID:      fmt.Sprintf("chunk-%d", i),
+			Content: makeSegmentedContent(10),
+		}
+	}
+
+	idx := &Indexer{
+		indexCfg:     &IndexConfig{AdaptiveColBERTSegments: false},
+		colbertCodec: store.ColBERTCodecPQ6,
+	}
+	err := idx.applyPQCodecSizeGate(context.Background(), &segmentCountTestStore{chunks: chunks})
+	if err != nil {
+		t.Fatalf("applyPQCodecSizeGate failed: %v", err)
+	}
+	if idx.colbertCodec != store.ColBERTCodecInt8 {
+		t.Fatalf("expected small corpus to downgrade to int8, got %s", idx.colbertCodec)
+	}
+	if idx.colbertPQ != nil {
+		t.Fatal("expected downgrade to clear PQ codebook")
+	}
+}
+
+func TestApplyPQCodecSizeGate_KeepsPQForLargeCorpus(t *testing.T) {
+	chunks := make([]store.ChunkInfo, 600)
+	for i := range chunks {
+		chunks[i] = store.ChunkInfo{
+			ID:      fmt.Sprintf("chunk-%d", i),
+			Content: makeSegmentedContent(10),
+		}
+	}
+
+	idx := &Indexer{
+		indexCfg:     &IndexConfig{AdaptiveColBERTSegments: false},
+		colbertCodec: store.ColBERTCodecPQ6,
+	}
+	err := idx.applyPQCodecSizeGate(context.Background(), &segmentCountTestStore{chunks: chunks})
+	if err != nil {
+		t.Fatalf("applyPQCodecSizeGate failed: %v", err)
+	}
+	if idx.colbertCodec != store.ColBERTCodecPQ6 {
+		t.Fatalf("expected large corpus to keep pq6, got %s", idx.colbertCodec)
+	}
+}
+
+func TestApplyPQCodecSizeGate_AdaptiveUsesBudgetedEstimate(t *testing.T) {
+	content := makeSegmentedContent(15)
+	rawCount := len(searchpkg.DecomposeDocumentRaw(content))
+	legacyCount := len(searchpkg.DecomposeDocument(content))
+	budget := searchpkg.AdaptiveSegmentBudgetFromRawCount(rawCount)
+	if rawCount <= legacyCount {
+		t.Fatalf("test content did not exceed legacy decomposition: raw=%d legacy=%d", rawCount, legacyCount)
+	}
+	if budget >= rawCount {
+		t.Fatalf("adaptive budget did not shrink raw count: raw=%d budget=%d", rawCount, budget)
+	}
+
+	chunks := make([]store.ChunkInfo, 1000)
+	for i := range chunks {
+		chunks[i] = store.ChunkInfo{
+			ID:      fmt.Sprintf("chunk-%d", i),
+			Content: content,
+		}
+	}
+
+	idx := &Indexer{
+		indexCfg:     &IndexConfig{AdaptiveColBERTSegments: true},
+		colbertCodec: store.ColBERTCodecPQ6,
+	}
+	err := idx.applyPQCodecSizeGate(context.Background(), &segmentCountTestStore{chunks: chunks})
+	if err != nil {
+		t.Fatalf("applyPQCodecSizeGate failed: %v", err)
+	}
+	if idx.colbertCodec != store.ColBERTCodecInt8 {
+		t.Fatalf("expected adaptive budgeted estimate %d to downgrade to int8, got %s", budget*len(chunks), idx.colbertCodec)
 	}
 }
 
@@ -224,12 +346,241 @@ func TestBuildStoredColBERTSegments_AdaptiveMergesSimilarSegments(t *testing.T) 
 		perturbEmbedding(baseD, 0.004),
 	}
 
-	segments := buildStoredColBERTSegments(segmentTexts, embeddings, true)
+	segments := buildStoredColBERTSegments("chunk-c", segmentTexts, embeddings, true, store.ColBERTCodecInt8, nil)
 	if len(segments) >= len(segmentTexts) {
 		t.Fatalf("adaptive merge did not collapse similar segments: got %d from %d", len(segments), len(segmentTexts))
 	}
 	if len(segments) > searchpkg.AdaptiveSegmentBudgetFromRawCount(len(segmentTexts)) {
 		t.Fatalf("expected merged result to respect adaptive budget, got %d", len(segments))
+	}
+	for i, seg := range segments {
+		if len(seg.EmbeddingInt8) == 0 {
+			t.Fatalf("merged segment %d lost its int8 payload", i)
+		}
+	}
+}
+
+func TestBuildFloat32ColBERTSegments_AdaptiveMergesKeepFloatEmbeddings(t *testing.T) {
+	rng := rand.New(rand.NewSource(17))
+	baseA := randomNormalizedEmbedding(rng, 768)
+	baseB := randomNormalizedEmbedding(rng, 768)
+
+	segmentTexts := []string{"a0", "a1", "a2", "b0", "b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8"}
+	embeddings := [][]float32{
+		perturbEmbedding(baseA, 0.002),
+		perturbEmbedding(baseA, 0.003),
+		perturbEmbedding(baseA, 0.004),
+		perturbEmbedding(baseB, 0.002),
+		perturbEmbedding(baseB, 0.003),
+		perturbEmbedding(baseB, 0.004),
+		perturbEmbedding(baseB, 0.005),
+		perturbEmbedding(baseB, 0.006),
+		perturbEmbedding(baseB, 0.007),
+		perturbEmbedding(baseB, 0.008),
+		perturbEmbedding(baseB, 0.009),
+		perturbEmbedding(baseB, 0.010),
+	}
+
+	segments := buildFloat32ColBERTSegments(segmentTexts, embeddings, true)
+	if len(segments) >= len(segmentTexts) {
+		t.Fatalf("adaptive float32 merge did not reduce segment count: got %d from %d", len(segments), len(segmentTexts))
+	}
+	for i, seg := range segments {
+		if len(seg.Embedding) == 0 {
+			t.Fatalf("float32 merged segment %d lost its embedding", i)
+		}
+		if len(seg.EmbeddingInt8) != 0 {
+			t.Fatalf("float32 merged segment %d should not be quantized yet", i)
+		}
+	}
+}
+
+func TestBuildStoredColBERTSegments_PQ6EncodesCodes(t *testing.T) {
+	pq, err := util.NewProductQuantizer(util.PQConfig{
+		Dims:       4,
+		Subspaces:  2,
+		Centroids:  4,
+		Iterations: 4,
+	})
+	if err != nil {
+		t.Fatalf("NewProductQuantizer failed: %v", err)
+	}
+	if err := pq.Train([][]float32{
+		{1, 0, 0, 0},
+		{0, 1, 0, 0},
+		{0, 0, 1, 0},
+		{0, 0, 0, 1},
+	}, 4); err != nil {
+		t.Fatalf("Train failed: %v", err)
+	}
+
+	segments := buildStoredColBERTSegments(
+		"chunk-pq",
+		[]string{"a", "b"},
+		[][]float32{
+			{1, 0, 0, 0},
+			{0, 1, 0, 0},
+		},
+		false,
+		store.ColBERTCodecPQ6,
+		pq,
+	)
+
+	if len(segments) != 2 {
+		t.Fatalf("expected 2 segments, got %d", len(segments))
+	}
+	if len(segments[0].PQCodes) != pq.CodeSize() {
+		t.Fatalf("expected %d PQ bytes, got %d", pq.CodeSize(), len(segments[0].PQCodes))
+	}
+	if len(segments[0].EmbeddingInt8) != 0 {
+		t.Fatalf("expected PQ path to omit int8 payload")
+	}
+}
+
+func TestEncodeSegmentsToPQ_UsesStoredInt8Embeddings(t *testing.T) {
+	pq, err := util.NewProductQuantizer(util.PQConfig{
+		Dims:       4,
+		Subspaces:  2,
+		Centroids:  4,
+		Iterations: 4,
+	})
+	if err != nil {
+		t.Fatalf("NewProductQuantizer failed: %v", err)
+	}
+	training := [][]float32{
+		{1, 0, 0, 0},
+		{0, 1, 0, 0},
+		{0, 0, 1, 0},
+		{0, 0, 0, 1},
+	}
+	if err := pq.Train(training, 4); err != nil {
+		t.Fatalf("Train failed: %v", err)
+	}
+
+	q0, scale0, min0 := util.QuantizeInt8([]float32{1, 0, 0, 0})
+	q1, scale1, min1 := util.QuantizeInt8([]float32{0, 1, 0, 0})
+	encoded, err := encodeSegmentsToPQ("chunk-int8", []store.ColBERTSegment{
+		{
+			SegmentIdx:    0,
+			Text:          "a",
+			EmbeddingInt8: q0,
+			QuantScale:    scale0,
+			QuantMin:      min0,
+		},
+		{
+			SegmentIdx:    1,
+			Text:          "b",
+			EmbeddingInt8: q1,
+			QuantScale:    scale1,
+			QuantMin:      min1,
+		},
+	}, pq)
+	if err != nil {
+		t.Fatalf("encodeSegmentsToPQ failed: %v", err)
+	}
+
+	if len(encoded) != 2 {
+		t.Fatalf("expected 2 encoded segments, got %d", len(encoded))
+	}
+	if encoded[0].SegmentIdx != 0 || encoded[1].SegmentIdx != 1 {
+		t.Fatalf("segment indexes were not preserved: %+v", encoded)
+	}
+	if encoded[0].Text != "a" || encoded[1].Text != "b" {
+		t.Fatalf("segment texts were not preserved: %+v", encoded)
+	}
+	if len(encoded[0].PQCodes) != pq.CodeSize() || len(encoded[1].PQCodes) != pq.CodeSize() {
+		t.Fatalf("expected code size %d, got %d/%d", pq.CodeSize(), len(encoded[0].PQCodes), len(encoded[1].PQCodes))
+	}
+	if len(encoded[0].EmbeddingInt8) != 0 || len(encoded[1].EmbeddingInt8) != 0 {
+		t.Fatalf("encoded PQ segments should not keep int8 payloads: %+v", encoded)
+	}
+}
+
+func TestConvertColBERTSegmentsForCodecStrict_PQEncodeFailureErrors(t *testing.T) {
+	pq, err := util.NewProductQuantizer(util.PQConfig{
+		Dims:       4,
+		Subspaces:  2,
+		Centroids:  4,
+		Iterations: 4,
+	})
+	if err != nil {
+		t.Fatalf("NewProductQuantizer failed: %v", err)
+	}
+	if err := pq.Train([][]float32{
+		{1, 0, 0, 0},
+		{0, 1, 0, 0},
+		{0, 0, 1, 0},
+		{0, 0, 0, 1},
+	}, 4); err != nil {
+		t.Fatalf("Train failed: %v", err)
+	}
+
+	_, err = convertColBERTSegmentsForCodecStrict("chunk-strict", []store.ColBERTSegment{
+		{SegmentIdx: 0, Text: "broken"},
+	}, store.ColBERTCodecPQ6, pq)
+	if err == nil {
+		t.Fatal("expected strict PQ conversion to fail for missing embeddings")
+	}
+}
+
+func TestColBERTPQScratchRoundTrip(t *testing.T) {
+	writer, err := newColBERTPQScratchWriter(t.TempDir())
+	if err != nil {
+		t.Fatalf("newColBERTPQScratchWriter failed: %v", err)
+	}
+
+	first := []store.ColBERTSegment{
+		{SegmentIdx: 0, Text: "first", Embedding: []float32{1, 0, 0, 0}},
+		{SegmentIdx: 1, Text: "second", Embedding: []float32{0, 1, 0, 0}},
+	}
+	second := []store.ColBERTSegment{
+		{SegmentIdx: 0, Text: "third", Embedding: []float32{0, 0, 1, 0}},
+	}
+	if err := writer.WriteChunk("chunk-1", first); err != nil {
+		t.Fatalf("WriteChunk failed: %v", err)
+	}
+	if err := writer.WriteChunk("chunk-2", second); err != nil {
+		t.Fatalf("WriteChunk second failed: %v", err)
+	}
+	path := writer.Path()
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	reader, err := openColBERTPQScratchReader(path)
+	if err != nil {
+		t.Fatalf("openColBERTPQScratchReader failed: %v", err)
+	}
+	defer func() { _ = reader.Close() }()
+
+	record, err := reader.Next()
+	if err != nil {
+		t.Fatalf("Next failed: %v", err)
+	}
+	if record.ChunkID != "chunk-1" {
+		t.Fatalf("unexpected chunk id %q", record.ChunkID)
+	}
+	if len(record.Segments) != 2 {
+		t.Fatalf("expected 2 segments, got %d", len(record.Segments))
+	}
+	if len(record.Segments[0].Embedding) != 4 || record.Segments[0].Embedding[0] != 1 {
+		t.Fatalf("unexpected first embedding: %+v", record.Segments[0].Embedding)
+	}
+
+	record, err = reader.Next()
+	if err != nil {
+		t.Fatalf("second Next failed: %v", err)
+	}
+	if record.ChunkID != "chunk-2" {
+		t.Fatalf("unexpected second chunk id %q", record.ChunkID)
+	}
+	if len(record.Segments) != 1 || record.Segments[0].Text != "third" {
+		t.Fatalf("unexpected second record: %+v", record)
+	}
+
+	record, err = reader.Next()
+	if err != io.EOF {
+		t.Fatalf("expected EOF after scratch stream, got record=%+v err=%v", record, err)
 	}
 }
 

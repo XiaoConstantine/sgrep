@@ -3,8 +3,10 @@ package search
 import (
 	"context"
 	"math"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"github.com/XiaoConstantine/sgrep/pkg/embed"
@@ -24,11 +26,16 @@ type ColBERTScorer struct {
 	segmentStore     store.ColBERTSegmentStorer // Optional: for pre-computed segments
 	cache            *segmentCache
 	adaptiveSegments bool
+	pq               *util.ProductQuantizer
+	pqExactRescoreK  int
 }
+
+const adaptiveExactRescorePoolMinSim = 0.90
 
 type preparedQueryTerm struct {
 	embedding []float32
 	sum       float64
+	pqTable   [][]float64
 }
 
 // segmentCache caches PRE-NORMALIZED segment embeddings to avoid recomputation.
@@ -87,6 +94,20 @@ func (c *ColBERTScorer) SetSegmentStore(s store.ColBERTSegmentStorer) {
 // SetAdaptiveSegments enables token-aware sqrt(M) segment budgets.
 func (c *ColBERTScorer) SetAdaptiveSegments(enabled bool) {
 	c.adaptiveSegments = enabled
+}
+
+// SetProductQuantizer configures PQ ADC scoring for segments that carry PQ codes.
+func (c *ColBERTScorer) SetProductQuantizer(pq *util.ProductQuantizer) {
+	c.pq = pq
+}
+
+// SetPQExactRescoreTopK configures exact rescoring for the top PQ-ranked docs.
+// Set to 0 to disable the second pass.
+func (c *ColBERTScorer) SetPQExactRescoreTopK(k int) {
+	if k < 0 {
+		k = 0
+	}
+	c.pqExactRescoreK = k
 }
 
 // Score computes ColBERT-style MaxSim score between query and document.
@@ -239,7 +260,7 @@ func (c *ColBERTScorer) ScoreBatchWithChunkIDs(ctx context.Context, query string
 	if err != nil {
 		return nil, err
 	}
-	preparedTerms := prepareQueryTerms(queryEmbeddings)
+	preparedTerms := prepareQueryTermsWithPQ(queryEmbeddings, c.pq)
 
 	// Batch load pre-computed segment embeddings for all chunks
 	segmentMap, err := c.segmentStore.GetColBERTSegmentsBatch(ctx, chunkIDs)
@@ -287,7 +308,7 @@ func (c *ColBERTScorer) ScoreBatchWithChunkIDs(ctx context.Context, query string
 		// Compute MaxSim score using int8 quantized embeddings if available
 		var totalScore float64
 		for _, term := range preparedTerms {
-			maxSim := maxSimPreparedInt8(term, segments)
+			maxSim := maxSimPrepared(term, segments, c.pq)
 			if maxSim > 0 {
 				totalScore += maxSim
 			}
@@ -295,7 +316,161 @@ func (c *ColBERTScorer) ScoreBatchWithChunkIDs(ctx context.Context, query string
 		scores[i] = totalScore / float64(len(queryTerms))
 	}
 
+	if err := c.exactRescoreTopPQDocs(ctx, queryEmbeddings, chunkIDs, documents, segmentMap, scores); err != nil {
+		util.Debugf(util.DebugDetailed, "ColBERT: skipping PQ exact rescore: %v", err)
+	}
+
 	return scores, nil
+}
+
+func (c *ColBERTScorer) exactRescoreTopPQDocs(ctx context.Context, queryEmbeddings [][]float32, chunkIDs, documents []string, segmentMap map[string][]store.ColBERTSegment, scores []float64) error {
+	if c == nil || c.embedder == nil || c.pq == nil || c.pqExactRescoreK <= 0 {
+		return nil
+	}
+	totalStart := time.Now()
+
+	type candidate struct {
+		idx   int
+		score float64
+	}
+
+	candidates := make([]candidate, 0, len(chunkIDs))
+	for i, chunkID := range chunkIDs {
+		if i >= len(documents) || i >= len(scores) {
+			break
+		}
+		if !hasPQSegments(segmentMap[chunkID]) {
+			continue
+		}
+		candidates = append(candidates, candidate{idx: i, score: scores[i]})
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].score > candidates[j].score
+	})
+	if len(candidates) > c.pqExactRescoreK {
+		candidates = candidates[:c.pqExactRescoreK]
+	}
+
+	type docRange struct {
+		idx   int
+		start int
+		end   int
+	}
+
+	ranges := make([]docRange, 0, len(candidates))
+	allSegments := make([]string, 0, len(candidates)*4)
+	decomposeStart := time.Now()
+	for _, cand := range candidates {
+		docSegments := c.exactRescoreDocumentSegments(documents[cand.idx])
+		if len(docSegments) == 0 {
+			continue
+		}
+		start := len(allSegments)
+		allSegments = append(allSegments, docSegments...)
+		ranges = append(ranges, docRange{
+			idx:   cand.idx,
+			start: start,
+			end:   len(allSegments),
+		})
+	}
+	decomposeDuration := time.Since(decomposeStart)
+	if len(allSegments) == 0 {
+		return nil
+	}
+
+	cacheHits, cacheMisses := c.segmentCacheStats(allSegments)
+	embedStart := time.Now()
+	docEmbeddings, err := c.embedTexts(ctx, allSegments)
+	embedDuration := time.Since(embedStart)
+	if err != nil {
+		return err
+	}
+
+	scoreStart := time.Now()
+	pooledSegments := 0
+	for _, r := range ranges {
+		docSegmentTexts := allSegments[r.start:r.end]
+		docSegmentEmbeddings := docEmbeddings[r.start:r.end]
+		scoreEmbeddings := c.exactRescoreEmbeddings(docSegmentTexts, docSegmentEmbeddings)
+		pooledSegments += len(scoreEmbeddings)
+		scores[r.idx] = exactColBERTScore(queryEmbeddings, scoreEmbeddings)
+	}
+	scoreDuration := time.Since(scoreStart)
+	util.Debugf(util.DebugSummary,
+		"PQ exact rescore: docs=%d raw_segments=%d pooled_segments=%d cache_hits=%d cache_misses=%d decompose=%v embed=%v score=%v total=%v",
+		len(ranges),
+		len(allSegments),
+		pooledSegments,
+		cacheHits,
+		cacheMisses,
+		decomposeDuration.Round(time.Millisecond),
+		embedDuration.Round(time.Millisecond),
+		scoreDuration.Round(time.Millisecond),
+		time.Since(totalStart).Round(time.Millisecond),
+	)
+	return nil
+}
+
+func (c *ColBERTScorer) exactRescoreDocumentSegments(content string) []string {
+	if c != nil && c.adaptiveSegments {
+		return DecomposeDocumentRaw(content)
+	}
+	return c.documentSegments(content)
+}
+
+func (c *ColBERTScorer) exactRescoreEmbeddings(segmentTexts []string, embeddings [][]float32) [][]float32 {
+	if c == nil || !c.adaptiveSegments {
+		return embeddings
+	}
+	target := AdaptiveSegmentBudgetFromRawCount(len(segmentTexts))
+	if len(embeddings) <= target {
+		return embeddings
+	}
+
+	segments := make([]store.ColBERTSegment, 0, len(segmentTexts))
+	for i := range segmentTexts {
+		if i >= len(embeddings) || len(embeddings[i]) == 0 {
+			continue
+		}
+		segments = append(segments, store.ColBERTSegment{
+			SegmentIdx: i,
+			Text:       segmentTexts[i],
+			Embedding:  embeddings[i],
+		})
+	}
+	if len(segments) <= target {
+		return embeddings
+	}
+
+	pooled := store.NewSegmentPooler(target, adaptiveExactRescorePoolMinSim).PoolAndMerge(segments)
+	pooledEmbeddings := make([][]float32, 0, len(pooled))
+	for _, seg := range pooled {
+		if len(seg.Embedding) > 0 {
+			pooledEmbeddings = append(pooledEmbeddings, seg.Embedding)
+		}
+	}
+	if len(pooledEmbeddings) == 0 {
+		return embeddings
+	}
+	return pooledEmbeddings
+}
+
+func (c *ColBERTScorer) segmentCacheStats(texts []string) (hits int, misses int) {
+	if c == nil || c.cache == nil {
+		return 0, len(texts)
+	}
+	for _, text := range texts {
+		if c.cache.get(text) != nil {
+			hits++
+		} else {
+			misses++
+		}
+	}
+	return hits, len(texts) - hits
 }
 
 // embedTexts embeds multiple texts, using cache where possible.
@@ -684,6 +859,32 @@ func prepareQueryTerms(queryEmbeddings [][]float32) []preparedQueryTerm {
 	return terms
 }
 
+func prepareQueryTermsWithPQ(queryEmbeddings [][]float32, pq *util.ProductQuantizer) []preparedQueryTerm {
+	terms := prepareQueryTerms(queryEmbeddings)
+	if pq == nil || !pq.IsTrained() {
+		return terms
+	}
+
+	for i := range terms {
+		table, err := pq.PrecomputeQueryTable(terms[i].embedding)
+		if err != nil {
+			continue
+		}
+		terms[i].pqTable = table
+	}
+
+	return terms
+}
+
+func maxSimPrepared(term preparedQueryTerm, segments []store.ColBERTSegment, pq *util.ProductQuantizer) float64 {
+	if pq != nil {
+		if maxSim := maxSimPreparedPQ(term, segments); maxSim >= 0 {
+			return maxSim
+		}
+	}
+	return maxSimPreparedInt8(term, segments)
+}
+
 func maxSimPreparedInt8(term preparedQueryTerm, segments []store.ColBERTSegment) float64 {
 	if len(segments) == 0 {
 		return -1
@@ -702,6 +903,57 @@ func maxSimPreparedInt8(term preparedQueryTerm, segments []store.ColBERTSegment)
 		}
 	}
 	return maxSim
+}
+
+func maxSimPreparedPQ(term preparedQueryTerm, segments []store.ColBERTSegment) float64 {
+	if len(segments) == 0 || len(term.pqTable) == 0 {
+		return -1
+	}
+
+	maxSim := float64(-1)
+	found := false
+	for _, seg := range segments {
+		if len(seg.PQCodes) == 0 {
+			continue
+		}
+		found = true
+		sim := 0.0
+		for sub := range term.pqTable {
+			sim += term.pqTable[sub][seg.PQCodes[sub]]
+		}
+		if sim > maxSim {
+			maxSim = sim
+		}
+	}
+	if !found {
+		return -1
+	}
+	return maxSim
+}
+
+func hasPQSegments(segments []store.ColBERTSegment) bool {
+	for _, seg := range segments {
+		if len(seg.PQCodes) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func exactColBERTScore(queryEmbeddings, docEmbeddings [][]float32) float64 {
+	if len(queryEmbeddings) == 0 || len(docEmbeddings) == 0 {
+		return 0
+	}
+
+	distances := make([]float64, len(docEmbeddings))
+	var totalScore float64
+	for _, qEmb := range queryEmbeddings {
+		maxSim := maxSimBatch(qEmb, docEmbeddings, distances)
+		if maxSim > 0 {
+			totalScore += maxSim
+		}
+	}
+	return totalScore / float64(len(queryEmbeddings))
 }
 
 func sumFloat32(values []float32) float64 {

@@ -6,7 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
+	"math/rand"
 	"os"
 	pathpkg "path"
 	"path/filepath"
@@ -32,12 +34,22 @@ type IndexConfig struct {
 	Quantization            store.QuantizationMode // Vector quantization mode (none, int8, binary)
 	SmartSkip               bool                   // Enable smart skipping for large repos (default: true)
 	AdaptiveColBERTSegments bool                   // Enable token-aware sqrt(M) ColBERT segment budgets
+	ColBERTCodec            store.ColBERTCodec     // Late interaction segment codec (int8, pq6)
 }
 
 // Large repo threshold - above this we enable smart skipping
 const largeRepoThreshold = 1000
 
 const adaptiveColBERTPoolMinSim = 0.90
+
+const (
+	colbertPQSampleSize                = 50000
+	colbertPQMinTrainingVectors        = 256
+	colbertPQTrainIterations           = 25
+	colbertPQMinWorthwhileSegments     = 5000
+	colbertPreindexChunkFetchBatchSize = 64
+	colbertRewriteChunkBatchSize       = 128
+)
 
 // DefaultIndexConfig returns sensible defaults for indexing.
 func DefaultIndexConfig() *IndexConfig {
@@ -59,20 +71,23 @@ func DefaultIndexConfig() *IndexConfig {
 		Quantization:            store.QuantizeInt8, // Default to int8 for 4x storage savings
 		SmartSkip:               true,               // Enable smart skipping for large repos
 		AdaptiveColBERTSegments: false,
+		ColBERTCodec:            store.ColBERTCodecUnspecified,
 	}
 }
 
 // Indexer handles file indexing.
 type Indexer struct {
-	rootPath  string
-	repoDir   string // Directory containing index files (e.g., ~/.sgrep/repos/<hash>)
-	store     store.Storer
-	embedder  *embed.Embedder
-	chunkCfg  *chunk.Config
-	indexCfg  *IndexConfig
-	ignore    *IgnoreRules
-	processed int64
-	errors    int64
+	rootPath     string
+	repoDir      string // Directory containing index files (e.g., ~/.sgrep/repos/<hash>)
+	store        store.Storer
+	embedder     *embed.Embedder
+	chunkCfg     *chunk.Config
+	indexCfg     *IndexConfig
+	ignore       *IgnoreRules
+	colbertCodec store.ColBERTCodec
+	colbertPQ    *util.ProductQuantizer
+	processed    int64
+	errors       int64
 }
 
 // New creates a new indexer for the given path with default configuration.
@@ -115,18 +130,30 @@ func NewWithConfig(path string, cfg *IndexConfig) (*Indexer, error) {
 	if err != nil {
 		return nil, err
 	}
+	existingCodec := store.ColBERTCodecUnspecified
+	var existingPQ *util.ProductQuantizer
+	if provider, ok := s.(store.ColBERTMetadataProvider); ok {
+		existingCodec = provider.ColBERTCodec()
+		existingPQ = provider.ProductQuantizer()
+	}
+	effectiveCodec := store.ResolveColBERTCodec(cfg.ColBERTCodec, existingCodec)
+	if effectiveCodec != store.ColBERTCodecPQ6 {
+		existingPQ = nil
+	}
 
 	// Load ignore rules
 	ignore := NewIgnoreRules(absPath)
 
 	return &Indexer{
-		rootPath: absPath,
-		repoDir:  repoDir,
-		store:    s,
-		embedder: embed.New(),
-		chunkCfg: chunk.DefaultConfig(),
-		indexCfg: cfg,
-		ignore:   ignore,
+		rootPath:     absPath,
+		repoDir:      repoDir,
+		store:        s,
+		embedder:     embed.New(),
+		chunkCfg:     chunk.DefaultConfig(),
+		indexCfg:     cfg,
+		ignore:       ignore,
+		colbertCodec: effectiveCodec,
+		colbertPQ:    existingPQ,
 	}, nil
 }
 
@@ -694,6 +721,9 @@ func (idx *Indexer) refreshFileEmbedding(ctx context.Context, docs []*store.Docu
 func (idx *Indexer) refreshColBERTSegments(ctx context.Context, segmentStore store.ColBERTSegmentStorer, docs []*store.Document) error {
 	if len(docs) == 0 {
 		return nil
+	}
+	if err := idx.ensureColBERTCodecReady(ctx, segmentStore); err != nil {
+		return err
 	}
 
 	chunks := make([]store.ChunkInfo, 0, len(docs))
@@ -1461,6 +1491,104 @@ func (idx *Indexer) ComputeColBERTSegments(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("store does not support ColBERT segments")
 	}
 
+	if err := idx.applyPQCodecSizeGate(ctx, segmentStore); err != nil {
+		return 0, err
+	}
+
+	if idx.colbertCodec == store.ColBERTCodecPQ6 && idx.colbertPQ == nil {
+		hasSegments, err := segmentStore.HasColBERTSegments(ctx)
+		if err != nil {
+			return 0, fmt.Errorf("check existing ColBERT segments: %w", err)
+		}
+		if !hasSegments {
+			return idx.computeFreshPQSegmentsFromScratch(ctx, segmentStore)
+		}
+
+		if err := idx.ensureColBERTCodecReady(ctx, segmentStore); err != nil {
+			return 0, err
+		}
+		rewritten, err := idx.rewriteStoredColBERTSegmentsToPQ(ctx, segmentStore)
+		if err != nil {
+			return rewritten, err
+		}
+		if err := idx.persistColBERTMetadata(ctx); err != nil {
+			return rewritten, err
+		}
+		return rewritten, nil
+	}
+
+	if err := idx.ensureColBERTCodecReady(ctx, segmentStore); err != nil {
+		return 0, err
+	}
+	processed, err := idx.computeColBERTSegmentsPass(ctx, segmentStore, "Computing ColBERT segments")
+	if err != nil {
+		return processed, err
+	}
+	if idx.colbertCodec == store.ColBERTCodecPQ6 {
+		if err := idx.persistColBERTMetadata(ctx); err != nil {
+			return processed, err
+		}
+	}
+	return processed, nil
+}
+
+func (idx *Indexer) applyPQCodecSizeGate(ctx context.Context, segmentStore store.ColBERTSegmentStorer) error {
+	if idx.colbertCodec != store.ColBERTCodecPQ6 {
+		return nil
+	}
+
+	estimatedSegments, err := idx.estimateColBERTStoredSegmentCount(ctx, segmentStore)
+	if err != nil {
+		return fmt.Errorf("estimate ColBERT segment count for PQ6 gate: %w", err)
+	}
+	if estimatedSegments >= colbertPQMinWorthwhileSegments {
+		return nil
+	}
+
+	fmt.Printf("Skipping PQ6: estimated %d ColBERT segments is below the worthwhile savings threshold of %d, keeping int8\n",
+		estimatedSegments, colbertPQMinWorthwhileSegments)
+	idx.colbertCodec = store.ColBERTCodecInt8
+	idx.colbertPQ = nil
+	return nil
+}
+
+func (idx *Indexer) estimateColBERTStoredSegmentCount(ctx context.Context, segmentStore store.ColBERTSegmentStorer) (int, error) {
+	const fetchBatchSize = 256
+
+	totalSegments := 0
+	offset := 0
+	adaptive := idx.useAdaptiveColBERTSegments()
+
+	for {
+		chunks, err := segmentStore.GetChunksForColBERT(ctx, fetchBatchSize, offset)
+		if err != nil {
+			return 0, fmt.Errorf("get chunks at offset %d: %w", offset, err)
+		}
+		if len(chunks) == 0 {
+			break
+		}
+
+		for _, chunk := range chunks {
+			combined := util.CombineDescriptionContent(chunk.Content, chunk.Description)
+			totalSegments += estimateStoredColBERTSegments(combined, adaptive)
+			if totalSegments >= colbertPQMinWorthwhileSegments {
+				return totalSegments, nil
+			}
+		}
+		offset += len(chunks)
+	}
+
+	return totalSegments, nil
+}
+
+func estimateStoredColBERTSegments(content string, adaptive bool) int {
+	if adaptive {
+		return searchpkg.AdaptiveSegmentBudgetFromRawCount(len(searchpkg.DecomposeDocumentRaw(content)))
+	}
+	return len(searchpkg.DecomposeDocument(content))
+}
+
+func (idx *Indexer) computeColBERTSegmentsPass(ctx context.Context, segmentStore store.ColBERTSegmentStorer, progressLabel string) (int, error) {
 	// Get total chunk count for progress reporting
 	stats, err := idx.store.Stats(ctx)
 	if err != nil {
@@ -1468,7 +1596,7 @@ func (idx *Indexer) ComputeColBERTSegments(ctx context.Context) (int, error) {
 	}
 
 	totalChunks := int(stats.Chunks)
-	fmt.Printf("Computing ColBERT segments for %d chunks...\n", totalChunks)
+	fmt.Printf("%s for %d chunks...\n", progressLabel, totalChunks)
 
 	if totalChunks == 0 {
 		return 0, nil
@@ -1476,7 +1604,7 @@ func (idx *Indexer) ComputeColBERTSegments(ctx context.Context) (int, error) {
 
 	// Process chunks in paginated batches to handle large repos
 	// Fetch 32 chunks at a time from DB, process them, then fetch next batch
-	const fetchBatchSize = 32
+	const fetchBatchSize = colbertPreindexChunkFetchBatchSize
 	processed := 0
 	offset := 0
 
@@ -1520,6 +1648,252 @@ func (idx *Indexer) ComputeColBERTSegments(ctx context.Context) (int, error) {
 	return processed, nil
 }
 
+func (idx *Indexer) computeFreshPQSegmentsFromScratch(ctx context.Context, segmentStore store.ColBERTSegmentStorer) (int, error) {
+	stats, err := idx.store.Stats(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get stats: %w", err)
+	}
+
+	totalChunks := int(stats.Chunks)
+	fmt.Printf("Computing ColBERT float32 scratch segments for %d chunks...\n", totalChunks)
+	if totalChunks == 0 {
+		return 0, nil
+	}
+
+	scratch, err := newColBERTPQScratchWriter(idx.repoDir)
+	if err != nil {
+		return 0, fmt.Errorf("create ColBERT PQ scratch file: %w", err)
+	}
+	scratchPath := scratch.Path()
+	defer func() { _ = os.Remove(scratchPath) }()
+
+	const fetchBatchSize = colbertPreindexChunkFetchBatchSize
+	processed := 0
+	offset := 0
+	rng := rand.New(rand.NewSource(42))
+	sample := make([][]float32, 0, colbertPQSampleSize)
+	totalVectors := 0
+
+	for {
+		chunks, err := segmentStore.GetChunksForColBERT(ctx, fetchBatchSize, offset)
+		if err != nil {
+			_ = scratch.Close()
+			return processed, fmt.Errorf("failed to get chunks at offset %d: %w", offset, err)
+		}
+		if len(chunks) == 0 {
+			break
+		}
+
+		chunkSegments, err := idx.buildFloat32ColBERTChunkSegments(ctx, chunks)
+		if err != nil {
+			_ = scratch.Close()
+			return processed, fmt.Errorf("failed to build float32 ColBERT scratch segments: %w", err)
+		}
+
+		for _, chunk := range chunks {
+			segments := chunkSegments[chunk.ID]
+			if len(segments) == 0 {
+				continue
+			}
+			if err := scratch.WriteChunk(chunk.ID, segments); err != nil {
+				_ = scratch.Close()
+				return processed, fmt.Errorf("write ColBERT PQ scratch chunk %s: %w", chunk.ID, err)
+			}
+			for _, seg := range segments {
+				if len(seg.Embedding) == 0 {
+					continue
+				}
+				totalVectors++
+				sample = reservoirSampleEmbeddings(sample, seg.Embedding, totalVectors, colbertPQSampleSize, rng)
+			}
+		}
+
+		offset += len(chunks)
+		processed += len(chunks)
+		fmt.Printf("Processed %d/%d chunks...\n", processed, totalChunks)
+	}
+
+	if err := scratch.Close(); err != nil {
+		return processed, fmt.Errorf("close ColBERT PQ scratch file: %w", err)
+	}
+
+	if totalVectors < colbertPQMinTrainingVectors {
+		fmt.Printf("Skipping PQ6: only %d segment vectors available, keeping int8\n", totalVectors)
+		idx.colbertCodec = store.ColBERTCodecInt8
+		idx.colbertPQ = nil
+		written, err := idx.rewriteScratchColBERTSegments(ctx, segmentStore, scratchPath, totalChunks)
+		if err != nil {
+			return written, err
+		}
+		if err := idx.persistColBERTMetadata(ctx); err != nil {
+			return written, err
+		}
+		return written, nil
+	}
+
+	fmt.Printf("Training ColBERT PQ codebook on %d sampled vectors (%d total)...\n", len(sample), totalVectors)
+	pq, err := util.NewProductQuantizer(util.PQConfig{
+		Dims:       768,
+		Subspaces:  6,
+		Centroids:  256,
+		Iterations: colbertPQTrainIterations,
+	})
+	if err != nil {
+		return processed, fmt.Errorf("create colbert pq: %w", err)
+	}
+	if err := pq.Train(sample, colbertPQTrainIterations); err != nil {
+		return processed, fmt.Errorf("train colbert pq: %w", err)
+	}
+
+	idx.colbertPQ = pq
+	written, err := idx.rewriteScratchColBERTSegments(ctx, segmentStore, scratchPath, totalChunks)
+	if err != nil {
+		return written, err
+	}
+	if err := idx.persistColBERTMetadata(ctx); err != nil {
+		return written, err
+	}
+	return written, nil
+}
+
+func reservoirSampleEmbeddings(sample [][]float32, emb []float32, totalVectors int, sampleSize int, rng *rand.Rand) [][]float32 {
+	if len(sample) < sampleSize {
+		return append(sample, append([]float32(nil), emb...))
+	}
+	replaceIdx := rng.Intn(totalVectors)
+	if replaceIdx < len(sample) {
+		sample[replaceIdx] = append([]float32(nil), emb...)
+	}
+	return sample
+}
+
+func (idx *Indexer) rewriteScratchColBERTSegments(ctx context.Context, segmentStore store.ColBERTSegmentStorer, scratchPath string, totalChunks int) (int, error) {
+	reader, err := openColBERTPQScratchReader(scratchPath)
+	if err != nil {
+		return 0, fmt.Errorf("open ColBERT PQ scratch reader: %w", err)
+	}
+	defer func() { _ = reader.Close() }()
+
+	label := "Writing ColBERT int8 segments"
+	progressVerb := "Wrote"
+	if idx.colbertCodec == store.ColBERTCodecPQ6 && idx.colbertPQ != nil {
+		label = "Re-encoding ColBERT segments with PQ6"
+		progressVerb = "Re-encoded"
+	}
+	fmt.Printf("%s for %d chunks...\n", label, totalChunks)
+
+	const batchSize = colbertRewriteChunkBatchSize
+	batch := make(map[string][]store.ColBERTSegment, batchSize)
+	processed := 0
+	flushBatch := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		if err := segmentStore.StoreColBERTSegmentsBatch(ctx, batch); err != nil {
+			return err
+		}
+		for chunkID := range batch {
+			delete(batch, chunkID)
+		}
+		return nil
+	}
+
+	for {
+		record, err := reader.Next()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return processed, fmt.Errorf("read ColBERT PQ scratch record: %w", err)
+		}
+		converted, err := convertColBERTSegmentsForCodecStrict(record.ChunkID, record.Segments, idx.colbertCodec, idx.colbertPQ)
+		if err != nil {
+			return processed, fmt.Errorf("convert scratch chunk %s to %s: %w", record.ChunkID, idx.colbertCodec, err)
+		}
+		batch[record.ChunkID] = converted
+		processed++
+		if len(batch) >= batchSize {
+			if err := flushBatch(); err != nil {
+				return processed, fmt.Errorf("store ColBERT scratch batch: %w", err)
+			}
+			fmt.Printf("%s %d/%d chunks...\n", progressVerb, processed, totalChunks)
+		}
+	}
+
+	if err := flushBatch(); err != nil {
+		return processed, fmt.Errorf("store final ColBERT scratch batch: %w", err)
+	}
+	if processed%batchSize != 0 {
+		fmt.Printf("%s %d/%d chunks...\n", progressVerb, processed, totalChunks)
+	}
+	return processed, nil
+}
+
+func (idx *Indexer) rewriteStoredColBERTSegmentsToPQ(ctx context.Context, segmentStore store.ColBERTSegmentStorer) (int, error) {
+	if idx.colbertCodec != store.ColBERTCodecPQ6 || idx.colbertPQ == nil {
+		return 0, nil
+	}
+
+	stats, err := idx.store.Stats(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get stats for PQ rewrite: %w", err)
+	}
+
+	totalChunks := int(stats.Chunks)
+	fmt.Printf("Re-encoding ColBERT segments with PQ6 for %d chunks...\n", totalChunks)
+	if totalChunks == 0 {
+		return 0, nil
+	}
+
+	const fetchBatchSize = colbertRewriteChunkBatchSize
+	processed := 0
+	offset := 0
+
+	for {
+		chunks, err := segmentStore.GetChunksForColBERT(ctx, fetchBatchSize, offset)
+		if err != nil {
+			return processed, fmt.Errorf("failed to fetch chunks for PQ rewrite at offset %d: %w", offset, err)
+		}
+		if len(chunks) == 0 {
+			break
+		}
+
+		chunkIDs := make([]string, len(chunks))
+		for i, chunk := range chunks {
+			chunkIDs[i] = chunk.ID
+		}
+		segmentMap, err := segmentStore.GetColBERTSegmentsBatch(ctx, chunkIDs)
+		if err != nil {
+			return processed, fmt.Errorf("failed to load segments for PQ rewrite at offset %d: %w", offset, err)
+		}
+
+		encodedBatch := make(map[string][]store.ColBERTSegment, len(chunkIDs))
+		for _, chunk := range chunks {
+			segments := segmentMap[chunk.ID]
+			if len(segments) == 0 {
+				continue
+			}
+			encoded, err := encodeSegmentsToPQ(chunk.ID, segments, idx.colbertPQ)
+			if err != nil {
+				return processed, fmt.Errorf("failed to encode chunk %s for PQ rewrite: %w", chunk.ID, err)
+			}
+			encodedBatch[chunk.ID] = encoded
+		}
+
+		if len(encodedBatch) > 0 {
+			if err := segmentStore.StoreColBERTSegmentsBatch(ctx, encodedBatch); err != nil {
+				return processed, fmt.Errorf("failed to store PQ rewrite batch at offset %d: %w", offset, err)
+			}
+		}
+
+		offset += len(chunks)
+		processed += len(chunks)
+		fmt.Printf("Re-encoded %d/%d chunks...\n", processed, totalChunks)
+	}
+
+	return processed, nil
+}
+
 // ExportColBERTToMMap exports all ColBERT segments from SQLite to an MMap file.
 // This provides faster read access at query time (zero-copy memory mapping).
 // Returns the number of segments exported and any error.
@@ -1554,6 +1928,9 @@ func (idx *Indexer) ExportColBERTToMMap(ctx context.Context, outputDir string) (
 			_ = mmapStore.Close()
 		}
 	}()
+	if provider, ok := segmentStore.(store.ColBERTMetadataProvider); ok {
+		mmapStore.SetColBERTCodec(provider.ColBERTCodec(), provider.ProductQuantizer())
+	}
 
 	mmapStore.BeginWrite()
 	totalSegments := 0
@@ -1667,7 +2044,24 @@ func (idx *Indexer) useAdaptiveColBERTSegments() bool {
 	return idx.indexCfg != nil && idx.indexCfg.AdaptiveColBERTSegments
 }
 
+func (idx *Indexer) usePQColBERTCodec() bool {
+	return idx.colbertCodec == store.ColBERTCodecPQ6 && idx.colbertPQ != nil
+}
+
 func (idx *Indexer) buildColBERTChunkSegments(ctx context.Context, chunks []store.ChunkInfo) (map[string][]store.ColBERTSegment, error) {
+	floatSegments, err := idx.buildFloat32ColBERTChunkSegments(ctx, chunks)
+	if err != nil {
+		return nil, err
+	}
+
+	chunkSegments := make(map[string][]store.ColBERTSegment, len(floatSegments))
+	for chunkID, segments := range floatSegments {
+		chunkSegments[chunkID] = convertColBERTSegmentsForCodec(chunkID, segments, idx.colbertCodec, idx.colbertPQ)
+	}
+	return chunkSegments, nil
+}
+
+func (idx *Indexer) buildFloat32ColBERTChunkSegments(ctx context.Context, chunks []store.ChunkInfo) (map[string][]store.ColBERTSegment, error) {
 	if len(chunks) == 0 {
 		return nil, nil
 	}
@@ -1706,7 +2100,7 @@ func (idx *Indexer) buildColBERTChunkSegments(ctx context.Context, chunks []stor
 			continue
 		}
 
-		chunkSegments[chunk.ID] = buildStoredColBERTSegments(
+		chunkSegments[chunk.ID] = buildFloat32ColBERTSegments(
 			segmentTexts,
 			embeddings[segIdx:segIdx+count],
 			adaptive,
@@ -1717,38 +2111,94 @@ func (idx *Indexer) buildColBERTChunkSegments(ctx context.Context, chunks []stor
 	return chunkSegments, nil
 }
 
-func buildStoredColBERTSegments(segmentTexts []string, embeddings [][]float32, adaptive bool) []store.ColBERTSegment {
+func buildStoredColBERTSegments(chunkID string, segmentTexts []string, embeddings [][]float32, adaptive bool, codec store.ColBERTCodec, pq *util.ProductQuantizer) []store.ColBERTSegment {
+	segments := buildFloat32ColBERTSegments(segmentTexts, embeddings, adaptive)
+	return convertColBERTSegmentsForCodec(chunkID, segments, codec, pq)
+}
+
+func buildFloat32ColBERTSegments(segmentTexts []string, embeddings [][]float32, adaptive bool) []store.ColBERTSegment {
 	if len(segmentTexts) == 0 {
 		return nil
 	}
 
 	segments := make([]store.ColBERTSegment, len(segmentTexts))
 	for i := range segmentTexts {
-		quantized, scale, min := util.QuantizeInt8(embeddings[i])
 		segments[i] = store.ColBERTSegment{
-			SegmentIdx:    i,
-			Text:          segmentTexts[i],
-			EmbeddingInt8: quantized,
-			QuantScale:    scale,
-			QuantMin:      min,
+			SegmentIdx: i,
+			Text:       segmentTexts[i],
+			Embedding:  embeddings[i],
 		}
 	}
 
-	if !adaptive {
-		return segments
-	}
-
-	target := searchpkg.AdaptiveSegmentBudgetFromRawCount(len(segmentTexts))
-	if len(segments) <= target {
-		return segments
-	}
-
-	pooler := store.NewSegmentPooler(target, adaptiveColBERTPoolMinSim)
-	segments = pooler.PoolAndMerge(segments)
-	for i := range segments {
-		segments[i].SegmentIdx = i
+	if adaptive {
+		target := searchpkg.AdaptiveSegmentBudgetFromRawCount(len(segmentTexts))
+		if len(segments) > target {
+			pooler := store.NewSegmentPooler(target, adaptiveColBERTPoolMinSim)
+			segments = pooler.PoolAndMerge(segments)
+			for i := range segments {
+				segments[i].SegmentIdx = i
+			}
+		}
 	}
 	return segments
+}
+
+func convertColBERTSegmentsForCodec(chunkID string, segments []store.ColBERTSegment, codec store.ColBERTCodec, pq *util.ProductQuantizer) []store.ColBERTSegment {
+	converted, _ := convertColBERTSegmentsForCodecWithFallback(chunkID, segments, codec, pq, true)
+	return converted
+}
+
+func convertColBERTSegmentsForCodecStrict(chunkID string, segments []store.ColBERTSegment, codec store.ColBERTCodec, pq *util.ProductQuantizer) ([]store.ColBERTSegment, error) {
+	return convertColBERTSegmentsForCodecWithFallback(chunkID, segments, codec, pq, false)
+}
+
+func convertColBERTSegmentsForCodecWithFallback(chunkID string, segments []store.ColBERTSegment, codec store.ColBERTCodec, pq *util.ProductQuantizer, allowPQFallback bool) ([]store.ColBERTSegment, error) {
+	if codec == store.ColBERTCodecPQ6 && pq != nil {
+		encoded, err := encodeSegmentsToPQ(chunkID, segments, pq)
+		if err != nil {
+			if !allowPQFallback {
+				return nil, err
+			}
+			fmt.Fprintf(os.Stderr, "Warning: ColBERT PQ encode failed for chunk %s, falling back to int8: %v\n", chunkID, err)
+		} else {
+			return encoded, nil
+		}
+	}
+
+	for i := range segments {
+		if segments[i].Embedding != nil {
+			quantized, scale, min := util.QuantizeInt8(segments[i].Embedding)
+			segments[i].Embedding = nil
+			segments[i].EmbeddingInt8 = quantized
+			segments[i].QuantScale = scale
+			segments[i].QuantMin = min
+		}
+	}
+	return segments, nil
+}
+
+func encodeSegmentsToPQ(chunkID string, segments []store.ColBERTSegment, pq *util.ProductQuantizer) ([]store.ColBERTSegment, error) {
+	encoded := make([]store.ColBERTSegment, len(segments))
+	for i, seg := range segments {
+		emb := seg.Embedding
+		if emb == nil && len(seg.EmbeddingInt8) > 0 {
+			emb = util.DequantizeInt8(seg.EmbeddingInt8, seg.QuantScale, seg.QuantMin)
+			emb = util.NormalizeVector(emb)
+		}
+		if emb == nil {
+			return nil, fmt.Errorf("segment %d in chunk %s is missing an encodable embedding", seg.SegmentIdx, chunkID)
+		}
+		codes, err := pq.Encode(emb)
+		if err != nil {
+			return nil, err
+		}
+		encoded[i] = store.ColBERTSegment{
+			SegmentIdx: seg.SegmentIdx,
+			Text:       seg.Text,
+			PQCodes:    codes,
+		}
+	}
+	return encoded, nil
 }
 
 // decomposeDocumentForColBERT splits a document into meaningful segments for ColBERT.
@@ -1758,4 +2208,162 @@ func decomposeDocumentForColBERT(content string, adaptive bool) []string {
 		return searchpkg.DecomposeDocumentRaw(content)
 	}
 	return searchpkg.DecomposeDocument(content)
+}
+
+func (idx *Indexer) ensureColBERTCodecReady(ctx context.Context, segmentStore store.ColBERTSegmentStorer) error {
+	if idx.colbertCodec != store.ColBERTCodecPQ6 {
+		return idx.persistColBERTMetadata(ctx)
+	}
+	if idx.colbertPQ != nil {
+		return nil
+	}
+
+	fmt.Println("Sampling stored ColBERT int8 segments for PQ training...")
+	sample, totalVectors, err := idx.collectColBERTPQTrainingSample(ctx, segmentStore)
+	if err != nil {
+		return err
+	}
+	if totalVectors < colbertPQMinTrainingVectors {
+		fmt.Printf("Skipping PQ6: only %d segment vectors available, keeping int8\n", totalVectors)
+		idx.colbertCodec = store.ColBERTCodecInt8
+		idx.colbertPQ = nil
+		return idx.persistColBERTMetadata(ctx)
+	}
+	fmt.Printf("Training ColBERT PQ codebook on %d sampled vectors (%d total)...\n", len(sample), totalVectors)
+
+	pq, err := util.NewProductQuantizer(util.PQConfig{
+		Dims:       768,
+		Subspaces:  6,
+		Centroids:  256,
+		Iterations: colbertPQTrainIterations,
+	})
+	if err != nil {
+		return fmt.Errorf("create colbert pq: %w", err)
+	}
+	if err := pq.Train(sample, colbertPQTrainIterations); err != nil {
+		return fmt.Errorf("train colbert pq: %w", err)
+	}
+
+	idx.colbertPQ = pq
+	return nil
+}
+
+func (idx *Indexer) persistColBERTMetadata(ctx context.Context) error {
+	metadataStore, ok := idx.store.(store.ColBERTMetadataStore)
+	if !ok {
+		return nil
+	}
+	return metadataStore.SaveColBERTMetadata(ctx, idx.colbertCodec, idx.colbertPQ)
+}
+
+func (idx *Indexer) collectColBERTPQTrainingSample(ctx context.Context, segmentStore store.ColBERTSegmentStorer) ([][]float32, int, error) {
+	const fetchBatchSize = 64
+
+	rng := rand.New(rand.NewSource(42))
+	sample := make([][]float32, 0, colbertPQSampleSize)
+	totalVectors := 0
+
+	hasStoredSegments, err := segmentStore.HasColBERTSegments(ctx)
+	if err != nil {
+		return nil, 0, fmt.Errorf("check existing colbert segments: %w", err)
+	}
+	if hasStoredSegments {
+		if storedSample, storedCount, err := collectPQTrainingSampleFromStoredSegments(ctx, segmentStore, fetchBatchSize, rng); err != nil {
+			return nil, 0, err
+		} else if storedCount > 0 {
+			return storedSample, storedCount, nil
+		}
+	}
+
+	offset := 0
+
+	for {
+		chunks, err := segmentStore.GetChunksForColBERT(ctx, fetchBatchSize, offset)
+		if err != nil {
+			return nil, 0, fmt.Errorf("get pq training chunks at offset %d: %w", offset, err)
+		}
+		if len(chunks) == 0 {
+			break
+		}
+
+		var segmentTexts []string
+		for _, chunk := range chunks {
+			combined := util.CombineDescriptionContent(chunk.Content, chunk.Description)
+			segments := decomposeDocumentForColBERT(combined, idx.useAdaptiveColBERTSegments())
+			segmentTexts = append(segmentTexts, segments...)
+		}
+		if len(segmentTexts) == 0 {
+			offset += len(chunks)
+			continue
+		}
+
+		embeddings, err := idx.embedBatchWithRetry(ctx, segmentTexts, 3)
+		if err != nil {
+			return nil, 0, fmt.Errorf("embed pq training batch: %w", err)
+		}
+		for _, emb := range embeddings {
+			norm := util.NormalizeVectorCopy(emb)
+			totalVectors++
+			if len(sample) < colbertPQSampleSize {
+				sample = append(sample, norm)
+				continue
+			}
+			replaceIdx := rng.Intn(totalVectors)
+			if replaceIdx < len(sample) {
+				sample[replaceIdx] = norm
+			}
+		}
+
+		offset += len(chunks)
+	}
+
+	return sample, totalVectors, nil
+}
+
+func collectPQTrainingSampleFromStoredSegments(ctx context.Context, segmentStore store.ColBERTSegmentStorer, fetchBatchSize int, rng *rand.Rand) ([][]float32, int, error) {
+	sample := make([][]float32, 0, colbertPQSampleSize)
+	totalVectors := 0
+	offset := 0
+
+	for {
+		chunks, err := segmentStore.GetChunksForColBERT(ctx, fetchBatchSize, offset)
+		if err != nil {
+			return nil, 0, fmt.Errorf("get stored pq training chunks at offset %d: %w", offset, err)
+		}
+		if len(chunks) == 0 {
+			break
+		}
+
+		chunkIDs := make([]string, len(chunks))
+		for i, chunk := range chunks {
+			chunkIDs[i] = chunk.ID
+		}
+		segmentMap, err := segmentStore.GetColBERTSegmentsBatch(ctx, chunkIDs)
+		if err != nil {
+			return nil, 0, fmt.Errorf("load stored pq training segments at offset %d: %w", offset, err)
+		}
+
+		for _, chunkID := range chunkIDs {
+			for _, seg := range segmentMap[chunkID] {
+				if len(seg.EmbeddingInt8) == 0 {
+					continue
+				}
+				norm := util.DequantizeInt8(seg.EmbeddingInt8, seg.QuantScale, seg.QuantMin)
+				norm = util.NormalizeVector(norm)
+				totalVectors++
+				if len(sample) < colbertPQSampleSize {
+					sample = append(sample, norm)
+					continue
+				}
+				replaceIdx := rng.Intn(totalVectors)
+				if replaceIdx < len(sample) {
+					sample[replaceIdx] = norm
+				}
+			}
+		}
+
+		offset += len(chunks)
+	}
+
+	return sample, totalVectors, nil
 }

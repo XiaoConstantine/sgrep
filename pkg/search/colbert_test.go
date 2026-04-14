@@ -1,14 +1,99 @@
 package search
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/XiaoConstantine/sgrep/pkg/embed"
 	"github.com/XiaoConstantine/sgrep/pkg/store"
 	"github.com/XiaoConstantine/sgrep/pkg/util"
 )
+
+type staticSegmentStore struct {
+	segments map[string][]store.ColBERTSegment
+}
+
+func (s *staticSegmentStore) StoreColBERTSegments(ctx context.Context, chunkID string, segments []store.ColBERTSegment) error {
+	if s.segments == nil {
+		s.segments = make(map[string][]store.ColBERTSegment)
+	}
+	s.segments[chunkID] = append([]store.ColBERTSegment(nil), segments...)
+	return nil
+}
+
+func (s *staticSegmentStore) StoreColBERTSegmentsBatch(ctx context.Context, chunkSegments map[string][]store.ColBERTSegment) error {
+	if s.segments == nil {
+		s.segments = make(map[string][]store.ColBERTSegment)
+	}
+	for chunkID, segments := range chunkSegments {
+		s.segments[chunkID] = append([]store.ColBERTSegment(nil), segments...)
+	}
+	return nil
+}
+
+func (s *staticSegmentStore) GetColBERTSegments(ctx context.Context, chunkID string) ([]store.ColBERTSegment, error) {
+	return append([]store.ColBERTSegment(nil), s.segments[chunkID]...), nil
+}
+
+func (s *staticSegmentStore) GetColBERTSegmentsBatch(ctx context.Context, chunkIDs []string) (map[string][]store.ColBERTSegment, error) {
+	result := make(map[string][]store.ColBERTSegment, len(chunkIDs))
+	for _, chunkID := range chunkIDs {
+		result[chunkID] = append([]store.ColBERTSegment(nil), s.segments[chunkID]...)
+	}
+	return result, nil
+}
+
+func (s *staticSegmentStore) DeleteColBERTSegments(ctx context.Context, chunkID string) error {
+	delete(s.segments, chunkID)
+	return nil
+}
+
+func (s *staticSegmentStore) HasColBERTSegments(ctx context.Context) (bool, error) {
+	return len(s.segments) > 0, nil
+}
+
+func (s *staticSegmentStore) GetChunksForColBERT(ctx context.Context, batchSize int, offset int) ([]store.ChunkInfo, error) {
+	return nil, nil
+}
+
+func newEmbeddingTestServer(t *testing.T, embeddings map[string][]float32) *httptest.Server {
+	t.Helper()
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Content []string `json:"content"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+
+		type responseItem struct {
+			Index     int         `json:"index"`
+			Embedding [][]float32 `json:"embedding"`
+		}
+
+		resp := make([]responseItem, len(req.Content))
+		for i, text := range req.Content {
+			emb, ok := embeddings[text]
+			if !ok {
+				t.Fatalf("unexpected embedding request for %q", text)
+			}
+			resp[i] = responseItem{
+				Index:     i,
+				Embedding: [][]float32{emb},
+			}
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+}
 
 func TestDecomposeQuery(t *testing.T) {
 	tests := []struct {
@@ -169,6 +254,153 @@ func TestAdaptiveSegments(t *testing.T) {
 			t.Fatalf("huge adaptive decomposition = %d, want %d", len(segments), adaptiveMaxDocumentSegments)
 		}
 	})
+}
+
+func TestScoreBatchWithChunkIDs_PQExactRescoreRecoversOrder(t *testing.T) {
+	queryEmbedding := []float32{1, 0, 0, 0}
+	goodEmbedding := []float32{1, 0, 0, 0}
+	badEmbedding := []float32{0, 1, 0, 0}
+
+	pq, err := util.NewProductQuantizer(util.PQConfig{
+		Dims:       4,
+		Subspaces:  2,
+		Centroids:  4,
+		Iterations: 4,
+	})
+	if err != nil {
+		t.Fatalf("NewProductQuantizer failed: %v", err)
+	}
+	if err := pq.Train([][]float32{
+		queryEmbedding,
+		goodEmbedding,
+		badEmbedding,
+		{0, 0, 1, 0},
+	}, 4); err != nil {
+		t.Fatalf("Train failed: %v", err)
+	}
+
+	biasedGoodCodes, err := pq.Encode(goodEmbedding)
+	if err != nil {
+		t.Fatalf("Encode good failed: %v", err)
+	}
+	biasedBadCodes, err := pq.Encode(badEmbedding)
+	if err != nil {
+		t.Fatalf("Encode bad failed: %v", err)
+	}
+
+	segmentStore := &staticSegmentStore{
+		segments: map[string][]store.ColBERTSegment{
+			"chunk-bad": {{
+				SegmentIdx: 0,
+				Text:       "bad segment line",
+				PQCodes:    biasedGoodCodes,
+			}},
+			"chunk-good": {{
+				SegmentIdx: 0,
+				Text:       "good segment line",
+				PQCodes:    biasedBadCodes,
+			}},
+		},
+	}
+
+	server := newEmbeddingTestServer(t, map[string][]float32{
+		"needle":            queryEmbedding,
+		"bad segment line":  badEmbedding,
+		"good segment line": goodEmbedding,
+	})
+	defer server.Close()
+
+	embedder := embed.NewWithConfig(embed.Config{
+		Endpoint:  server.URL,
+		AutoStart: false,
+	})
+
+	coarseScorer := NewColBERTScorer(embedder)
+	coarseScorer.SetSegmentStore(segmentStore)
+	coarseScorer.SetProductQuantizer(pq)
+	coarseScorer.SetPQExactRescoreTopK(0)
+
+	coarseScores, err := coarseScorer.ScoreBatchWithChunkIDs(
+		context.Background(),
+		"needle",
+		[]string{"chunk-bad", "chunk-good"},
+		[]string{"bad segment line", "good segment line"},
+	)
+	if err != nil {
+		t.Fatalf("coarse ScoreBatchWithChunkIDs failed: %v", err)
+	}
+	if coarseScores[0] <= coarseScores[1] {
+		t.Fatalf("expected coarse PQ scores to mis-rank docs, got bad=%.4f good=%.4f", coarseScores[0], coarseScores[1])
+	}
+
+	exactScorer := NewColBERTScorer(embedder)
+	exactScorer.SetSegmentStore(segmentStore)
+	exactScorer.SetProductQuantizer(pq)
+	exactScorer.SetPQExactRescoreTopK(2)
+
+	exactScores, err := exactScorer.ScoreBatchWithChunkIDs(
+		context.Background(),
+		"needle",
+		[]string{"chunk-bad", "chunk-good"},
+		[]string{"bad segment line", "good segment line"},
+	)
+	if err != nil {
+		t.Fatalf("exact ScoreBatchWithChunkIDs failed: %v", err)
+	}
+	if exactScores[1] <= exactScores[0] {
+		t.Fatalf("expected exact PQ rescore to restore order, got bad=%.4f good=%.4f", exactScores[0], exactScores[1])
+	}
+}
+
+func TestExactRescoreDocumentSegments_AdaptiveUsesRawDecomposition(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 16; i++ {
+		fmt.Fprintf(&b, "// section %d\nfunc service%d() error {\n\tvalue := config%d + retry%d + timeout%d\n\tif value == 0 {\n\t\treturn errDefault\n\t}\n\treturn nil\n}\n\n", i, i, i, i, i)
+	}
+	content := b.String()
+
+	scorer := NewColBERTScorer(nil)
+	scorer.SetAdaptiveSegments(true)
+
+	raw := DecomposeDocumentRaw(content)
+	sampled := scorer.documentSegments(content)
+	exact := scorer.exactRescoreDocumentSegments(content)
+
+	if len(raw) <= len(sampled) {
+		t.Fatalf("test content did not exceed adaptive sampled representation: raw=%d sampled=%d", len(raw), len(sampled))
+	}
+	if len(exact) != len(raw) {
+		t.Fatalf("expected exact adaptive rescore to use raw decomposition: got %d want %d", len(exact), len(raw))
+	}
+}
+
+func TestExactRescoreEmbeddings_AdaptivePoolsToBudget(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 16; i++ {
+		fmt.Fprintf(&b, "// section %d\nfunc service%d() error {\n\tvalue := config%d + retry%d + timeout%d\n\tif value == 0 {\n\t\treturn errDefault\n\t}\n\treturn nil\n}\n\n", i, i, i, i, i)
+	}
+	rawTexts := DecomposeDocumentRaw(b.String())
+	if len(rawTexts) <= legacyMaxDocumentSegments {
+		t.Fatalf("test content did not exceed legacy cap: raw=%d", len(rawTexts))
+	}
+
+	embeddings := make([][]float32, len(rawTexts))
+	for i := range rawTexts {
+		embeddings[i] = make([]float32, 768)
+		embeddings[i][i%768] = 1
+	}
+
+	scorer := NewColBERTScorer(nil)
+	scorer.SetAdaptiveSegments(true)
+
+	pooled := scorer.exactRescoreEmbeddings(rawTexts, embeddings)
+	budget := AdaptiveSegmentBudgetFromRawCount(len(rawTexts))
+	if len(pooled) > budget {
+		t.Fatalf("expected pooled exact rescore embeddings to respect budget: got %d want <= %d", len(pooled), budget)
+	}
+	if len(pooled) >= len(rawTexts) {
+		t.Fatalf("expected adaptive exact rescore pooling to reduce segment count: got %d from %d", len(pooled), len(rawTexts))
+	}
 }
 
 func TestTokenize(t *testing.T) {
@@ -356,5 +588,64 @@ func TestMaxSimPreparedInt8MatchesCurrent(t *testing.T) {
 	prepared := maxSimPreparedInt8(prepareQueryTerms([][]float32{query})[0], segments)
 	if diff := math.Abs(current - prepared); diff > 1e-7 {
 		t.Fatalf("prepared scorer mismatch: current %.12f prepared %.12f diff %.12f", current, prepared, diff)
+	}
+}
+
+func TestMaxSimPreparedPQMatchesADC(t *testing.T) {
+	training := [][]float32{
+		util.NormalizeVector([]float32{0.9, 0.1, 0.0, 0.0}),
+		util.NormalizeVector([]float32{0.8, 0.2, 0.0, 0.0}),
+		util.NormalizeVector([]float32{0.0, 0.9, 0.1, 0.0}),
+		util.NormalizeVector([]float32{0.0, 0.8, 0.2, 0.0}),
+		util.NormalizeVector([]float32{0.0, 0.0, 0.9, 0.1}),
+		util.NormalizeVector([]float32{0.0, 0.0, 0.8, 0.2}),
+		util.NormalizeVector([]float32{0.1, 0.0, 0.0, 0.9}),
+		util.NormalizeVector([]float32{0.2, 0.0, 0.0, 0.8}),
+	}
+
+	pq, err := util.NewProductQuantizer(util.PQConfig{
+		Dims:       4,
+		Subspaces:  2,
+		Centroids:  4,
+		Iterations: 5,
+	})
+	if err != nil {
+		t.Fatalf("NewProductQuantizer: %v", err)
+	}
+	if err := pq.Train(training, 5); err != nil {
+		t.Fatalf("Train: %v", err)
+	}
+
+	query := util.NormalizeVector([]float32{0.85, 0.15, 0.0, 0.0})
+	rawSegments := [][]float32{
+		util.NormalizeVector([]float32{0.88, 0.12, 0.0, 0.0}),
+		util.NormalizeVector([]float32{0.0, 0.82, 0.18, 0.0}),
+		util.NormalizeVector([]float32{0.15, 0.0, 0.0, 0.85}),
+	}
+
+	segments := make([]store.ColBERTSegment, len(rawSegments))
+	table, err := pq.PrecomputeQueryTable(query)
+	if err != nil {
+		t.Fatalf("PrecomputeQueryTable: %v", err)
+	}
+	expected := math.Inf(-1)
+	for i, emb := range rawSegments {
+		codes, err := pq.Encode(emb)
+		if err != nil {
+			t.Fatalf("Encode(%d): %v", i, err)
+		}
+		segments[i] = store.ColBERTSegment{
+			SegmentIdx: i,
+			PQCodes:    codes,
+		}
+		if score := pq.DotProductWithTable(table, codes); score > expected {
+			expected = score
+		}
+	}
+
+	term := prepareQueryTermsWithPQ([][]float32{query}, pq)[0]
+	got := maxSimPreparedPQ(term, segments)
+	if diff := math.Abs(expected - got); diff > 1e-9 {
+		t.Fatalf("prepared PQ scorer mismatch: expected %.12f got %.12f diff %.12f", expected, got, diff)
 	}
 }

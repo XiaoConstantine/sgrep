@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"testing"
 
+	"github.com/XiaoConstantine/sgrep/pkg/store"
 	"github.com/XiaoConstantine/sgrep/pkg/util"
 )
 
@@ -108,6 +109,73 @@ func BenchmarkMaxSim(b *testing.B) {
 			}
 		})
 	}
+}
+
+func BenchmarkMaxSimCodecs(b *testing.B) {
+	const numSegs = 10
+
+	query := randomNormalizedVec(benchDims)
+	preparedTerm := prepareQueryTerms([][]float32{query})[0]
+
+	rawSegments := make([][]float32, numSegs)
+	int8Segments := make([]store.ColBERTSegment, numSegs)
+	for i := range rawSegments {
+		rawSegments[i] = randomNormalizedVec(benchDims)
+		quantized, scale, min := util.QuantizeInt8(rawSegments[i])
+		int8Segments[i] = store.ColBERTSegment{
+			SegmentIdx:    i,
+			EmbeddingInt8: quantized,
+			QuantScale:    scale,
+			QuantMin:      min,
+		}
+	}
+
+	pq, err := util.NewProductQuantizer(util.PQConfig{
+		Dims:       benchDims,
+		Subspaces:  6,
+		Centroids:  256,
+		Iterations: 3,
+	})
+	if err != nil {
+		b.Fatalf("NewProductQuantizer: %v", err)
+	}
+
+	training := make([][]float32, 256)
+	for i := range training {
+		training[i] = randomNormalizedVec(benchDims)
+	}
+	if err := pq.Train(training, 3); err != nil {
+		b.Fatalf("Train: %v", err)
+	}
+
+	pqSegments := make([]store.ColBERTSegment, numSegs)
+	for i, emb := range rawSegments {
+		codes, err := pq.Encode(emb)
+		if err != nil {
+			b.Fatalf("Encode(%d): %v", i, err)
+		}
+		pqSegments[i] = store.ColBERTSegment{
+			SegmentIdx: i,
+			PQCodes:    codes,
+		}
+	}
+	preparedPQTerm := prepareQueryTermsWithPQ([][]float32{query}, pq)[0]
+
+	b.Run("BenchmarkMaxSimInt8", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_ = maxSimPreparedInt8(preparedTerm, int8Segments)
+		}
+	})
+
+	b.Run("BenchmarkMaxSimPQ", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_ = maxSimPreparedPQ(preparedPQTerm, pqSegments)
+		}
+	})
 }
 
 // ============================================================

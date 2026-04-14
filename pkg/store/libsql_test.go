@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/XiaoConstantine/sgrep/pkg/util"
 )
 
 func TestLibSQLStore_Basic(t *testing.T) {
@@ -316,6 +318,116 @@ func TestLibSQLStore_GetChunksForColBERT_LoadsDescriptionViaJSONExtract(t *testi
 
 	if chunks[1].Description != "" {
 		t.Fatalf("expected second description to be empty, got %q", chunks[1].Description)
+	}
+}
+
+func TestLibSQLStore_ColBERTPQMetadataAndSegments(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	s, err := OpenLibSQL(dbPath)
+	if err != nil {
+		t.Fatalf("OpenLibSQL failed: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	pq, err := util.NewProductQuantizer(util.PQConfig{
+		Dims:       4,
+		Subspaces:  2,
+		Centroids:  4,
+		Iterations: 4,
+	})
+	if err != nil {
+		t.Fatalf("NewProductQuantizer failed: %v", err)
+	}
+	training := [][]float32{
+		{1, 0, 0, 0},
+		{0, 1, 0, 0},
+		{0, 0, 1, 0},
+		{0, 0, 0, 1},
+	}
+	if err := pq.Train(training, 4); err != nil {
+		t.Fatalf("Train failed: %v", err)
+	}
+	codes, err := pq.Encode([]float32{1, 0, 0, 0})
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := s.SaveColBERTMetadata(ctx, ColBERTCodecPQ6, pq); err != nil {
+		t.Fatalf("SaveColBERTMetadata failed: %v", err)
+	}
+	if err := s.StoreColBERTSegmentsBatch(ctx, map[string][]ColBERTSegment{
+		"chunk-1": {
+			{SegmentIdx: 0, Text: "seg", PQCodes: codes},
+		},
+	}); err != nil {
+		t.Fatalf("StoreColBERTSegmentsBatch failed: %v", err)
+	}
+
+	gotCodec, gotPQ, err := s.LoadColBERTMetadata(ctx)
+	if err != nil {
+		t.Fatalf("LoadColBERTMetadata failed: %v", err)
+	}
+	if gotCodec != ColBERTCodecPQ6 {
+		t.Fatalf("expected codec %q, got %q", ColBERTCodecPQ6, gotCodec)
+	}
+	if gotPQ == nil || gotPQ.CodeSize() != pq.CodeSize() {
+		t.Fatalf("expected persisted PQ codebook with code size %d", pq.CodeSize())
+	}
+
+	segs, err := s.GetColBERTSegments(ctx, "chunk-1")
+	if err != nil {
+		t.Fatalf("GetColBERTSegments failed: %v", err)
+	}
+	if len(segs) != 1 {
+		t.Fatalf("expected 1 segment, got %d", len(segs))
+	}
+	if len(segs[0].PQCodes) != len(codes) {
+		t.Fatalf("expected %d PQ codes, got %d", len(codes), len(segs[0].PQCodes))
+	}
+	if len(segs[0].EmbeddingInt8) != 0 {
+		t.Fatalf("expected PQ segment without int8 payload, got %d bytes", len(segs[0].EmbeddingInt8))
+	}
+}
+
+func TestLibSQLStore_ColBERTInt8ZeroQuantMinRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	s, err := OpenLibSQL(dbPath)
+	if err != nil {
+		t.Fatalf("OpenLibSQL failed: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	ctx := context.Background()
+	seg := ColBERTSegment{
+		SegmentIdx:    0,
+		Text:          "zero-min",
+		EmbeddingInt8: []int8{0, 1, 2, 3},
+		QuantScale:    0.25,
+		QuantMin:      0,
+	}
+	if err := s.StoreColBERTSegmentsBatch(ctx, map[string][]ColBERTSegment{
+		"chunk-zero": {seg},
+	}); err != nil {
+		t.Fatalf("StoreColBERTSegmentsBatch failed: %v", err)
+	}
+
+	segs, err := s.GetColBERTSegments(ctx, "chunk-zero")
+	if err != nil {
+		t.Fatalf("GetColBERTSegments failed: %v", err)
+	}
+	if len(segs) != 1 {
+		t.Fatalf("expected 1 segment, got %d", len(segs))
+	}
+	if segs[0].QuantMin != 0 {
+		t.Fatalf("expected QuantMin 0, got %f", segs[0].QuantMin)
+	}
+	if segs[0].QuantScale != seg.QuantScale {
+		t.Fatalf("expected QuantScale %f, got %f", seg.QuantScale, segs[0].QuantScale)
 	}
 }
 

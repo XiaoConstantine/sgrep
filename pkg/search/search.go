@@ -9,6 +9,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,25 @@ import (
 	"github.com/XiaoConstantine/sgrep/pkg/store"
 	"github.com/XiaoConstantine/sgrep/pkg/util"
 )
+
+const defaultColBERTPQExactRescoreTopK = 0
+
+func configuredColBERTPQExactRescoreTopK() int {
+	value := strings.TrimSpace(os.Getenv("SGREP_COLBERT_PQ_EXACT_RESCORE_TOPK"))
+	if value == "" {
+		return defaultColBERTPQExactRescoreTopK
+	}
+
+	k, err := strconv.Atoi(value)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: invalid SGREP_COLBERT_PQ_EXACT_RESCORE_TOPK=%q, using default %d\n", value, defaultColBERTPQExactRescoreTopK)
+		return defaultColBERTPQExactRescoreTopK
+	}
+	if k < 0 {
+		return 0
+	}
+	return k
+}
 
 // QueryIntent represents the detected intent behind a search query.
 type QueryIntent int
@@ -207,11 +227,25 @@ func NewWithConfig(cfg Config) *Searcher {
 	// Priority: dedicated SegmentStore > Store (if it implements the interface)
 	if colbertScorer != nil {
 		colbertScorer.SetAdaptiveSegments(cfg.AdaptiveSegments)
+		colbertScorer.SetPQExactRescoreTopK(0)
+		pqExactRescoreTopK := configuredColBERTPQExactRescoreTopK()
 		if cfg.SegmentStore != nil {
 			colbertScorer.SetSegmentStore(cfg.SegmentStore)
+			if provider, ok := cfg.SegmentStore.(store.ColBERTMetadataProvider); ok {
+				colbertScorer.SetProductQuantizer(provider.ProductQuantizer())
+				if provider.ColBERTCodec() == store.ColBERTCodecPQ6 {
+					colbertScorer.SetPQExactRescoreTopK(pqExactRescoreTopK)
+				}
+			}
 			util.Debugf(util.DebugSummary, "ColBERT: using dedicated segment store (MMap)")
 		} else if segmentStore, ok := cfg.Store.(store.ColBERTSegmentStorer); ok {
 			colbertScorer.SetSegmentStore(segmentStore)
+			if provider, ok := cfg.Store.(store.ColBERTMetadataProvider); ok {
+				colbertScorer.SetProductQuantizer(provider.ProductQuantizer())
+				if provider.ColBERTCodec() == store.ColBERTCodecPQ6 {
+					colbertScorer.SetPQExactRescoreTopK(pqExactRescoreTopK)
+				}
+			}
 		}
 	}
 
