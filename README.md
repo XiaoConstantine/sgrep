@@ -75,8 +75,12 @@ go get github.com/XiaoConstantine/sgrep@latest
 # One-time setup: downloads embedding model (~130MB)
 sgrep setup
 
-# Index your codebase (auto-starts embedding server)
+# Index your codebase (vectors + ColBERT preindex, auto-starts embedding server)
 sgrep index .
+
+# Optional: use the PQ6 ColBERT codec for larger repos
+# Small repos automatically stay on int8
+sgrep index . --colbert-codec pq6
 
 # Semantic search (quick)
 sgrep "error handling for database connections"
@@ -189,7 +193,7 @@ Query: "authentication middleware"
 │ Stage 3: Cross-Encoder Reranking (--rerank)                     │
 │ ┌───────────────────────────────────────────────────────────┐  │
 │ │  Full attention: query ⊗ document → relevance score       │  │
-│ │  Reranks top 20 ColBERT results (~300-700ms)              │  │
+│ │  Reranks the top ColBERT candidates                       │  │
 │ └───────────────────────────────────────────────────────────┘  │
 │                  ↓                                              │
 │         Final ranked results                                    │
@@ -198,16 +202,16 @@ Query: "authentication middleware"
 
 ### Retrieval Modes
 
-| Mode | Command | MRR | Latency | Best For |
-|------|---------|-----|---------|----------|
-| Semantic only | `sgrep "query"` | 0.61 | ~30ms | Quick searches |
-| **Hybrid + ColBERT** | `sgrep --hybrid --colbert "query"` | **0.70** | ~200ms | **Best accuracy for code** |
-| Hybrid | `sgrep --hybrid "query"` | 0.62 | ~50ms | Exact term matching |
-| Cascade (all 3 stages) | `sgrep --hybrid --colbert --rerank "query"` | 0.60 | ~500ms | General text (not code) |
+| Mode | Command | Best For | Notes |
+|------|---------|----------|-------|
+| Semantic only | `sgrep "query"` | Quick exploration | Lowest setup on the query side |
+| Hybrid | `sgrep --hybrid "query"` | Exact-term + semantic recall | Good default when queries include API names or symbols |
+| **Hybrid + ColBERT** | `sgrep --hybrid --colbert "query"` | **Best code accuracy** | Recommended for code search |
+| Cascade (all 3 stages) | `sgrep --hybrid --colbert --rerank "query"` | Experiments / non-code text | Cross-encoder reranking is not the recommended default for code |
 
-**Recommended for code**: Use `--hybrid --colbert`. ColBERT provides +13% MRR over plain hybrid.
+**Recommended for code**: Use `--hybrid --colbert`.
 
-> **Note**: Cross-encoder reranking adds a third stage but currently hurts code search accuracy (MRR drops from 0.70 to 0.60). This is because available cross-encoder models (mxbai-rerank) are trained on general text, not code. Cross-encoder may help for non-code search tasks.
+> **Note**: Query latency is highly corpus- and hardware-dependent. ColBERT is the best default quality path for code, while cross-encoder reranking remains more experimental for code search.
 
 ```bash
 # Best accuracy (recommended)
@@ -305,10 +309,14 @@ All data is stored in `~/.sgrep/`:
 │   └── nomic-embed-text-v1.5.Q8_0.gguf   # Embedding model (~130MB)
 ├── repos/
 │   ├── a1b2c3/              # Hash of /path/to/repo1
-│   │   ├── index.db         # libSQL database with DiskANN vectors
-│   │   └── metadata.json    # Repo path, index time
+│   │   ├── index.db              # libSQL metadata + source chunks
+│   │   ├── vectors.mmap          # Fast vector search export
+│   │   ├── colbert_segments.mmap # Precomputed ColBERT segments (when enabled)
+│   │   └── metadata.json         # Repo path, index time
 │   └── d4e5f6/              # Hash of /path/to/repo2
 │       └── ...
+├── conversations/
+│   └── conv.db              # Conversation search index
 ├── server.pid               # Embedding server PID
 └── server.log               # Embedding server logs
 ```
@@ -321,8 +329,8 @@ sgrep supports two vector storage backends:
 
 | Backend | Build Command | Storage Efficiency | Best For |
 |---------|--------------|-------------------|----------|
-| **libSQL** (default) | `go build ./cmd/sgrep` | ~5-10 KB/vector | Large repos, production |
-| sqlite-vec | `go build -tags=sqlite_vec ./cmd/sgrep` | ~780 KB/vector | Development, compatibility |
+| **libSQL** (default) | `go build ./cmd/sgrep` | Efficient ANN + mmap exports | Large repos, production |
+| sqlite-vec | `go build -tags=sqlite_vec ./cmd/sgrep` | Simpler fallback backend | Development, compatibility |
 
 **libSQL advantages:**
 - Uses DiskANN for approximate nearest neighbor search
@@ -419,9 +427,9 @@ SGREP_DIMS=768                         # Vector dimensions
 
 1. **Setup**: `sgrep setup` downloads the embedding model and verifies llama-server
 2. **Indexing**: Files are chunked using AST-aware splitting (Go, TS, Python) or size-based fallback
-3. **Embedding**: Each chunk is embedded via llama.cpp (local, $0 cost, auto-started)
-4. **Storage**: Vectors stored in libSQL with DiskANN indexing
-5. **Search**: Query embedded → DiskANN approximate nearest neighbor → load matching documents
+3. **Embedding**: Each chunk is embedded via llama.cpp (local, auto-started)
+4. **Storage**: Vectors are stored in libSQL and exported to mmap; ColBERT segments are precomputed by default
+5. **Search**: Query embedded → vector/hybrid retrieval → optional ColBERT late interaction → optional rerank
 
 **Smart skip for large repos**: When indexing repos with >1000 files, sgrep automatically filters out test files, generated code (*.pb.go, *.generated.go), and vendored directories to speed up indexing.
 
@@ -434,29 +442,26 @@ SGREP_DIMS=768                         # Vector dimensions
 │  Query: "error handling"                                     │
 │         ↓                                                    │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐      │
-│  │ llama.cpp   │───▶│  DiskANN    │───▶│   libSQL    │      │
-│  │ Embedding   │    │ + BM25/FTS5 │    │  Documents  │      │
-│  │   (~15ms)   │    │   (~10ms)   │    │   (~5ms)    │      │
+│  │ llama.cpp   │───▶│ Vector +    │───▶│   libSQL    │      │
+│  │ Embedding   │    │ BM25/FTS5   │    │ + mmap      │      │
 │  └─────────────┘    └─────────────┘    └─────────────┘      │
 │       ▲                    │                                 │
 │       │                    ▼ (with --colbert)                │
 │       │              ┌─────────────┐                         │
 │       │              │  ColBERT    │                         │
 │       │              │ Late-Interx │                         │
-│       │              │  (~150ms)   │                         │
 │       │              └──────┬──────┘                         │
 │       │                     │                                │
 │       │                     ▼ (with --rerank)                │
 │       │              ┌─────────────┐                         │
 │       │              │Cross-Encoder│                         │
 │       │              │  Reranker   │                         │
-│       │              │ (~300-700ms)│                         │
 │       │              └─────────────┘                         │
 │       │                                                      │
-│       │ Auto-started by sgrep (16 parallel slots)           │
-│       │ (daemon mode, continuous batching)                  │
+│       │ Auto-started by sgrep                                │
+│       │ (daemon mode, continuous batching)                   │
 │                                                              │
-│  Recommended: --hybrid --colbert (~200ms, MRR 0.70)         │
+│  Recommended: --hybrid --colbert                             │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -488,22 +493,21 @@ Query: "authentication middleware"
 - **Semantic**: Understands intent ("auth" matches "authentication", "login", "session")
 - **BM25**: Exact term matching with TF-IDF weighting (boosts exact "authentication" matches)
 
-## Performance
+## Recent Benchmarks
 
-Benchmarked on maestro codebase (102 files, 1572 chunks, 768-dim vectors):
+Recent `dspy-go` benchmark on Apple M3 Pro + Metal (532 files, 7,735 chunks, 35,618 ColBERT segments):
 
-| Metric | sgrep | ripgrep | 
-|--------|-------|---------|
-| Latency (avg) | **31ms** | 10ms |
-| Token usage | **57% less** | baseline |
-| Attempts needed | 1 | 3-7 |
+| Metric | Result |
+|--------|--------|
+| Full index with tuned `pq6` ColBERT codec | **4m49s** |
+| Chunk embedding wall time | 1m04s |
+| ColBERT scratch build | 3m03s |
+| PQ train | 27.9s |
+| Search quality | tuned pure `pq6` matched the current int8 benchmark at **MRR 0.725** |
 
-**Embedding server optimization:**
-
-The llama.cpp server is configured for maximum throughput:
-- 16 parallel slots with continuous batching (`-cb`)
-- Dynamic thread count based on CPU cores
-- GPU acceleration (Metal on Mac, CUDA on Linux)
+Notes:
+- `--colbert-codec pq6` is size-gated: small repos automatically stay on int8.
+- Search latency varies significantly with corpus size, hardware, and whether ColBERT or rerank are enabled, so the README avoids claiming one universal query-time number.
 
 ## Chunk Size Limits
 
