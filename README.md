@@ -117,6 +117,7 @@ sgrep conv index --watch
 
 # Search conversations
 sgrep conv "authentication"
+sgrep conv search "authentication" --agent codex --limit 5
 sgrep conv "JWT token" --hybrid
 sgrep conv "database migration" --agent claude --since 7d
 
@@ -139,6 +140,10 @@ sgrep conv status
 
 Conversations are stored at `~/.sgrep/conversations/conv.db`. Re-running
 `sgrep conv index` backfills missing embeddings for existing sessions.
+
+Default search output includes the agent session/conversation ID so you can jump
+straight to `view`, `resume`, or external agent tooling with the exact session
+identifier.
 
 ## Hybrid Search
 

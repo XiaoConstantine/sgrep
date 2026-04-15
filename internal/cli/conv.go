@@ -102,30 +102,8 @@ Examples:
 func init() {
 	rootCmd.AddCommand(convCmd)
 
-	// Search flags
-	convCmd.Flags().IntVarP(&convLimit, "limit", "n", 10, "Max results to return")
-	convCmd.Flags().Float64VarP(&convThreshold, "threshold", "T", 0.5, "Similarity threshold 0-1")
-	convCmd.Flags().BoolVar(&convHybrid, "hybrid", false, "Enable hybrid semantic+keyword search")
-	convCmd.Flags().BoolVar(&convExact, "exact", false, "Exact keyword match only (no semantic)")
-
-	// Filter flags
-	convCmd.Flags().StringVarP(&convAgent, "agent", "a", "all", "Filter by agent: claude, codex, cursor, opencode, all")
-	convCmd.Flags().StringVarP(&convProject, "project", "p", "", "Filter by project name or path")
-	convCmd.Flags().StringVar(&convSince, "since", "", "Conversations since: 1h, 7d, 2w, 1m, 1y")
-	convCmd.Flags().StringVar(&convAfter, "after", "", "Conversations after date (YYYY-MM-DD)")
-	convCmd.Flags().StringVar(&convBefore, "before", "", "Conversations before date (YYYY-MM-DD)")
-
-	// Output flags
-	convCmd.Flags().BoolVar(&convJSON, "json", false, "Output as JSON")
-	convCmd.Flags().BoolVarP(&convQuiet, "quiet", "q", false, "Minimal output (session IDs only)")
-	convCmd.Flags().BoolVarP(&convVerbose, "verbose", "v", false, "Verbose output with full turn content")
-	convCmd.Flags().StringVar(&convFormat, "format", "default", "Output format: default, table, timeline")
-	convCmd.Flags().BoolVar(&convNoColor, "no-color", false, "Disable colored output")
-	convCmd.Flags().BoolVarP(&convInteractive, "interactive", "i", false, "Enter interactive mode after search")
-
-	// Hybrid search weights
-	convCmd.Flags().Float64Var(&convSemanticWeight, "semantic-weight", 0.6, "Weight for semantic score in hybrid mode")
-	convCmd.Flags().Float64Var(&convBM25Weight, "bm25-weight", 0.4, "Weight for BM25 score in hybrid mode")
+	addConvSearchFlags(convCmd)
+	addConvSearchFlags(convSearchCmd)
 
 	// Add subcommands
 	convCmd.AddCommand(convSearchCmd)
@@ -222,6 +200,33 @@ func init() {
 	convIndexCmd.Flags().StringVar(&convIndexSource, "source", "", "Index specific source: claude, codex, aider, cursor, opencode")
 	convIndexCmd.Flags().BoolVar(&convIndexForce, "force", false, "Re-index all (ignore cache)")
 	convIndexCmd.Flags().BoolVar(&convIndexWatch, "watch", false, "Watch for new conversations")
+}
+
+func addConvSearchFlags(cmd *cobra.Command) {
+	// Search flags
+	cmd.Flags().IntVarP(&convLimit, "limit", "n", 10, "Max results to return")
+	cmd.Flags().Float64VarP(&convThreshold, "threshold", "T", 0.5, "Similarity threshold 0-1")
+	cmd.Flags().BoolVar(&convHybrid, "hybrid", false, "Enable hybrid semantic+keyword search")
+	cmd.Flags().BoolVar(&convExact, "exact", false, "Exact keyword match only (no semantic)")
+
+	// Filter flags
+	cmd.Flags().StringVarP(&convAgent, "agent", "a", "all", "Filter by agent: claude, codex, cursor, opencode, all")
+	cmd.Flags().StringVarP(&convProject, "project", "p", "", "Filter by project name or path")
+	cmd.Flags().StringVar(&convSince, "since", "", "Conversations since: 1h, 7d, 2w, 1m, 1y")
+	cmd.Flags().StringVar(&convAfter, "after", "", "Conversations after date (YYYY-MM-DD)")
+	cmd.Flags().StringVar(&convBefore, "before", "", "Conversations before date (YYYY-MM-DD)")
+
+	// Output flags
+	cmd.Flags().BoolVar(&convJSON, "json", false, "Output as JSON")
+	cmd.Flags().BoolVarP(&convQuiet, "quiet", "q", false, "Minimal output (session IDs only)")
+	cmd.Flags().BoolVarP(&convVerbose, "verbose", "v", false, "Verbose output with full turn content")
+	cmd.Flags().StringVar(&convFormat, "format", "default", "Output format: default, table, timeline")
+	cmd.Flags().BoolVar(&convNoColor, "no-color", false, "Disable colored output")
+	cmd.Flags().BoolVarP(&convInteractive, "interactive", "i", false, "Enter interactive mode after search")
+
+	// Hybrid search weights
+	cmd.Flags().Float64Var(&convSemanticWeight, "semantic-weight", 0.6, "Weight for semantic score in hybrid mode")
+	cmd.Flags().Float64Var(&convBM25Weight, "bm25-weight", 0.4, "Weight for BM25 score in hybrid mode")
 }
 
 // Command implementations
@@ -648,6 +653,7 @@ func outputConvResults(response *conv.SearchResponse) error {
 func printDefaultHit(index int, hit conv.ConversationHit) {
 	fmt.Printf("[%d] %s  %s  %s\n",
 		index, hit.Agent, hit.ProjectName, hit.RelativeTime)
+	fmt.Printf("    ID: %s\n", hit.SessionID)
 	fmt.Printf("    YOU: %q\n", hit.MatchedTurn.UserSnip)
 	fmt.Printf("    %s: %q\n", strings.ToUpper(string(hit.Agent)), hit.MatchedTurn.AssistSnip)
 	fmt.Printf("    └─ %d turns · score: %.2f\n\n", hit.TotalTurns, hit.Score)
