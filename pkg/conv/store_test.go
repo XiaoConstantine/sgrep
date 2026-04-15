@@ -196,6 +196,73 @@ func TestStore_GetStats(t *testing.T) {
 	}
 }
 
+func TestStore_NormalizesLegacyPiMonoAgentRows(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := NewStore(StoreConfig{DBPath: dbPath, Dims: defaultDims})
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	_, err = store.db.ExecContext(ctx, `
+		INSERT INTO conv_sessions (
+			id, agent, agent_version, source_path, project_path, project_name, git_branch, git_commit,
+			started_at, ended_at, total_turns, total_tokens
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, "legacy-pi-session", "pi-mono", "", "/tmp/pi/session.jsonl", "/tmp/project", "project", "", "", now, now, 1, 0)
+	if err != nil {
+		t.Fatalf("failed to insert legacy session: %v", err)
+	}
+
+	_, err = store.db.ExecContext(ctx, `
+		INSERT INTO conv_turns (
+			id, session_id, turn_index, user_content, assistant_content, combined_content, timestamp
+		) VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, "legacy-pi-session:0", "legacy-pi-session", 0, "hello", "world", "USER: hello\nASSISTANT: world", now)
+	if err != nil {
+		t.Fatalf("failed to insert legacy turn: %v", err)
+	}
+
+	embedding := make([]float32, defaultDims)
+	embedding[0] = 1
+	if err := store.StoreTurnEmbedding(ctx, "legacy-pi-session:0", embedding); err != nil {
+		t.Fatalf("failed to store embedding: %v", err)
+	}
+
+	session, err := store.GetSession(ctx, "legacy-pi-session")
+	if err != nil {
+		t.Fatalf("failed to get session: %v", err)
+	}
+	if session.Agent != AgentPiMono {
+		t.Fatalf("expected normalized agent %q, got %q", AgentPiMono, session.Agent)
+	}
+
+	stats, err := store.GetStats(ctx)
+	if err != nil {
+		t.Fatalf("failed to get stats: %v", err)
+	}
+	if stats.SessionsByAgent[AgentPiMono] != 1 {
+		t.Fatalf("expected pi count 1, got %d", stats.SessionsByAgent[AgentPiMono])
+	}
+
+	results, err := store.FilteredSearch(ctx, embedding, SearchOptions{
+		Limit:     10,
+		Threshold: 0,
+		Agent:     AgentPiMono,
+	})
+	if err != nil {
+		t.Fatalf("failed filtered search: %v", err)
+	}
+	if len(results) != 1 || results[0].SessionID != "legacy-pi-session" {
+		t.Fatalf("expected legacy pi session in filtered search, got %+v", results)
+	}
+}
+
 func TestStore_FullTextSearch(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")

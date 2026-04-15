@@ -96,6 +96,10 @@ func (a *Actions) Resume(ctx context.Context, sessionID string, opts ResumeOptio
 		result.Command = "opencode"
 		result.Args = []string{"--session", sessionID}
 
+	case AgentPiMono:
+		result.Command = "pi"
+		result.Args = []string{"--session", sessionID}
+
 	default:
 		return nil, fmt.Errorf("unsupported agent for resume: %s", session.Agent)
 	}
@@ -276,6 +280,8 @@ func GenerateResumeCommand(session *Session) string {
 		return fmt.Sprintf("# Open Cursor: %s", session.ProjectPath)
 	case AgentOpenCode:
 		return fmt.Sprintf("opencode --session %s", session.ID)
+	case AgentPiMono:
+		return fmt.Sprintf("pi --session %s", session.ID)
 	default:
 		return ""
 	}

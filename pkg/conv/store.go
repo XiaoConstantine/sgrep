@@ -411,6 +411,7 @@ func (s *Store) GetSession(ctx context.Context, sessionID string) (*Session, err
 	if endedAt.Valid {
 		session.EndedAt = endedAt.Time
 	}
+	session.Agent = NormalizeAgentType(session.Agent)
 
 	// Get turns
 	rows, err := s.db.QueryContext(ctx, `
@@ -619,8 +620,13 @@ func (s *Store) FilteredSearch(ctx context.Context, embedding []float32, opts Se
 	var args []interface{}
 
 	if opts.Agent != AgentAll {
-		conditions = append(conditions, "sess.agent = ?")
-		args = append(args, opts.Agent)
+		if opts.Agent == AgentPiMono {
+			conditions = append(conditions, "(sess.agent = ? OR sess.agent = ?)")
+			args = append(args, AgentPiMono, "pi-mono")
+		} else {
+			conditions = append(conditions, "sess.agent = ?")
+			args = append(args, opts.Agent)
+		}
 	}
 
 	if opts.Project != "" {
@@ -713,7 +719,7 @@ func (s *Store) GetStats(ctx context.Context) (*IndexStats, error) {
 			var agent string
 			var count int
 			if rows.Scan(&agent, &count) == nil {
-				stats.SessionsByAgent[AgentType(agent)] = count
+				stats.SessionsByAgent[NormalizeAgentType(AgentType(agent))] += count
 			}
 		}
 	}

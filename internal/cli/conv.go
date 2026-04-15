@@ -67,12 +67,13 @@ func init() {
 	parser.RegisterCodex()
 	parser.RegisterCursor()
 	parser.RegisterOpenCode()
+	parser.RegisterPiMono()
 }
 
 var convCmd = &cobra.Command{
 	Use:   "conv [search] <query>",
 	Short: "Search and manage coding agent conversations",
-	Long: `Search across conversations from Claude Code, Codex CLI, Cursor, and OpenCode.
+	Long: `Search across conversations from Claude Code, Codex CLI, Cursor, OpenCode, and Pi.
 
 Examples:
   # Basic semantic search
@@ -94,7 +95,8 @@ Examples:
   # Index conversations
   sgrep conv index
   sgrep conv index --source claude
-  sgrep conv index --source opencode`,
+  sgrep conv index --source opencode
+  sgrep conv index --source pi`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runConvSearch,
 }
@@ -197,7 +199,7 @@ func init() {
 	convCopyCmd.Flags().BoolVar(&convCopyFull, "full", false, "Copy full conversation")
 
 	// Index flags
-	convIndexCmd.Flags().StringVar(&convIndexSource, "source", "", "Index specific source: claude, codex, aider, cursor, opencode")
+	convIndexCmd.Flags().StringVar(&convIndexSource, "source", "", "Index specific source: claude, codex, cursor, opencode, pi")
 	convIndexCmd.Flags().BoolVar(&convIndexForce, "force", false, "Re-index all (ignore cache)")
 	convIndexCmd.Flags().BoolVar(&convIndexWatch, "watch", false, "Watch for new conversations")
 }
@@ -210,7 +212,7 @@ func addConvSearchFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&convExact, "exact", false, "Exact keyword match only (no semantic)")
 
 	// Filter flags
-	cmd.Flags().StringVarP(&convAgent, "agent", "a", "all", "Filter by agent: claude, codex, cursor, opencode, all")
+	cmd.Flags().StringVarP(&convAgent, "agent", "a", "all", "Filter by agent: claude, codex, cursor, opencode, pi, all")
 	cmd.Flags().StringVarP(&convProject, "project", "p", "", "Filter by project name or path")
 	cmd.Flags().StringVar(&convSince, "since", "", "Conversations since: 1h, 7d, 2w, 1m, 1y")
 	cmd.Flags().StringVar(&convAfter, "after", "", "Conversations after date (YYYY-MM-DD)")

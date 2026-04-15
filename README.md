@@ -100,7 +100,7 @@ The embedding server starts automatically when needed and stays running as a dae
 
 ## Conversation Search
 
-Search across conversations from Claude Code, Codex CLI, Cursor, and OpenCode.
+Search across conversations from Claude Code, Codex CLI, Cursor, OpenCode, and Pi.
 
 ```bash
 # Index conversations (auto-starts embedding server)
@@ -111,6 +111,7 @@ sgrep conv index --source claude
 sgrep conv index --source codex
 sgrep conv index --source cursor
 sgrep conv index --source opencode
+sgrep conv index --source pi
 
 # Watch mode (auto-index new conversations)
 sgrep conv index --watch
@@ -118,6 +119,7 @@ sgrep conv index --watch
 # Search conversations
 sgrep conv "authentication"
 sgrep conv search "authentication" --agent codex --limit 5
+sgrep conv search "session compaction" --agent pi --limit 5
 sgrep conv "JWT token" --hybrid
 sgrep conv "database migration" --agent claude --since 7d
 

@@ -13,6 +13,7 @@ const (
 	AgentCodexCLI   AgentType = "codex"
 	AgentCursor     AgentType = "cursor"
 	AgentOpenCode   AgentType = "opencode"
+	AgentPiMono     AgentType = "pi"
 	AgentAll        AgentType = "all"
 )
 
@@ -27,8 +28,22 @@ func ParseAgentType(s string) AgentType {
 		return AgentCursor
 	case "opencode":
 		return AgentOpenCode
+	case "pi", "pi-mono":
+		return AgentPiMono
 	default:
 		return AgentAll
+	}
+}
+
+// NormalizeAgentType canonicalizes legacy aliases while preserving unknown values.
+func NormalizeAgentType(a AgentType) AgentType {
+	switch a {
+	case AgentClaudeCode, AgentCodexCLI, AgentCursor, AgentOpenCode, AgentPiMono, AgentAll:
+		return a
+	case AgentType("pi-mono"):
+		return AgentPiMono
+	default:
+		return a
 	}
 }
 

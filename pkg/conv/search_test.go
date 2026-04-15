@@ -13,7 +13,7 @@ func TestTruncate(t *testing.T) {
 	}{
 		{"short", 10, "short"},
 		{"exactly10!", 10, "exactly10!"},
-		{"this is a longer string", 10, "this is a..."},  // truncate breaks at word boundary
+		{"this is a longer string", 10, "this is a..."}, // truncate breaks at word boundary
 		{"", 10, ""},
 	}
 
@@ -204,6 +204,8 @@ func TestParseAgentType(t *testing.T) {
 		{"codex", AgentCodexCLI},
 		{"cursor", AgentCursor},
 		{"opencode", AgentOpenCode},
+		{"pi", AgentPiMono},
+		{"pi-mono", AgentPiMono},
 		{"unknown", AgentAll},
 		{"", AgentAll},
 	}
