@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/XiaoConstantine/sgrep/pkg/server"
 	"github.com/XiaoConstantine/sgrep/pkg/store"
 	"github.com/XiaoConstantine/sgrep/pkg/util"
+	claudeskill "github.com/XiaoConstantine/sgrep/plugins/sgrep/skills/sgrep"
 	"github.com/spf13/cobra"
 )
 
@@ -135,6 +137,7 @@ func init() {
 	rootCmd.AddCommand(setupCmd)
 	rootCmd.AddCommand(serverCmd)
 	rootCmd.AddCommand(installClaudeCodeCmd)
+	rootCmd.AddCommand(installSkillCmd)
 }
 
 func runSearch(cmd *cobra.Command, args []string) error {
@@ -709,21 +712,34 @@ var serverStatusCmd = &cobra.Command{
 // Install Claude Code command
 var installClaudeCodeCmd = &cobra.Command{
 	Use:   "install-claude-code",
-	Short: "Install sgrep plugin for Claude Code",
+	Short: "Install sgrep plugin and Claude skill for Claude Code",
 	Long: `Installs the sgrep plugin for Claude Code.
 
-This creates the plugin in ~/.claude/plugins/sgrep with:
+This creates the plugin in ~/.claude/plugins/sgrep and a Claude skill in ~/.claude/skills/sgrep/SKILL.md with:
 - Auto-indexing on session start
 - Watch mode for live index updates
-- Skill documentation for Claude
+- Standard Claude Code skill installation
 
 After installation, restart Claude Code to activate the plugin.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return installClaudeCodePlugin()
+		return installClaudeCodePluginAndSkill()
 	},
 }
 
-func installClaudeCodePlugin() error {
+var installSkillCmd = &cobra.Command{
+	Use:   "install-skill",
+	Short: "Install the sgrep skill for shared agent skill directories",
+	Long: `Installs the sgrep skill into the standard user-level skill locations.
+
+This creates:
+- ~/.agents/skills/sgrep/SKILL.md for cross-client interoperability
+- ~/.claude/skills/sgrep/SKILL.md for Claude Code compatibility`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return installSharedSkills()
+	},
+}
+
+func installClaudeCodePluginAndSkill() error {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("failed to get home directory: %w", err)
@@ -731,14 +747,15 @@ func installClaudeCodePlugin() error {
 
 	pluginDir := filepath.Join(homeDir, ".claude", "plugins", "sgrep")
 	skillsDir := filepath.Join(homeDir, ".claude", "skills", "sgrep")
+	pluginSkillPath := filepath.Join(pluginDir, "skills", "sgrep", "SKILL.md")
 
-	// Create plugin directory structure AND global skills directory
+	// Create plugin directory structure and user-level skill directory.
 	dirs := []string{
 		pluginDir,
 		filepath.Join(pluginDir, ".claude-plugin"),
 		filepath.Join(pluginDir, "hooks"),
 		filepath.Join(pluginDir, "skills", "sgrep"),
-		skillsDir, // Global skills directory for Claude Code discovery
+		skillsDir,
 	}
 
 	for _, dir := range dirs {
@@ -837,97 +854,97 @@ fi
 		return fmt.Errorf("failed to write sgrep_stop.sh: %w", err)
 	}
 
-	// Write SKILL.md
-	skillMD := `---
-name: sgrep
-description: Semantic code search tool. Always use this instead of Grep, ripgrep, or Explore agents for any conceptual question like "how does X work" or "where is Y handled". Do not use builtin search tools for semantic queries, use sgrep instead.
----
-
-# sgrep - Smart Code Search
-
-**Always use sgrep for conceptual code searches.** Do not use Grep, ripgrep, or Explore agents - use this skill instead.
-
-## When to Use
-
-**Use sgrep FIRST** whenever you need to:
-- Answer questions like "how does X work" or "where is Y handled"
-- Search by **concept** or **intent** ("how does authentication work")
-- Explore unfamiliar codebases
-- Find code with **specific terms + context** (use --hybrid)
-
-## Commands
-
-` + "```" + `bash
-# Semantic search (understands intent)
-sgrep "error handling logic"
-sgrep "database connection pooling"
-
-# Hybrid search (semantic + exact term matching)
-sgrep --hybrid "JWT token validation"
-sgrep --hybrid "OAuth2 refresh"
-
-# With code context
-sgrep -c "authentication middleware"
-
-# JSON output
-sgrep --json "rate limiting"
-` + "```" + `
-
-## Conversation Search
-
-Use conversation search when the user asks about previous discussions, decisions, or agent reasoning.
-
-` + "```" + `bash
-# Index conversations (Claude Code, Codex CLI, Cursor, OpenCode)
-sgrep conv index
-
-# Search conversations
-sgrep conv "hybrid ranking"
-sgrep conv "embedding server" --hybrid
-sgrep conv "auth decision" --agent claude --since 30d
-
-# View or export a session
-sgrep conv view <session_id>
-sgrep conv context <session_id>
-` + "```" + `
-
-**Use sgrep conv for conversation history; use sgrep for code.**
-
-## Semantic vs Hybrid
-
-| Mode | Best For | Example |
-|------|----------|---------|
-| Default | Conceptual queries | "how does caching work" |
-| --hybrid | Queries with specific terms | "parseConfig function" |
-
-Use --hybrid when your query contains function names, API names, or technical terms.
-
-## Search Hierarchy
-
-1. **sgrep** → Find files by semantic intent
-2. **sgrep --hybrid** → Find files by intent + specific terms
-3. **ast-grep** → Match structural patterns
-4. **ripgrep** → Exact text search
-`
-	if err := os.WriteFile(filepath.Join(pluginDir, "skills", "sgrep", "SKILL.md"), []byte(skillMD), 0644); err != nil {
-		return fmt.Errorf("failed to write SKILL.md: %w", err)
+	// Write the canonical Claude skill shipped with the plugin.
+	if err := os.WriteFile(pluginSkillPath, []byte(claudeskill.Content), 0644); err != nil {
+		return fmt.Errorf("failed to write plugin skill: %w", err)
 	}
-
-	// Also write to global skills directory for Claude Code discovery
-	if err := os.WriteFile(filepath.Join(skillsDir, "SKILL.md"), []byte(skillMD), 0644); err != nil {
-		return fmt.Errorf("failed to write global SKILL.md: %w", err)
+	if err := copyDir(filepath.Dir(pluginSkillPath), skillsDir); err != nil {
+		return fmt.Errorf("failed to install Claude skill: %w", err)
 	}
 
 	fmt.Println("✓ sgrep plugin installed for Claude Code")
 	fmt.Printf("  Plugin: %s\n", pluginDir)
-	fmt.Printf("  Skill:  %s\n", skillsDir)
+	fmt.Printf("  Skill:  %s\n", filepath.Join(skillsDir, "SKILL.md"))
 	fmt.Println()
 	fmt.Println("Restart Claude Code to activate the plugin.")
 	fmt.Println()
 	fmt.Println("The plugin will automatically:")
 	fmt.Println("  • Index your project on session start")
 	fmt.Println("  • Keep the index updated via watch mode")
-	fmt.Println("  • Provide the 'sgrep' skill to Claude")
+	fmt.Println("  • Install the 'sgrep' Claude skill in ~/.claude/skills/")
 
 	return nil
+}
+
+func installSharedSkills() error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	canonicalSkillDir := filepath.Join(homeDir, ".claude", "plugins", "sgrep", "skills", "sgrep")
+	if _, err := os.Stat(filepath.Join(canonicalSkillDir, "SKILL.md")); err != nil {
+		// Fall back to the skill embedded in the binary if the plugin is not installed.
+		canonicalSkillDir = ""
+	}
+
+	skillDirs := []string{
+		filepath.Join(homeDir, ".agents", "skills", "sgrep"),
+		filepath.Join(homeDir, ".claude", "skills", "sgrep"),
+	}
+	for _, dir := range skillDirs {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("failed to create directory %s: %w", dir, err)
+		}
+	}
+
+	if canonicalSkillDir != "" {
+		for _, dir := range skillDirs {
+			if err := copyDir(canonicalSkillDir, dir); err != nil {
+				return fmt.Errorf("failed to install skill into %s: %w", dir, err)
+			}
+		}
+	} else {
+		for _, dir := range skillDirs {
+			if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(claudeskill.Content), 0644); err != nil {
+				return fmt.Errorf("failed to write skill into %s: %w", dir, err)
+			}
+		}
+	}
+
+	fmt.Println("✓ sgrep skill installed")
+	fmt.Printf("  Skill: %s\n", filepath.Join(homeDir, ".agents", "skills", "sgrep", "SKILL.md"))
+	fmt.Printf("  Skill: %s\n", filepath.Join(homeDir, ".claude", "skills", "sgrep", "SKILL.md"))
+	fmt.Println()
+	fmt.Println("The skill is now available in the shared cross-client path and the Claude-compatible path.")
+
+	return nil
+}
+
+func copyDir(srcDir, dstDir string) error {
+	return filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		rel, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return err
+		}
+		targetPath := filepath.Join(dstDir, rel)
+
+		if d.IsDir() {
+			return os.MkdirAll(targetPath, 0755)
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(targetPath, data, info.Mode().Perm())
+	})
 }

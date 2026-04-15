@@ -4,3 +4,11 @@ sgrep
 sgrep-bench
 sgrep-local
 bench.log
+!.agents/skills/
+!.agents/skills/sgrep/
+!.agents/skills/sgrep/SKILL.md
+!plugins/sgrep/
+!plugins/sgrep/skills/
+!plugins/sgrep/skills/sgrep/
+!plugins/sgrep/skills/sgrep/assets.go
+!plugins/sgrep/skills/sgrep/assets_test.go

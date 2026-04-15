@@ -345,7 +345,8 @@ sgrep supports two vector storage backends:
 | `sgrep server start` | Manually start embedding server |
 | `sgrep server stop` | Stop embedding server |
 | `sgrep server status` | Show server status |
-| `sgrep install-claude-code` | Install Claude Code plugin |
+| `sgrep install-claude-code` | Install Claude Code plugin + Claude skill |
+| `sgrep install-skill` | Install the sgrep skill into shared agent skill locations |
 
 ## Claude Code Integration
 
@@ -355,12 +356,36 @@ Install the sgrep plugin for Claude Code with one command:
 sgrep install-claude-code
 ```
 
-This creates a plugin at `~/.claude/plugins/sgrep` that:
+This creates:
+- a plugin at `~/.claude/plugins/sgrep`
+- a user-level Claude skill at `~/.claude/skills/sgrep/SKILL.md`
+
+The installation:
 - **Auto-indexes** your project when Claude Code starts
 - **Watch mode** keeps the index updated as you code
-- **Skill documentation** teaches Claude when to use sgrep vs ripgrep
+- **Installs the standard Claude skill** that teaches Claude when to use sgrep vs ripgrep
 
 After installation, restart Claude Code to activate. The plugin works automatically—Claude will use sgrep for semantic searches like "how does authentication work" while using ripgrep for exact matches.
+
+## Shared Skill Installation
+
+Install just the reusable skill surfaces with:
+
+```bash
+sgrep install-skill
+```
+
+This creates:
+- a user-level cross-client skill at `~/.agents/skills/sgrep/SKILL.md`
+- a user-level Claude skill at `~/.claude/skills/sgrep/SKILL.md`
+
+## Agent Integration Standards
+
+- **Open Agent Skill**: the canonical skill lives at `plugins/sgrep/skills/sgrep/SKILL.md`.
+- **Codex / Amp**: use the repo's root [AGENTS.md](AGENTS.md) for shared workflow guidance.
+- **Cross-client skills**: use `.agents/skills/<name>/SKILL.md` in-repo and `~/.agents/skills/<name>/SKILL.md` user-global.
+- **Claude Code**: uses the same `SKILL.md` format and supports `~/.claude/skills/<name>/SKILL.md` user-global for compatibility.
+- **Claude slash commands**: `.claude/commands/<name>.md` are explicit commands and complement skills rather than replacing them.
 
 ## Flags
 

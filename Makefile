@@ -1,4 +1,4 @@
-.PHONY: build build-hybrid test test-short test-hybrid clean install \
+.PHONY: build build-hybrid test test-short test-hybrid clean install lint-skills \
 	bench bench-quick bench-baseline bench-compare bench-profile bench-quality build-bench
 
 # Default build (semantic search only)
@@ -28,6 +28,10 @@ test-cover:
 # Run tests with coverage and FTS5 support
 test-cover-hybrid:
 	CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" go test -short -cover ./...
+
+# Validate the canonical open agent skill
+lint-skills:
+	go test ./plugins/sgrep/skills/sgrep
 
 # Clean build artifacts
 clean:

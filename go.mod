@@ -16,6 +16,7 @@ require (
 	github.com/tree-sitter/tree-sitter-rust v0.24.0
 	github.com/tree-sitter/tree-sitter-typescript v0.23.2
 	github.com/tursodatabase/go-libsql v0.0.0-20251025125656-00da49cd4a6e
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
