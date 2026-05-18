@@ -155,6 +155,132 @@ func TestCosineDistanceBatch(t *testing.T) {
 	}
 }
 
+func TestDotProductDistance(t *testing.T) {
+	tests := []struct {
+		name     string
+		a, b     []float32
+		expected float64
+	}{
+		{
+			name:     "identical vectors",
+			a:        []float32{1, 0, 0},
+			b:        []float32{1, 0, 0},
+			expected: 0.0,
+		},
+		{
+			name:     "orthogonal vectors",
+			a:        []float32{1, 0, 0},
+			b:        []float32{0, 1, 0},
+			expected: 1.0,
+		},
+		{
+			name:     "opposite vectors",
+			a:        []float32{1, 0, 0},
+			b:        []float32{-1, 0, 0},
+			expected: 2.0,
+		},
+		{
+			name:     "length mismatch",
+			a:        []float32{1, 0},
+			b:        []float32{1, 0, 0},
+			expected: math.MaxFloat64,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := DotProductDistance(tt.a, tt.b)
+			if tt.expected == math.MaxFloat64 {
+				if got != math.MaxFloat64 {
+					t.Errorf("DotProductDistance() = %v, want %v", got, tt.expected)
+				}
+				return
+			}
+			if math.Abs(got-tt.expected) > 1e-6 {
+				t.Errorf("DotProductDistance() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestDotProductDistance_MatchesScalarNormalizedVectors(t *testing.T) {
+	rng := rand.New(rand.NewSource(42))
+	sizes := []int{32, 33, 128, 768, 769}
+
+	for _, size := range sizes {
+		t.Run("size_"+intToStr(size), func(t *testing.T) {
+			a := make([]float32, size)
+			b := make([]float32, size)
+			for i := range a {
+				a[i] = rng.Float32()*2 - 1
+				b[i] = rng.Float32()*2 - 1
+			}
+			a = NormalizeVector(a)
+			b = NormalizeVector(b)
+
+			got := DotProductDistance(a, b)
+			want := 1.0 - dotProductUnrolled8Scalar(a, b)
+			if diff := math.Abs(got - want); diff > 1e-6 {
+				t.Fatalf("DotProductDistance() = %.12f, scalar = %.12f, diff = %.12f", got, want, diff)
+			}
+		})
+	}
+}
+
+func TestDotProductDistanceBatch(t *testing.T) {
+	query := []float32{1, 0, 0}
+	vectors := [][]float32{
+		{1, 0, 0},     // identical
+		{0, 1, 0},     // orthogonal
+		{-1, 0, 0},    // opposite
+		{1, 0, 0, 42}, // wrong dims
+	}
+	distances := make([]float64, len(vectors))
+
+	DotProductDistanceBatch(query, vectors, distances)
+
+	expected := []float64{0.0, 1.0, 2.0, math.MaxFloat64}
+	for i, exp := range expected {
+		if exp == math.MaxFloat64 {
+			if distances[i] != math.MaxFloat64 {
+				t.Errorf("distances[%d] = %v, want %v", i, distances[i], exp)
+			}
+			continue
+		}
+		if math.Abs(distances[i]-exp) > 1e-6 {
+			t.Errorf("distances[%d] = %v, want %v", i, distances[i], exp)
+		}
+	}
+}
+
+func TestDotProductDistanceBatch_MatchesScalarNormalizedVectors(t *testing.T) {
+	rng := rand.New(rand.NewSource(43))
+	query := make([]float32, 768)
+	for i := range query {
+		query[i] = rng.Float32()*2 - 1
+	}
+	query = NormalizeVector(query)
+
+	vectors := make([][]float32, 8)
+	for i := range vectors {
+		vectors[i] = make([]float32, len(query))
+		for j := range vectors[i] {
+			vectors[i][j] = rng.Float32()*2 - 1
+		}
+		vectors[i] = NormalizeVector(vectors[i])
+	}
+
+	distances := make([]float64, len(vectors))
+	DotProductDistanceBatch(query, vectors, distances)
+
+	for i, vec := range vectors {
+		want := 1.0 - dotProductUnrolled8Scalar(query, vec)
+		if diff := math.Abs(distances[i] - want); diff > 1e-6 {
+			t.Fatalf("distances[%d] = %.12f, scalar = %.12f, diff = %.12f", i, distances[i], want, diff)
+		}
+	}
+}
+
 func TestL2DistanceSlab(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -507,6 +633,42 @@ func BenchmarkL2DistanceBatch_1000vectors(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		L2DistanceBatch(query, vectors, distances)
 	}
+}
+
+func BenchmarkDotProductDistanceBatch_1000vectors(b *testing.B) {
+	query := make([]float32, 768)
+	vectors := make([][]float32, 1000)
+	distances := make([]float64, 1000)
+
+	for i := range query {
+		query[i] = rand.Float32()*2 - 1
+	}
+	NormalizeVector(query)
+	for i := range vectors {
+		vectors[i] = make([]float32, 768)
+		for j := range vectors[i] {
+			vectors[i][j] = rand.Float32()*2 - 1
+		}
+		NormalizeVector(vectors[i])
+	}
+
+	b.Run("Scalar", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			for j, vec := range vectors {
+				distances[j] = 1.0 - dotProductUnrolled8Scalar(query, vec)
+			}
+		}
+	})
+
+	b.Run("DotProductDistanceBatch", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			DotProductDistanceBatch(query, vectors, distances)
+		}
+	})
 }
 
 func BenchmarkTopKIndices_1000vectors_Top10(b *testing.B) {

@@ -159,11 +159,7 @@ func DotProductDistance(a, b []float32) float64 {
 		return math.MaxFloat64
 	}
 
-	var dot float64
-	for i := range a {
-		dot += float64(a[i]) * float64(b[i])
-	}
-	return 1.0 - dot
+	return 1.0 - dotProductFloat32(a, b)
 }
 
 // DotProductUnrolled8 computes dot product with 8-way loop unrolling.
@@ -176,7 +172,11 @@ func DotProductUnrolled8(a, b []float32) float64 {
 	if n != len(b) {
 		return 0
 	}
+	return dotProductFloat32(a, b)
+}
 
+func dotProductUnrolled8Scalar(a, b []float32) float64 {
+	n := len(a)
 	var s0, s1, s2, s3, s4, s5, s6, s7 float64
 
 	// Unrolled main loop (8 elements per iteration)
@@ -251,11 +251,7 @@ func DotProductDistanceBatch(query []float32, vectors [][]float32, distances []f
 			continue
 		}
 
-		var dot float64
-		for j := range query {
-			dot += float64(query[j]) * float64(vec[j])
-		}
-		distances[i] = 1.0 - dot
+		distances[i] = 1.0 - dotProductFloat32(query, vec)
 	}
 }
 
