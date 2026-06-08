@@ -106,7 +106,7 @@ type ColBERTSegmentStorer interface {
 }
 
 // ColBERTSegment represents a pre-computed segment embedding for ColBERT scoring.
-// Supports both float32 (full precision) and int8 (quantized, 4x smaller) storage.
+// Supports float32 staging plus compact persisted codecs for query-time scoring.
 type ColBERTSegment struct {
 	SegmentIdx int       // Index within the chunk (0, 1, 2, ...)
 	Text       string    // Original segment text (for debugging)
@@ -121,6 +121,10 @@ type ColBERTSegment struct {
 	// Product quantized storage (for example m=6 => 6 bytes/vector).
 	// Query-time scoring uses ADC tables via pkg/util/pq.go.
 	PQCodes []byte
+
+	// TQ-MSE storage uses bit-packed per-coordinate scalar codes after a
+	// deterministic orthogonal rotation.
+	TQCodes []byte
 }
 
 // FileEmbedding represents a document-level embedding for a file.

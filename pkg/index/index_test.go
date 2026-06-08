@@ -1,6 +1,7 @@
 package index
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -52,6 +53,106 @@ func (s *segmentCountTestStore) GetChunksForColBERT(ctx context.Context, batchSi
 		end = len(s.chunks)
 	}
 	return append([]store.ChunkInfo(nil), s.chunks[offset:end]...), nil
+}
+
+type exportColBERTTestStore struct {
+	chunks   []store.ChunkInfo
+	segments map[string][]store.ColBERTSegment
+	codec    store.ColBERTCodec
+	pq       *util.ProductQuantizer
+	tq       *util.TQMSEQuantizer
+}
+
+func (s *exportColBERTTestStore) Store(ctx context.Context, doc *store.Document) error {
+	return nil
+}
+
+func (s *exportColBERTTestStore) StoreBatch(ctx context.Context, docs []*store.Document) error {
+	return nil
+}
+
+func (s *exportColBERTTestStore) Search(ctx context.Context, embedding []float32, limit int, threshold float64) ([]*store.Document, []float64, error) {
+	return nil, nil, nil
+}
+
+func (s *exportColBERTTestStore) HybridSearch(ctx context.Context, embedding []float32, queryTerms string, limit int, threshold float64, semanticWeight, bm25Weight float64) ([]*store.Document, []float64, error) {
+	return nil, nil, nil
+}
+
+func (s *exportColBERTTestStore) Stats(ctx context.Context) (*store.Stats, error) {
+	return &store.Stats{Chunks: int64(len(s.chunks))}, nil
+}
+
+func (s *exportColBERTTestStore) DeleteByPath(ctx context.Context, filepath string) error {
+	return nil
+}
+
+func (s *exportColBERTTestStore) Close() error {
+	return nil
+}
+
+func (s *exportColBERTTestStore) StoreColBERTSegments(ctx context.Context, chunkID string, segments []store.ColBERTSegment) error {
+	if s.segments == nil {
+		s.segments = make(map[string][]store.ColBERTSegment)
+	}
+	s.segments[chunkID] = append([]store.ColBERTSegment(nil), segments...)
+	return nil
+}
+
+func (s *exportColBERTTestStore) StoreColBERTSegmentsBatch(ctx context.Context, chunkSegments map[string][]store.ColBERTSegment) error {
+	if s.segments == nil {
+		s.segments = make(map[string][]store.ColBERTSegment)
+	}
+	for chunkID, segments := range chunkSegments {
+		s.segments[chunkID] = append([]store.ColBERTSegment(nil), segments...)
+	}
+	return nil
+}
+
+func (s *exportColBERTTestStore) GetColBERTSegments(ctx context.Context, chunkID string) ([]store.ColBERTSegment, error) {
+	return append([]store.ColBERTSegment(nil), s.segments[chunkID]...), nil
+}
+
+func (s *exportColBERTTestStore) GetColBERTSegmentsBatch(ctx context.Context, chunkIDs []string) (map[string][]store.ColBERTSegment, error) {
+	result := make(map[string][]store.ColBERTSegment, len(chunkIDs))
+	for _, chunkID := range chunkIDs {
+		if segments, ok := s.segments[chunkID]; ok {
+			result[chunkID] = append([]store.ColBERTSegment(nil), segments...)
+		}
+	}
+	return result, nil
+}
+
+func (s *exportColBERTTestStore) DeleteColBERTSegments(ctx context.Context, chunkID string) error {
+	delete(s.segments, chunkID)
+	return nil
+}
+
+func (s *exportColBERTTestStore) HasColBERTSegments(ctx context.Context) (bool, error) {
+	return len(s.segments) > 0, nil
+}
+
+func (s *exportColBERTTestStore) GetChunksForColBERT(ctx context.Context, batchSize int, offset int) ([]store.ChunkInfo, error) {
+	if offset >= len(s.chunks) {
+		return nil, nil
+	}
+	end := offset + batchSize
+	if end > len(s.chunks) {
+		end = len(s.chunks)
+	}
+	return append([]store.ChunkInfo(nil), s.chunks[offset:end]...), nil
+}
+
+func (s *exportColBERTTestStore) ColBERTCodec() store.ColBERTCodec {
+	return s.codec
+}
+
+func (s *exportColBERTTestStore) ProductQuantizer() *util.ProductQuantizer {
+	return s.pq
+}
+
+func (s *exportColBERTTestStore) TQMSEQuantizer() *util.TQMSEQuantizer {
+	return s.tq
 }
 
 func TestGetSgrepHome(t *testing.T) {
@@ -212,7 +313,7 @@ func TestBuildStoredColBERTSegments_AdaptivePoolsToBudget(t *testing.T) {
 		embeddings[i] = randomNormalizedEmbedding(rng, 768)
 	}
 
-	segments := buildStoredColBERTSegments("chunk-a", segmentTexts, embeddings, true, store.ColBERTCodecInt8, nil)
+	segments := buildStoredColBERTSegments("chunk-a", segmentTexts, embeddings, true, store.ColBERTCodecInt8, nil, nil)
 
 	if len(segments) > budget {
 		t.Fatalf("adaptive pooling exceeded budget: got %d want <= %d", len(segments), budget)
@@ -237,7 +338,7 @@ func TestBuildStoredColBERTSegments_AdaptiveKeepsLegacySizedChunks(t *testing.T)
 		embeddings[i] = randomNormalizedEmbedding(rng, 768)
 	}
 
-	segments := buildStoredColBERTSegments("chunk-b", segmentTexts, embeddings, true, store.ColBERTCodecInt8, nil)
+	segments := buildStoredColBERTSegments("chunk-b", segmentTexts, embeddings, true, store.ColBERTCodecInt8, nil, nil)
 	if len(segments) != len(segmentTexts) {
 		t.Fatalf("legacy-sized chunk should remain unchanged: got %d want %d", len(segments), len(segmentTexts))
 	}
@@ -346,7 +447,7 @@ func TestBuildStoredColBERTSegments_AdaptiveMergesSimilarSegments(t *testing.T) 
 		perturbEmbedding(baseD, 0.004),
 	}
 
-	segments := buildStoredColBERTSegments("chunk-c", segmentTexts, embeddings, true, store.ColBERTCodecInt8, nil)
+	segments := buildStoredColBERTSegments("chunk-c", segmentTexts, embeddings, true, store.ColBERTCodecInt8, nil, nil)
 	if len(segments) >= len(segmentTexts) {
 		t.Fatalf("adaptive merge did not collapse similar segments: got %d from %d", len(segments), len(segmentTexts))
 	}
@@ -424,6 +525,7 @@ func TestBuildStoredColBERTSegments_PQ6EncodesCodes(t *testing.T) {
 		false,
 		store.ColBERTCodecPQ6,
 		pq,
+		nil,
 	)
 
 	if len(segments) != 2 {
@@ -434,6 +536,148 @@ func TestBuildStoredColBERTSegments_PQ6EncodesCodes(t *testing.T) {
 	}
 	if len(segments[0].EmbeddingInt8) != 0 {
 		t.Fatalf("expected PQ path to omit int8 payload")
+	}
+}
+
+func TestBuildStoredColBERTSegments_TQMSEEncodesCodes(t *testing.T) {
+	tq, err := util.NewTQMSEQuantizer(util.TQMSEConfig{
+		Dims: 4,
+		Bits: 4,
+		Seed: 42,
+	})
+	if err != nil {
+		t.Fatalf("NewTQMSEQuantizer failed: %v", err)
+	}
+
+	segments := buildStoredColBERTSegments(
+		"chunk-tq",
+		[]string{"a", "b"},
+		[][]float32{
+			util.NormalizeVectorCopy([]float32{1, 0, 0, 0}),
+			util.NormalizeVectorCopy([]float32{0, 1, 0, 0}),
+		},
+		false,
+		store.ColBERTCodecTQMSE,
+		nil,
+		tq,
+	)
+
+	if len(segments) != 2 {
+		t.Fatalf("expected 2 segments, got %d", len(segments))
+	}
+	if len(segments[0].TQCodes) != tq.CodeSize() {
+		t.Fatalf("expected %d TQ bytes, got %d", tq.CodeSize(), len(segments[0].TQCodes))
+	}
+	if len(segments[0].EmbeddingInt8) != 0 || len(segments[0].PQCodes) != 0 {
+		t.Fatalf("expected TQ path to omit int8/PQ payloads")
+	}
+}
+
+func TestExportColBERTToMMap_ReencodesLegacyInt8SegmentsToTQMSE(t *testing.T) {
+	t.Setenv("SGREP_DIMS", "4")
+	ctx := context.Background()
+
+	tq, err := util.NewTQMSEQuantizer(util.TQMSEConfig{
+		Dims: 4,
+		Bits: 4,
+		Seed: 42,
+	})
+	if err != nil {
+		t.Fatalf("NewTQMSEQuantizer failed: %v", err)
+	}
+
+	emb := util.NormalizeVectorCopy([]float32{0.92, 0.21, -0.26, 0.11})
+	quantized, scale, min := util.QuantizeInt8(emb)
+	legacySegments := []store.ColBERTSegment{
+		{
+			SegmentIdx:    0,
+			Text:          "legacy int8",
+			EmbeddingInt8: quantized,
+			QuantScale:    scale,
+			QuantMin:      min,
+		},
+	}
+	expected, err := encodeSegmentsToTQMSE("chunk-old", legacySegments, tq)
+	if err != nil {
+		t.Fatalf("encodeSegmentsToTQMSE failed: %v", err)
+	}
+	if allBytesZero(expected[0].TQCodes) {
+		t.Fatal("test fixture produced an all-zero TQ-MSE code")
+	}
+
+	idx := &Indexer{
+		store: &exportColBERTTestStore{
+			chunks: []store.ChunkInfo{{ID: "chunk-old"}},
+			segments: map[string][]store.ColBERTSegment{
+				"chunk-old": legacySegments,
+			},
+			codec: store.ColBERTCodecTQMSE,
+			tq:    tq,
+		},
+	}
+
+	outputDir := t.TempDir()
+	total, err := idx.ExportColBERTToMMap(ctx, outputDir)
+	if err != nil {
+		t.Fatalf("ExportColBERTToMMap failed: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("expected 1 exported segment, got %d", total)
+	}
+
+	mmapStore, err := store.OpenMMapSegmentStore(outputDir, 4)
+	if err != nil {
+		t.Fatalf("OpenMMapSegmentStore failed: %v", err)
+	}
+	defer func() { _ = mmapStore.Close() }()
+
+	if mmapStore.ColBERTCodec() != store.ColBERTCodecTQMSE {
+		t.Fatalf("expected mmap codec %q, got %q", store.ColBERTCodecTQMSE, mmapStore.ColBERTCodec())
+	}
+	segments, err := mmapStore.GetColBERTSegments(ctx, "chunk-old")
+	if err != nil {
+		t.Fatalf("GetColBERTSegments failed: %v", err)
+	}
+	if len(segments) != 1 {
+		t.Fatalf("expected 1 mmap segment, got %d", len(segments))
+	}
+	if !bytes.Equal(segments[0].TQCodes, expected[0].TQCodes) {
+		t.Fatalf("expected exported TQ code %v, got %v", expected[0].TQCodes, segments[0].TQCodes)
+	}
+	if len(segments[0].EmbeddingInt8) != 0 || len(segments[0].PQCodes) != 0 {
+		t.Fatalf("expected exported segment to contain only TQ codes")
+	}
+}
+
+func TestEncodeSegmentsToTQMSE_PreservesStoredCodes(t *testing.T) {
+	tq, err := util.NewTQMSEQuantizer(util.TQMSEConfig{
+		Dims: 4,
+		Bits: 4,
+		Seed: 42,
+	})
+	if err != nil {
+		t.Fatalf("NewTQMSEQuantizer failed: %v", err)
+	}
+	code, err := tq.Encode(util.NormalizeVectorCopy([]float32{0.2, 0.8, -0.1, 0.3}))
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+
+	encoded, err := encodeSegmentsToTQMSE("chunk-tq", []store.ColBERTSegment{
+		{SegmentIdx: 0, Text: "stored tq", TQCodes: code.Codes},
+	}, tq)
+	if err != nil {
+		t.Fatalf("encodeSegmentsToTQMSE failed: %v", err)
+	}
+	if len(encoded) != 1 {
+		t.Fatalf("expected 1 segment, got %d", len(encoded))
+	}
+	if !bytes.Equal(encoded[0].TQCodes, code.Codes) {
+		t.Fatalf("expected preserved code %v, got %v", code.Codes, encoded[0].TQCodes)
+	}
+	encoded[0].TQCodes[0] ^= 0xff
+	if bytes.Equal(encoded[0].TQCodes, code.Codes) {
+		t.Fatal("expected preserved code to be copied, not aliased")
 	}
 }
 
@@ -517,10 +761,19 @@ func TestConvertColBERTSegmentsForCodecStrict_PQEncodeFailureErrors(t *testing.T
 
 	_, err = convertColBERTSegmentsForCodecStrict("chunk-strict", []store.ColBERTSegment{
 		{SegmentIdx: 0, Text: "broken"},
-	}, store.ColBERTCodecPQ6, pq)
+	}, store.ColBERTCodecPQ6, pq, nil)
 	if err == nil {
 		t.Fatal("expected strict PQ conversion to fail for missing embeddings")
 	}
+}
+
+func allBytesZero(data []byte) bool {
+	for _, b := range data {
+		if b != 0 {
+			return false
+		}
+	}
+	return len(data) > 0
 }
 
 func TestColBERTPQScratchRoundTrip(t *testing.T) {

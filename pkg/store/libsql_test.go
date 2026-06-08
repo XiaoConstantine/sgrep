@@ -355,7 +355,7 @@ func TestLibSQLStore_ColBERTPQMetadataAndSegments(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := s.SaveColBERTMetadata(ctx, ColBERTCodecPQ6, pq); err != nil {
+	if err := s.SaveColBERTMetadata(ctx, ColBERTCodecPQ6, pq, nil); err != nil {
 		t.Fatalf("SaveColBERTMetadata failed: %v", err)
 	}
 	if err := s.StoreColBERTSegmentsBatch(ctx, map[string][]ColBERTSegment{
@@ -366,7 +366,7 @@ func TestLibSQLStore_ColBERTPQMetadataAndSegments(t *testing.T) {
 		t.Fatalf("StoreColBERTSegmentsBatch failed: %v", err)
 	}
 
-	gotCodec, gotPQ, err := s.LoadColBERTMetadata(ctx)
+	gotCodec, gotPQ, gotTQ, err := s.LoadColBERTMetadata(ctx)
 	if err != nil {
 		t.Fatalf("LoadColBERTMetadata failed: %v", err)
 	}
@@ -375,6 +375,9 @@ func TestLibSQLStore_ColBERTPQMetadataAndSegments(t *testing.T) {
 	}
 	if gotPQ == nil || gotPQ.CodeSize() != pq.CodeSize() {
 		t.Fatalf("expected persisted PQ codebook with code size %d", pq.CodeSize())
+	}
+	if gotTQ != nil {
+		t.Fatal("expected nil TQ-MSE quantizer for PQ codec")
 	}
 
 	segs, err := s.GetColBERTSegments(ctx, "chunk-1")
@@ -389,6 +392,71 @@ func TestLibSQLStore_ColBERTPQMetadataAndSegments(t *testing.T) {
 	}
 	if len(segs[0].EmbeddingInt8) != 0 {
 		t.Fatalf("expected PQ segment without int8 payload, got %d bytes", len(segs[0].EmbeddingInt8))
+	}
+}
+
+func TestLibSQLStore_ColBERTTQMSEMetadataAndSegments(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	t.Setenv("SGREP_DIMS", "4")
+	s, err := OpenLibSQL(dbPath)
+	if err != nil {
+		t.Fatalf("OpenLibSQL failed: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	tq, err := util.NewTQMSEQuantizer(util.TQMSEConfig{
+		Dims: 4,
+		Bits: 4,
+		Seed: 42,
+	})
+	if err != nil {
+		t.Fatalf("NewTQMSEQuantizer failed: %v", err)
+	}
+	code, err := tq.Encode([]float32{1, 0, 0, 0})
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := s.SaveColBERTMetadata(ctx, ColBERTCodecTQMSE, nil, tq); err != nil {
+		t.Fatalf("SaveColBERTMetadata failed: %v", err)
+	}
+	if err := s.StoreColBERTSegmentsBatch(ctx, map[string][]ColBERTSegment{
+		"chunk-1": {
+			{SegmentIdx: 0, Text: "seg", TQCodes: code.Codes},
+		},
+	}); err != nil {
+		t.Fatalf("StoreColBERTSegmentsBatch failed: %v", err)
+	}
+
+	gotCodec, gotPQ, gotTQ, err := s.LoadColBERTMetadata(ctx)
+	if err != nil {
+		t.Fatalf("LoadColBERTMetadata failed: %v", err)
+	}
+	if gotCodec != ColBERTCodecTQMSE {
+		t.Fatalf("expected codec %q, got %q", ColBERTCodecTQMSE, gotCodec)
+	}
+	if gotPQ != nil {
+		t.Fatal("expected nil PQ codebook for TQ-MSE codec")
+	}
+	if gotTQ == nil || gotTQ.CodeSize() != tq.CodeSize() {
+		t.Fatalf("expected persisted TQ-MSE quantizer with code size %d", tq.CodeSize())
+	}
+
+	segs, err := s.GetColBERTSegments(ctx, "chunk-1")
+	if err != nil {
+		t.Fatalf("GetColBERTSegments failed: %v", err)
+	}
+	if len(segs) != 1 {
+		t.Fatalf("expected 1 segment, got %d", len(segs))
+	}
+	if len(segs[0].TQCodes) != len(code.Codes) {
+		t.Fatalf("expected %d TQ codes, got %d", len(code.Codes), len(segs[0].TQCodes))
+	}
+	if len(segs[0].EmbeddingInt8) != 0 || len(segs[0].PQCodes) != 0 {
+		t.Fatalf("expected TQ segment without int8/PQ payload")
 	}
 }
 

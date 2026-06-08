@@ -58,6 +58,10 @@ func (m *mockSegmentStore) ProductQuantizer() *util.ProductQuantizer {
 	return m.pq
 }
 
+func (m *mockSegmentStore) TQMSEQuantizer() *util.TQMSEQuantizer {
+	return nil
+}
+
 func (m *mockStore) Store(ctx context.Context, doc *store.Document) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

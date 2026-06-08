@@ -30,7 +30,7 @@ import (
 //	    - DataOffset: 4 bytes
 //	    - Reserved: 8 bytes
 //
-//	v2 PQ:
+//	v2 compact codecs:
 //	  Header (40 bytes):
 //	    - Magic: 4 bytes ("SGCS")
 //	    - Version: 4 bytes (2)
@@ -40,7 +40,7 @@ import (
 //	    - HeaderSize: 4 bytes
 //	    - DataOffset: 4 bytes
 //	    - Codec: 4 bytes
-//	    - CodebookSize: 4 bytes
+//	    - MetadataSize: 4 bytes
 //	Index (20 bytes per chunk):
 //	  - ChunkID hash: 8 bytes
 //	  - DataOffset: 4 bytes
@@ -49,7 +49,7 @@ import (
 //	  - ChunkID: variable (padded to 4-byte alignment)
 //	Data (variable):
 //	  - v1 per segment: dims bytes (int8) + 4 bytes (scale:f32) + 4 bytes (min:f32)
-//	  - v2 per segment: m bytes of PQ codes
+//	  - v2 per segment: codec-specific packed bytes
 type MMapSegmentStore struct {
 	path  string
 	dims  int
@@ -58,6 +58,7 @@ type MMapSegmentStore struct {
 	mu    sync.RWMutex
 	codec ColBERTCodec
 	pq    *util.ProductQuantizer
+	tq    *util.TQMSEQuantizer
 
 	// In-memory index for fast chunk lookup
 	chunkIndex map[string]chunkLoc
@@ -84,6 +85,7 @@ const (
 	mmapHeaderSizeV2 = 40
 	mmapCodecInt8    = 1
 	mmapCodecPQ6     = 2
+	mmapCodecTQMSE   = 3
 )
 
 // OpenMMapSegmentStore opens or creates a memory-mapped segment store.
@@ -145,6 +147,7 @@ func (s *MMapSegmentStore) load() error {
 		indexOffset = mmapHeaderSizeV1
 		s.codec = ColBERTCodecInt8
 		s.pq = nil
+		s.tq = nil
 		s.dims = int(binary.LittleEndian.Uint32(data[8:12]))
 		dataOffset = int(binary.LittleEndian.Uint32(data[20:24]))
 	case mmapVersionV2:
@@ -162,6 +165,8 @@ func (s *MMapSegmentStore) load() error {
 		switch codecID {
 		case mmapCodecPQ6:
 			s.codec = ColBERTCodecPQ6
+		case mmapCodecTQMSE:
+			s.codec = ColBERTCodecTQMSE
 		default:
 			s.codec = ColBERTCodecInt8
 		}
@@ -171,8 +176,17 @@ func (s *MMapSegmentStore) load() error {
 				return fmt.Errorf("deserialize mmap codebook: %w", err)
 			}
 			s.pq = pq
+			s.tq = nil
+		} else if s.codec == ColBERTCodecTQMSE && codebookSize > 0 {
+			tq, err := util.DeserializeTQMSEQuantizer(data[headerSize : headerSize+codebookSize])
+			if err != nil {
+				return fmt.Errorf("deserialize mmap tqmse metadata: %w", err)
+			}
+			s.tq = tq
+			s.pq = nil
 		} else {
 			s.pq = nil
+			s.tq = nil
 		}
 		indexOffset = headerSize + codebookSize
 	default:
@@ -210,11 +224,12 @@ func (s *MMapSegmentStore) load() error {
 }
 
 // SetColBERTCodec configures the codec used by the next write transaction.
-func (s *MMapSegmentStore) SetColBERTCodec(codec ColBERTCodec, pq *util.ProductQuantizer) {
+func (s *MMapSegmentStore) SetColBERTCodec(codec ColBERTCodec, pq *util.ProductQuantizer, tq *util.TQMSEQuantizer) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.codec = ResolveColBERTCodec(codec, ColBERTCodecUnspecified)
 	s.pq = pq
+	s.tq = tq
 }
 
 // ColBERTCodec reports the codec stored in the mmap artifact.
@@ -231,6 +246,13 @@ func (s *MMapSegmentStore) ProductQuantizer() *util.ProductQuantizer {
 	return s.pq
 }
 
+// TQMSEQuantizer returns the mmap-embedded TQ-MSE quantizer when present.
+func (s *MMapSegmentStore) TQMSEQuantizer() *util.TQMSEQuantizer {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.tq
+}
+
 func (s *MMapSegmentStore) segmentSize() (int, error) {
 	switch s.codec {
 	case ColBERTCodecPQ6:
@@ -238,6 +260,11 @@ func (s *MMapSegmentStore) segmentSize() (int, error) {
 			return 0, fmt.Errorf("pq mmap missing codebook")
 		}
 		return s.pq.CodeSize(), nil
+	case ColBERTCodecTQMSE:
+		if s.tq == nil {
+			return 0, fmt.Errorf("tqmse mmap missing quantizer")
+		}
+		return s.tq.CodeSize(), nil
 	default:
 		return s.dims + 8, nil
 	}
@@ -294,6 +321,12 @@ func (s *MMapSegmentStore) GetColBERTSegments(ctx context.Context, chunkID strin
 			segments[i] = ColBERTSegment{
 				SegmentIdx: i,
 				PQCodes:    codes,
+			}
+		case ColBERTCodecTQMSE:
+			codes := append([]byte(nil), s.data[segOffset:segOffset+segSize]...)
+			segments[i] = ColBERTSegment{
+				SegmentIdx: i,
+				TQCodes:    codes,
 			}
 		default:
 			embInt8 := make([]int8, s.dims)
@@ -358,16 +391,6 @@ func (s *MMapSegmentStore) CommitWrite() error {
 		return fmt.Errorf("no write transaction")
 	}
 
-	// Close existing mmap
-	if s.data != nil {
-		_ = syscall.Munmap(s.data)
-		s.data = nil
-	}
-	if s.file != nil {
-		_ = s.file.Close()
-		s.file = nil
-	}
-
 	// Sort chunk IDs for deterministic output
 	chunkIDs := make([]string, 0, len(s.writeBuffer.chunks))
 	for id := range s.writeBuffer.chunks {
@@ -380,6 +403,8 @@ func (s *MMapSegmentStore) CommitWrite() error {
 		first := s.writeBuffer.chunks[chunkIDs[0]]
 		if len(first) > 0 && len(first[0].PQCodes) > 0 {
 			codec = ColBERTCodecPQ6
+		} else if len(first) > 0 && len(first[0].TQCodes) > 0 {
+			codec = ColBERTCodecTQMSE
 		} else {
 			codec = ColBERTCodecInt8
 		}
@@ -390,11 +415,31 @@ func (s *MMapSegmentStore) CommitWrite() error {
 	if codec == ColBERTCodecPQ6 && s.pq == nil {
 		return fmt.Errorf("pq mmap write requires a codebook")
 	}
+	if codec == ColBERTCodecTQMSE && s.tq == nil {
+		return fmt.Errorf("tqmse mmap write requires a quantizer")
+	}
 
 	// Calculate sizes
 	segSize := s.dims + 8
-	if codec == ColBERTCodecPQ6 {
+	switch codec {
+	case ColBERTCodecPQ6:
 		segSize = s.pq.CodeSize()
+	case ColBERTCodecTQMSE:
+		segSize = s.tq.CodeSize()
+	}
+	for chunkID, segments := range s.writeBuffer.chunks {
+		for i, seg := range segments {
+			switch codec {
+			case ColBERTCodecPQ6:
+				if len(seg.PQCodes) != segSize {
+					return fmt.Errorf("pq mmap segment %s[%d] has code length %d (expected %d)", chunkID, i, len(seg.PQCodes), segSize)
+				}
+			case ColBERTCodecTQMSE:
+				if len(seg.TQCodes) != segSize {
+					return fmt.Errorf("tqmse mmap segment %s[%d] has code length %d (expected %d)", chunkID, i, len(seg.TQCodes), segSize)
+				}
+			}
+		}
 	}
 	indexSize := 0
 	for _, id := range chunkIDs {
@@ -404,18 +449,40 @@ func (s *MMapSegmentStore) CommitWrite() error {
 	}
 	headerSize := mmapHeaderSizeV1
 	version := uint32(mmapVersionV1)
-	var codebook []byte
-	if codec == ColBERTCodecPQ6 {
+	var codecMetadata []byte
+	codecID := uint32(mmapCodecInt8)
+	switch codec {
+	case ColBERTCodecPQ6:
 		headerSize = mmapHeaderSizeV2
 		version = mmapVersionV2
+		codecID = mmapCodecPQ6
 		var err error
-		codebook, err = s.pq.SerializeCodebook()
+		codecMetadata, err = s.pq.SerializeCodebook()
 		if err != nil {
 			return fmt.Errorf("serialize mmap codebook: %w", err)
 		}
+	case ColBERTCodecTQMSE:
+		headerSize = mmapHeaderSizeV2
+		version = mmapVersionV2
+		codecID = mmapCodecTQMSE
+		var err error
+		codecMetadata, err = s.tq.Serialize()
+		if err != nil {
+			return fmt.Errorf("serialize mmap tqmse metadata: %w", err)
+		}
 	}
 	dataSize := s.writeBuffer.totalSegs * segSize
-	totalSize := headerSize + len(codebook) + indexSize + dataSize
+	totalSize := headerSize + len(codecMetadata) + indexSize + dataSize
+
+	// Close existing mmap only after all pre-write validation has passed.
+	if s.data != nil {
+		_ = syscall.Munmap(s.data)
+		s.data = nil
+	}
+	if s.file != nil {
+		_ = s.file.Close()
+		s.file = nil
+	}
 
 	// Create file
 	f, err := os.Create(s.path)
@@ -440,16 +507,16 @@ func (s *MMapSegmentStore) CommitWrite() error {
 		binary.LittleEndian.PutUint32(header[20:24], uint32(headerSize+indexSize))
 	} else {
 		binary.LittleEndian.PutUint32(header[20:24], uint32(headerSize))
-		binary.LittleEndian.PutUint32(header[24:28], uint32(headerSize+len(codebook)+indexSize))
-		binary.LittleEndian.PutUint32(header[28:32], mmapCodecPQ6)
-		binary.LittleEndian.PutUint32(header[32:36], uint32(len(codebook)))
+		binary.LittleEndian.PutUint32(header[24:28], uint32(headerSize+len(codecMetadata)+indexSize))
+		binary.LittleEndian.PutUint32(header[28:32], codecID)
+		binary.LittleEndian.PutUint32(header[32:36], uint32(len(codecMetadata)))
 	}
 	if _, err := f.Write(header); err != nil {
 		_ = f.Close()
 		return err
 	}
-	if len(codebook) > 0 {
-		if _, err := f.Write(codebook); err != nil {
+	if len(codecMetadata) > 0 {
+		if _, err := f.Write(codecMetadata); err != nil {
 			_ = f.Close()
 			return err
 		}
@@ -482,7 +549,7 @@ func (s *MMapSegmentStore) CommitWrite() error {
 		}
 
 		s.chunkIndex[chunkID] = chunkLoc{
-			offset: headerSize + len(codebook) + indexSize + dataOffset,
+			offset: headerSize + len(codecMetadata) + indexSize + dataOffset,
 			count:  len(segments),
 		}
 		dataOffset += len(segments) * segSize
@@ -496,6 +563,8 @@ func (s *MMapSegmentStore) CommitWrite() error {
 			switch codec {
 			case ColBERTCodecPQ6:
 				copy(segData, seg.PQCodes)
+			case ColBERTCodecTQMSE:
+				copy(segData, seg.TQCodes)
 			default:
 				for j, v := range seg.EmbeddingInt8 {
 					segData[j] = byte(v)

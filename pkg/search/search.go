@@ -233,6 +233,7 @@ func NewWithConfig(cfg Config) *Searcher {
 			colbertScorer.SetSegmentStore(cfg.SegmentStore)
 			if provider, ok := cfg.SegmentStore.(store.ColBERTMetadataProvider); ok {
 				colbertScorer.SetProductQuantizer(provider.ProductQuantizer())
+				colbertScorer.SetTQMSEQuantizer(provider.TQMSEQuantizer())
 				if provider.ColBERTCodec() == store.ColBERTCodecPQ6 {
 					colbertScorer.SetPQExactRescoreTopK(pqExactRescoreTopK)
 				}
@@ -242,6 +243,7 @@ func NewWithConfig(cfg Config) *Searcher {
 			colbertScorer.SetSegmentStore(segmentStore)
 			if provider, ok := cfg.Store.(store.ColBERTMetadataProvider); ok {
 				colbertScorer.SetProductQuantizer(provider.ProductQuantizer())
+				colbertScorer.SetTQMSEQuantizer(provider.TQMSEQuantizer())
 				if provider.ColBERTCodec() == store.ColBERTCodecPQ6 {
 					colbertScorer.SetPQExactRescoreTopK(pqExactRescoreTopK)
 				}

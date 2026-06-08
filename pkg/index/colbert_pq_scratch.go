@@ -107,6 +107,7 @@ func cloneColBERTSegments(segments []store.ColBERTSegment) []store.ColBERTSegmen
 			Embedding:     append([]float32(nil), seg.Embedding...),
 			EmbeddingInt8: append([]int8(nil), seg.EmbeddingInt8...),
 			PQCodes:       append([]byte(nil), seg.PQCodes...),
+			TQCodes:       append([]byte(nil), seg.TQCodes...),
 		}
 	}
 	return cloned

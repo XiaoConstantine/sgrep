@@ -78,8 +78,8 @@ sgrep setup
 # Index your codebase (vectors + ColBERT preindex, auto-starts embedding server)
 sgrep index .
 
-# Optional: use the PQ6 ColBERT codec for larger repos
-# Small repos automatically stay on int8
+# Optional: override the default TQ-MSE ColBERT codec
+sgrep index . --colbert-codec int8
 sgrep index . --colbert-codec pq6
 
 # Semantic search (quick)
@@ -513,6 +513,9 @@ Recent `dspy-go` benchmark on Apple M3 Pro + Metal (532 files, 7,735 chunks, 35,
 | Search quality | tuned pure `pq6` matched the current int8 benchmark at **MRR 0.725** |
 
 Notes:
+- The default ColBERT segment codec is `tqmse`, which targets about half the
+  segment storage of int8 while keeping int8 available as a conservative
+  `--colbert-codec int8` override.
 - `--colbert-codec pq6` is size-gated: small repos automatically stay on int8.
 - Search latency varies significantly with corpus size, hardware, and whether ColBERT or rerank are enabled, so the README avoids claiming one universal query-time number.
 

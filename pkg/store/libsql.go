@@ -32,6 +32,7 @@ type LibSQLStore struct {
 	quantize     QuantizationMode
 	colbertCodec ColBERTCodec
 	colbertPQ    *util.ProductQuantizer
+	colbertTQMSE *util.TQMSEQuantizer
 
 	// In-memory cache for small datasets (< inMemoryThreshold)
 	memMu       sync.RWMutex
@@ -100,7 +101,7 @@ func OpenLibSQL(path string, opts ...LibSQLStoreOption) (*LibSQLStore, error) {
 		dims:         dims,
 		dbPath:       path,
 		quantize:     QuantizeNone,
-		colbertCodec: ColBERTCodecInt8,
+		colbertCodec: ColBERTCodecUnspecified,
 		partitions:   partitions,
 		slabPool:     util.NewSlabPool(partitions, 10000, dims),
 	}
@@ -167,9 +168,8 @@ func (s *LibSQLStore) init() error {
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`, s.dims),
 
-		// ColBERT segment embeddings for fast late-interaction scoring
-		// Stores pre-computed segment embeddings per chunk to avoid query-time embedding generation
-		// Uses int8 quantized embeddings (4x compression vs float32) with scale/min for dequantization
+		// ColBERT segment embeddings for fast late-interaction scoring.
+		// Stores pre-computed segment payloads per chunk to avoid query-time embedding generation.
 		`CREATE TABLE IF NOT EXISTS colbert_segments (
 			chunk_id TEXT NOT NULL,
 			segment_idx INTEGER NOT NULL,
@@ -178,6 +178,7 @@ func (s *LibSQLStore) init() error {
 			quant_scale REAL,
 			quant_min REAL,
 			pq_codes BLOB,
+			tq_codes BLOB,
 			PRIMARY KEY (chunk_id, segment_idx)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_colbert_segments_chunk ON colbert_segments(chunk_id)`,
@@ -196,6 +197,10 @@ func (s *LibSQLStore) init() error {
 	if _, err := s.db.Exec(`ALTER TABLE colbert_segments ADD COLUMN pq_codes BLOB`); err != nil &&
 		!strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("failed to migrate colbert_segments: %w", err)
+	}
+	if _, err := s.db.Exec(`ALTER TABLE colbert_segments ADD COLUMN tq_codes BLOB`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("failed to migrate colbert_segments tq codes: %w", err)
 	}
 
 	// Create DiskANN vector index with compression based on quantization mode
@@ -317,71 +322,106 @@ func (s *LibSQLStore) ProductQuantizer() *util.ProductQuantizer {
 	return s.colbertPQ
 }
 
+// TQMSEQuantizer returns the persisted TQ-MSE quantizer when the repo uses TQ-MSE.
+func (s *LibSQLStore) TQMSEQuantizer() *util.TQMSEQuantizer {
+	return s.colbertTQMSE
+}
+
 // SaveColBERTMetadata persists the repo-level late-interaction codec metadata.
-func (s *LibSQLStore) SaveColBERTMetadata(ctx context.Context, codec ColBERTCodec, pq *util.ProductQuantizer) error {
-	var codebook []byte
+func (s *LibSQLStore) SaveColBERTMetadata(ctx context.Context, codec ColBERTCodec, pq *util.ProductQuantizer, tq *util.TQMSEQuantizer) error {
+	var codecMetadata []byte
 	var err error
-	if codec == ColBERTCodecPQ6 {
+	switch codec {
+	case ColBERTCodecPQ6:
 		if pq == nil {
 			return fmt.Errorf("pq6 codec requires a trained codebook")
 		}
-		codebook, err = pq.SerializeCodebook()
+		codecMetadata, err = pq.SerializeCodebook()
 		if err != nil {
 			return fmt.Errorf("serialize codebook: %w", err)
 		}
+		tq = nil
+	case ColBERTCodecTQMSE:
+		if tq == nil {
+			return fmt.Errorf("tqmse codec requires a quantizer")
+		}
+		codecMetadata, err = tq.Serialize()
+		if err != nil {
+			return fmt.Errorf("serialize tqmse quantizer: %w", err)
+		}
+		pq = nil
+	default:
+		codec = ColBERTCodecInt8
+		pq = nil
+		tq = nil
 	}
 
 	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO colbert_metadata (id, codec, pq_codebook)
 		VALUES (1, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET codec = excluded.codec, pq_codebook = excluded.pq_codebook
-	`, codec.String(), codebook); err != nil {
+	`, codec.String(), codecMetadata); err != nil {
 		return fmt.Errorf("save colbert metadata: %w", err)
 	}
 
 	s.colbertCodec = ResolveColBERTCodec(codec, ColBERTCodecUnspecified)
 	s.colbertPQ = pq
+	s.colbertTQMSE = tq
 	return nil
 }
 
 // LoadColBERTMetadata loads the repo-level late-interaction codec metadata.
-func (s *LibSQLStore) LoadColBERTMetadata(ctx context.Context) (ColBERTCodec, *util.ProductQuantizer, error) {
+func (s *LibSQLStore) LoadColBERTMetadata(ctx context.Context) (ColBERTCodec, *util.ProductQuantizer, *util.TQMSEQuantizer, error) {
 	var codecText string
-	var codebook []byte
+	var codecMetadata []byte
 	err := s.db.QueryRowContext(ctx, `
 		SELECT codec, pq_codebook
 		FROM colbert_metadata
 		WHERE id = 1
-	`).Scan(&codecText, &codebook)
+	`).Scan(&codecText, &codecMetadata)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return ColBERTCodecInt8, nil, nil
+			return ColBERTCodecUnspecified, nil, nil, nil
 		}
-		return ColBERTCodecInt8, nil, fmt.Errorf("load colbert metadata: %w", err)
+		return ColBERTCodecUnspecified, nil, nil, fmt.Errorf("load colbert metadata: %w", err)
 	}
 
 	codec := ParseColBERTCodec(codecText)
 	if codec == ColBERTCodecUnspecified {
-		codec = ColBERTCodecInt8
+		return ColBERTCodecUnspecified, nil, nil, nil
 	}
-	if codec != ColBERTCodecPQ6 || len(codebook) == 0 {
-		return codec, nil, nil
+	switch codec {
+	case ColBERTCodecPQ6:
+		if len(codecMetadata) == 0 {
+			return codec, nil, nil, fmt.Errorf("pq6 metadata missing codebook")
+		}
+		pq, err := util.DeserializeCodebook(codecMetadata)
+		if err != nil {
+			return ColBERTCodecUnspecified, nil, nil, fmt.Errorf("deserialize codebook: %w", err)
+		}
+		return codec, pq, nil, nil
+	case ColBERTCodecTQMSE:
+		if len(codecMetadata) == 0 {
+			return codec, nil, nil, fmt.Errorf("tqmse metadata missing quantizer")
+		}
+		tq, err := util.DeserializeTQMSEQuantizer(codecMetadata)
+		if err != nil {
+			return ColBERTCodecUnspecified, nil, nil, fmt.Errorf("deserialize tqmse quantizer: %w", err)
+		}
+		return codec, nil, tq, nil
+	default:
+		return ColBERTCodecInt8, nil, nil, nil
 	}
-
-	pq, err := util.DeserializeCodebook(codebook)
-	if err != nil {
-		return ColBERTCodecInt8, nil, fmt.Errorf("deserialize codebook: %w", err)
-	}
-	return codec, pq, nil
 }
 
 func (s *LibSQLStore) reloadColBERTMetadata(ctx context.Context) error {
-	codec, pq, err := s.LoadColBERTMetadata(ctx)
+	codec, pq, tq, err := s.LoadColBERTMetadata(ctx)
 	if err != nil {
 		return err
 	}
 	s.colbertCodec = codec
 	s.colbertPQ = pq
+	s.colbertTQMSE = tq
 	return nil
 }
 
@@ -488,18 +528,21 @@ func bytesToInt8Slice(b []byte) []int8 {
 	return s
 }
 
-func serializeColBERTSegment(seg ColBERTSegment) (embBytes []byte, pqCodes []byte, scale float32, min float32) {
+func serializeColBERTSegment(seg ColBERTSegment) (embBytes []byte, pqCodes []byte, tqCodes []byte, scale float32, min float32) {
+	if len(seg.TQCodes) > 0 {
+		return nil, nil, append([]byte(nil), seg.TQCodes...), 0, 0
+	}
 	if len(seg.PQCodes) > 0 {
-		return nil, append([]byte(nil), seg.PQCodes...), 0, 0
+		return nil, append([]byte(nil), seg.PQCodes...), nil, 0, 0
 	}
 	if seg.EmbeddingInt8 != nil {
-		return int8SliceToBytes(seg.EmbeddingInt8), nil, seg.QuantScale, seg.QuantMin
+		return int8SliceToBytes(seg.EmbeddingInt8), nil, nil, seg.QuantScale, seg.QuantMin
 	}
 	if seg.Embedding != nil {
 		quantized, scale, min := util.QuantizeInt8(seg.Embedding)
-		return int8SliceToBytes(quantized), nil, scale, min
+		return int8SliceToBytes(quantized), nil, nil, scale, min
 	}
-	return nil, nil, 0, 0
+	return nil, nil, nil, 0, 0
 }
 
 func nullableQuantFloat(v float32, valid bool) sql.NullFloat64 {
@@ -1358,16 +1401,16 @@ func (s *LibSQLStore) StoreColBERTSegments(ctx context.Context, chunkID string, 
 	}
 
 	stmt, err := tx.PrepareContext(ctx,
-		`INSERT INTO colbert_segments (chunk_id, segment_idx, segment_text, embedding, quant_scale, quant_min, pq_codes) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+		`INSERT INTO colbert_segments (chunk_id, segment_idx, segment_text, embedding, quant_scale, quant_min, pq_codes, tq_codes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = stmt.Close() }()
 
 	for _, seg := range segments {
-		embBytes, pqCodes, scale, min := serializeColBERTSegment(seg)
+		embBytes, pqCodes, tqCodes, scale, min := serializeColBERTSegment(seg)
 		hasInt8 := len(embBytes) > 0
-		if _, err := stmt.ExecContext(ctx, chunkID, seg.SegmentIdx, seg.Text, embBytes, nullableQuantFloat(scale, hasInt8), nullableQuantFloat(min, hasInt8), pqCodes); err != nil {
+		if _, err := stmt.ExecContext(ctx, chunkID, seg.SegmentIdx, seg.Text, embBytes, nullableQuantFloat(scale, hasInt8), nullableQuantFloat(min, hasInt8), pqCodes, tqCodes); err != nil {
 			return err
 		}
 	}
@@ -1395,7 +1438,7 @@ func (s *LibSQLStore) StoreColBERTSegmentsBatch(ctx context.Context, chunkSegmen
 	defer func() { _ = deleteStmt.Close() }()
 
 	insertStmt, err := tx.PrepareContext(ctx,
-		`INSERT INTO colbert_segments (chunk_id, segment_idx, segment_text, embedding, quant_scale, quant_min, pq_codes) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+		`INSERT INTO colbert_segments (chunk_id, segment_idx, segment_text, embedding, quant_scale, quant_min, pq_codes, tq_codes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -1423,9 +1466,9 @@ func (s *LibSQLStore) StoreColBERTSegmentsBatch(ctx context.Context, chunkSegmen
 
 		// Insert new segments with quantized embeddings
 		for _, seg := range segments {
-			embBytes, pqCodes, scale, min := serializeColBERTSegment(seg)
+			embBytes, pqCodes, tqCodes, scale, min := serializeColBERTSegment(seg)
 			hasInt8 := len(embBytes) > 0
-			if _, err := insertStmt.ExecContext(ctx, chunkID, seg.SegmentIdx, seg.Text, embBytes, nullableQuantFloat(scale, hasInt8), nullableQuantFloat(min, hasInt8), pqCodes); err != nil {
+			if _, err := insertStmt.ExecContext(ctx, chunkID, seg.SegmentIdx, seg.Text, embBytes, nullableQuantFloat(scale, hasInt8), nullableQuantFloat(min, hasInt8), pqCodes, tqCodes); err != nil {
 				return err
 			}
 		}
@@ -1437,7 +1480,7 @@ func (s *LibSQLStore) StoreColBERTSegmentsBatch(ctx context.Context, chunkSegmen
 // GetColBERTSegments retrieves pre-computed segment embeddings for a chunk.
 func (s *LibSQLStore) GetColBERTSegments(ctx context.Context, chunkID string) ([]ColBERTSegment, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT segment_idx, segment_text, embedding, quant_scale, quant_min, pq_codes FROM colbert_segments WHERE chunk_id = ? ORDER BY segment_idx`,
+		`SELECT segment_idx, segment_text, embedding, quant_scale, quant_min, pq_codes, tq_codes FROM colbert_segments WHERE chunk_id = ? ORDER BY segment_idx`,
 		chunkID)
 	if err != nil {
 		return nil, err
@@ -1449,8 +1492,9 @@ func (s *LibSQLStore) GetColBERTSegments(ctx context.Context, chunkID string) ([
 		var seg ColBERTSegment
 		var embBytes []byte
 		var pqCodes []byte
+		var tqCodes []byte
 		var scale, min sql.NullFloat64
-		if err := rows.Scan(&seg.SegmentIdx, &seg.Text, &embBytes, &scale, &min, &pqCodes); err != nil {
+		if err := rows.Scan(&seg.SegmentIdx, &seg.Text, &embBytes, &scale, &min, &pqCodes, &tqCodes); err != nil {
 			return nil, err
 		}
 		if scale.Valid {
@@ -1464,6 +1508,9 @@ func (s *LibSQLStore) GetColBERTSegments(ctx context.Context, chunkID string) ([
 		}
 		if len(pqCodes) > 0 {
 			seg.PQCodes = append([]byte(nil), pqCodes...)
+		}
+		if len(tqCodes) > 0 {
+			seg.TQCodes = append([]byte(nil), tqCodes...)
 		}
 		segments = append(segments, seg)
 	}
@@ -1486,7 +1533,7 @@ func (s *LibSQLStore) GetColBERTSegmentsBatch(ctx context.Context, chunkIDs []st
 	}
 
 	query := fmt.Sprintf(
-		`SELECT chunk_id, segment_idx, segment_text, embedding, quant_scale, quant_min, pq_codes
+		`SELECT chunk_id, segment_idx, segment_text, embedding, quant_scale, quant_min, pq_codes, tq_codes
 		 FROM colbert_segments
 		 WHERE chunk_id IN (%s)
 		 ORDER BY chunk_id, segment_idx`,
@@ -1504,8 +1551,9 @@ func (s *LibSQLStore) GetColBERTSegmentsBatch(ctx context.Context, chunkIDs []st
 		var seg ColBERTSegment
 		var embBytes []byte
 		var pqCodes []byte
+		var tqCodes []byte
 		var scale, min sql.NullFloat64
-		if err := rows.Scan(&chunkID, &seg.SegmentIdx, &seg.Text, &embBytes, &scale, &min, &pqCodes); err != nil {
+		if err := rows.Scan(&chunkID, &seg.SegmentIdx, &seg.Text, &embBytes, &scale, &min, &pqCodes, &tqCodes); err != nil {
 			return nil, err
 		}
 		if scale.Valid {
@@ -1519,6 +1567,9 @@ func (s *LibSQLStore) GetColBERTSegmentsBatch(ctx context.Context, chunkIDs []st
 		}
 		if len(pqCodes) > 0 {
 			seg.PQCodes = append([]byte(nil), pqCodes...)
+		}
+		if len(tqCodes) > 0 {
+			seg.TQCodes = append([]byte(nil), tqCodes...)
 		}
 		result[chunkID] = append(result[chunkID], seg)
 	}

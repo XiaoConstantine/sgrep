@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/XiaoConstantine/sgrep/pkg/util"
@@ -300,7 +301,7 @@ func TestMMapSegmentStore_PQRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.SetColBERTCodec(ColBERTCodecPQ6, pq)
+	store.SetColBERTCodec(ColBERTCodecPQ6, pq, nil)
 	store.BeginWrite()
 	store.WriteSegments("chunk-pq", []ColBERTSegment{
 		{SegmentIdx: 0, PQCodes: codesA},
@@ -336,6 +337,156 @@ func TestMMapSegmentStore_PQRoundTrip(t *testing.T) {
 	}
 	if len(segs[0].EmbeddingInt8) != 0 {
 		t.Fatalf("expected PQ-only segment payload")
+	}
+}
+
+func TestMMapSegmentStore_TQMSERoundTrip(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	dims := 4
+
+	tq, err := util.NewTQMSEQuantizer(util.TQMSEConfig{
+		Dims: dims,
+		Bits: 4,
+		Seed: 42,
+	})
+	if err != nil {
+		t.Fatalf("NewTQMSEQuantizer failed: %v", err)
+	}
+	codeA, err := tq.Encode([]float32{1, 0, 0, 0})
+	if err != nil {
+		t.Fatalf("Encode A failed: %v", err)
+	}
+	codeB, err := tq.Encode([]float32{0, 1, 0, 0})
+	if err != nil {
+		t.Fatalf("Encode B failed: %v", err)
+	}
+
+	store, err := OpenMMapSegmentStore(tmpDir, dims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.SetColBERTCodec(ColBERTCodecTQMSE, nil, tq)
+	store.BeginWrite()
+	store.WriteSegments("chunk-tq", []ColBERTSegment{
+		{SegmentIdx: 0, TQCodes: codeA.Codes},
+		{SegmentIdx: 1, TQCodes: codeB.Codes},
+	})
+	if err := store.CommitWrite(); err != nil {
+		t.Fatalf("CommitWrite failed: %v", err)
+	}
+	_ = store.Close()
+
+	store2, err := OpenMMapSegmentStore(tmpDir, dims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store2.Close() }()
+
+	if store2.ColBERTCodec() != ColBERTCodecTQMSE {
+		t.Fatalf("expected codec %q, got %q", ColBERTCodecTQMSE, store2.ColBERTCodec())
+	}
+	if store2.TQMSEQuantizer() == nil || store2.TQMSEQuantizer().CodeSize() != tq.CodeSize() {
+		t.Fatalf("expected persisted TQ-MSE quantizer with code size %d", tq.CodeSize())
+	}
+
+	segs, err := store2.GetColBERTSegments(ctx, "chunk-tq")
+	if err != nil {
+		t.Fatalf("GetColBERTSegments failed: %v", err)
+	}
+	if len(segs) != 2 {
+		t.Fatalf("expected 2 segments, got %d", len(segs))
+	}
+	if len(segs[0].TQCodes) != tq.CodeSize() {
+		t.Fatalf("expected %d-byte TQ code, got %d", tq.CodeSize(), len(segs[0].TQCodes))
+	}
+	if len(segs[0].EmbeddingInt8) != 0 || len(segs[0].PQCodes) != 0 {
+		t.Fatalf("expected TQ-only segment payload")
+	}
+}
+
+func TestMMapSegmentStore_TQMSERejectsMalformedCodeLength(t *testing.T) {
+	tmpDir := t.TempDir()
+	dims := 8
+
+	tq, err := util.NewTQMSEQuantizer(util.TQMSEConfig{
+		Dims: dims,
+		Bits: 3,
+		Seed: 42,
+	})
+	if err != nil {
+		t.Fatalf("NewTQMSEQuantizer failed: %v", err)
+	}
+
+	store, err := OpenMMapSegmentStore(tmpDir, dims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+
+	store.SetColBERTCodec(ColBERTCodecTQMSE, nil, tq)
+	store.BeginWrite()
+	store.WriteSegments("chunk-bad", []ColBERTSegment{
+		{SegmentIdx: 0, TQCodes: make([]byte, tq.CodeSize()-1)},
+	})
+
+	err = store.CommitWrite()
+	if err == nil {
+		t.Fatal("expected CommitWrite to reject malformed TQ-MSE code length")
+	}
+	if !strings.Contains(err.Error(), "code length") {
+		t.Fatalf("expected code length error, got %v", err)
+	}
+}
+
+func TestMMapSegmentStore_TQMSEValidationKeepsExistingMapping(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	dims := 8
+
+	tq, err := util.NewTQMSEQuantizer(util.TQMSEConfig{
+		Dims: dims,
+		Bits: 3,
+		Seed: 42,
+	})
+	if err != nil {
+		t.Fatalf("NewTQMSEQuantizer failed: %v", err)
+	}
+	code, err := tq.Encode(util.NormalizeVector([]float32{0.7, 0.2, -0.1, 0.05, 0.4, -0.3, 0.1, 0.2}))
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+
+	store, err := OpenMMapSegmentStore(tmpDir, dims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+
+	store.SetColBERTCodec(ColBERTCodecTQMSE, nil, tq)
+	store.BeginWrite()
+	store.WriteSegments("chunk-good", []ColBERTSegment{
+		{SegmentIdx: 0, TQCodes: code.Codes},
+	})
+	if err := store.CommitWrite(); err != nil {
+		t.Fatalf("initial CommitWrite failed: %v", err)
+	}
+
+	store.BeginWrite()
+	store.WriteSegments("chunk-bad", []ColBERTSegment{
+		{SegmentIdx: 0, TQCodes: make([]byte, tq.CodeSize()-1)},
+	})
+	err = store.CommitWrite()
+	if err == nil {
+		t.Fatal("expected CommitWrite to reject malformed TQ-MSE code length")
+	}
+
+	segs, err := store.GetColBERTSegments(ctx, "chunk-good")
+	if err != nil {
+		t.Fatalf("GetColBERTSegments after failed commit failed: %v", err)
+	}
+	if len(segs) != 1 || len(segs[0].TQCodes) != tq.CodeSize() {
+		t.Fatalf("existing mmap data was not readable after failed commit: %+v", segs)
 	}
 }
 

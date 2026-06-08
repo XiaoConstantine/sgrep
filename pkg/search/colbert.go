@@ -27,6 +27,7 @@ type ColBERTScorer struct {
 	cache            *segmentCache
 	adaptiveSegments bool
 	pq               *util.ProductQuantizer
+	tq               *util.TQMSEQuantizer
 	pqExactRescoreK  int
 }
 
@@ -36,6 +37,7 @@ type preparedQueryTerm struct {
 	embedding []float32
 	sum       float64
 	pqTable   [][]float64
+	tqQuery   util.TQMSEQuery
 }
 
 // segmentCache caches PRE-NORMALIZED segment embeddings to avoid recomputation.
@@ -99,6 +101,11 @@ func (c *ColBERTScorer) SetAdaptiveSegments(enabled bool) {
 // SetProductQuantizer configures PQ ADC scoring for segments that carry PQ codes.
 func (c *ColBERTScorer) SetProductQuantizer(pq *util.ProductQuantizer) {
 	c.pq = pq
+}
+
+// SetTQMSEQuantizer configures TQ-MSE scoring for segments that carry TQ codes.
+func (c *ColBERTScorer) SetTQMSEQuantizer(tq *util.TQMSEQuantizer) {
+	c.tq = tq
 }
 
 // SetPQExactRescoreTopK configures exact rescoring for the top PQ-ranked docs.
@@ -260,7 +267,7 @@ func (c *ColBERTScorer) ScoreBatchWithChunkIDs(ctx context.Context, query string
 	if err != nil {
 		return nil, err
 	}
-	preparedTerms := prepareQueryTermsWithPQ(queryEmbeddings, c.pq)
+	preparedTerms := prepareQueryTermsWithCodecs(queryEmbeddings, c.pq, c.tq)
 
 	// Batch load pre-computed segment embeddings for all chunks
 	segmentMap, err := c.segmentStore.GetColBERTSegmentsBatch(ctx, chunkIDs)
@@ -308,7 +315,7 @@ func (c *ColBERTScorer) ScoreBatchWithChunkIDs(ctx context.Context, query string
 		// Compute MaxSim score using int8 quantized embeddings if available
 		var totalScore float64
 		for _, term := range preparedTerms {
-			maxSim := maxSimPrepared(term, segments, c.pq)
+			maxSim := maxSimPrepared(term, segments, c.pq, c.tq)
 			if maxSim > 0 {
 				totalScore += maxSim
 			}
@@ -859,8 +866,17 @@ func prepareQueryTerms(queryEmbeddings [][]float32) []preparedQueryTerm {
 	return terms
 }
 
-func prepareQueryTermsWithPQ(queryEmbeddings [][]float32, pq *util.ProductQuantizer) []preparedQueryTerm {
+func prepareQueryTermsWithCodecs(queryEmbeddings [][]float32, pq *util.ProductQuantizer, tq *util.TQMSEQuantizer) []preparedQueryTerm {
 	terms := prepareQueryTerms(queryEmbeddings)
+	if tq != nil {
+		for i := range terms {
+			prepared, err := tq.PrepareQuery(terms[i].embedding)
+			if err != nil {
+				continue
+			}
+			terms[i].tqQuery = prepared
+		}
+	}
 	if pq == nil || !pq.IsTrained() {
 		return terms
 	}
@@ -876,13 +892,41 @@ func prepareQueryTermsWithPQ(queryEmbeddings [][]float32, pq *util.ProductQuanti
 	return terms
 }
 
-func maxSimPrepared(term preparedQueryTerm, segments []store.ColBERTSegment, pq *util.ProductQuantizer) float64 {
+func prepareQueryTermsWithPQ(queryEmbeddings [][]float32, pq *util.ProductQuantizer) []preparedQueryTerm {
+	return prepareQueryTermsWithCodecs(queryEmbeddings, pq, nil)
+}
+
+func maxSimPrepared(term preparedQueryTerm, segments []store.ColBERTSegment, pq *util.ProductQuantizer, tq *util.TQMSEQuantizer) float64 {
+	if tq != nil {
+		if maxSim := maxSimPreparedTQMSE(term, segments, tq); maxSim >= 0 {
+			return maxSim
+		}
+	}
 	if pq != nil {
 		if maxSim := maxSimPreparedPQ(term, segments); maxSim >= 0 {
 			return maxSim
 		}
 	}
 	return maxSimPreparedInt8(term, segments)
+}
+
+func maxSimPreparedTQMSE(term preparedQueryTerm, segments []store.ColBERTSegment, tq *util.TQMSEQuantizer) float64 {
+	if len(segments) == 0 || tq == nil || !term.tqQuery.Valid() {
+		return -1
+	}
+
+	maxSim := float64(-1)
+	codeSize := tq.CodeSize()
+	for _, seg := range segments {
+		if len(seg.TQCodes) != codeSize {
+			continue
+		}
+		sim := tq.Dot(term.tqQuery, util.TQMSECode{Codes: seg.TQCodes})
+		if sim > maxSim {
+			maxSim = sim
+		}
+	}
+	return maxSim
 }
 
 func maxSimPreparedInt8(term preparedQueryTerm, segments []store.ColBERTSegment) float64 {

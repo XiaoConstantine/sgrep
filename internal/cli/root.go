@@ -385,7 +385,7 @@ func init() {
 	indexCmd.Flags().StringVar(&indexQuantize, "quantize", "int8", "Quantization mode: none (4x size), int8 (1x size), binary (0.125x size)")
 	indexCmd.Flags().BoolVar(&indexColBERTPreindex, "colbert-preindex", true, "Pre-compute ColBERT segment embeddings for fast query-time scoring (default: true)")
 	indexCmd.Flags().BoolVar(&indexColBERTAdaptiveSegments, "colbert-adaptive-segments", false, "Use adaptive sqrt(M) segment budgets during ColBERT preindexing (experimental)")
-	indexCmd.Flags().StringVar(&indexColBERTCodec, "colbert-codec", "", "ColBERT segment codec: int8 or pq6 (default: reuse existing repo codec, otherwise int8)")
+	indexCmd.Flags().StringVar(&indexColBERTCodec, "colbert-codec", "", "ColBERT segment codec: tqmse, int8, or pq6 (default: reuse existing repo codec, otherwise tqmse)")
 }
 
 // Watch command

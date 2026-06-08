@@ -34,7 +34,7 @@ type IndexConfig struct {
 	Quantization            store.QuantizationMode // Vector quantization mode (none, int8, binary)
 	SmartSkip               bool                   // Enable smart skipping for large repos (default: true)
 	AdaptiveColBERTSegments bool                   // Enable token-aware sqrt(M) ColBERT segment budgets
-	ColBERTCodec            store.ColBERTCodec     // Late interaction segment codec (int8, pq6)
+	ColBERTCodec            store.ColBERTCodec     // Late interaction segment codec (tqmse, int8, pq6)
 }
 
 // Large repo threshold - above this we enable smart skipping
@@ -47,9 +47,29 @@ const (
 	colbertPQMinTrainingVectors        = 256
 	colbertPQTrainIterations           = 25
 	colbertPQMinWorthwhileSegments     = 5000
+	colbertTQMSEBits                   = 4
+	colbertTQMSESeed                   = 42
 	colbertPreindexChunkFetchBatchSize = 64
 	colbertRewriteChunkBatchSize       = 128
 )
+
+func colbertEmbeddingDims() int {
+	if v := os.Getenv("SGREP_DIMS"); v != "" {
+		var dims int
+		if _, err := fmt.Sscanf(v, "%d", &dims); err == nil && dims > 0 {
+			return dims
+		}
+	}
+	return 768
+}
+
+func newDefaultColBERTTQMSEQuantizer() (*util.TQMSEQuantizer, error) {
+	return util.NewTQMSEQuantizer(util.TQMSEConfig{
+		Dims: colbertEmbeddingDims(),
+		Bits: colbertTQMSEBits,
+		Seed: colbertTQMSESeed,
+	})
+}
 
 // DefaultIndexConfig returns sensible defaults for indexing.
 func DefaultIndexConfig() *IndexConfig {
@@ -86,6 +106,7 @@ type Indexer struct {
 	ignore       *IgnoreRules
 	colbertCodec store.ColBERTCodec
 	colbertPQ    *util.ProductQuantizer
+	colbertTQMSE *util.TQMSEQuantizer
 	processed    int64
 	errors       int64
 }
@@ -132,13 +153,18 @@ func NewWithConfig(path string, cfg *IndexConfig) (*Indexer, error) {
 	}
 	existingCodec := store.ColBERTCodecUnspecified
 	var existingPQ *util.ProductQuantizer
+	var existingTQMSE *util.TQMSEQuantizer
 	if provider, ok := s.(store.ColBERTMetadataProvider); ok {
 		existingCodec = provider.ColBERTCodec()
 		existingPQ = provider.ProductQuantizer()
+		existingTQMSE = provider.TQMSEQuantizer()
 	}
 	effectiveCodec := store.ResolveColBERTCodec(cfg.ColBERTCodec, existingCodec)
 	if effectiveCodec != store.ColBERTCodecPQ6 {
 		existingPQ = nil
+	}
+	if effectiveCodec != store.ColBERTCodecTQMSE {
+		existingTQMSE = nil
 	}
 
 	// Load ignore rules
@@ -154,6 +180,7 @@ func NewWithConfig(path string, cfg *IndexConfig) (*Indexer, error) {
 		ignore:       ignore,
 		colbertCodec: effectiveCodec,
 		colbertPQ:    existingPQ,
+		colbertTQMSE: existingTQMSE,
 	}, nil
 }
 
@@ -1553,6 +1580,7 @@ func (idx *Indexer) applyPQCodecSizeGate(ctx context.Context, segmentStore store
 		estimatedSegments, colbertPQMinWorthwhileSegments)
 	idx.colbertCodec = store.ColBERTCodecInt8
 	idx.colbertPQ = nil
+	idx.colbertTQMSE = nil
 	return nil
 }
 
@@ -1727,6 +1755,7 @@ func (idx *Indexer) computeFreshPQSegmentsFromScratch(ctx context.Context, segme
 		fmt.Printf("Skipping PQ6: only %d segment vectors available, keeping int8\n", totalVectors)
 		idx.colbertCodec = store.ColBERTCodecInt8
 		idx.colbertPQ = nil
+		idx.colbertTQMSE = nil
 		written, err := idx.rewriteScratchColBERTSegments(ctx, segmentStore, scratchPath, totalChunks)
 		if err != nil {
 			return written, err
@@ -1754,6 +1783,7 @@ func (idx *Indexer) computeFreshPQSegmentsFromScratch(ctx context.Context, segme
 	fmt.Printf("ColBERT PQ train wall time: %v\n", time.Since(trainStart).Round(time.Millisecond))
 
 	idx.colbertPQ = pq
+	idx.colbertTQMSE = nil
 	written, err := idx.rewriteScratchColBERTSegments(ctx, segmentStore, scratchPath, totalChunks)
 	if err != nil {
 		return written, err
@@ -1787,6 +1817,9 @@ func (idx *Indexer) rewriteScratchColBERTSegments(ctx context.Context, segmentSt
 	if idx.colbertCodec == store.ColBERTCodecPQ6 && idx.colbertPQ != nil {
 		label = "Re-encoding ColBERT segments with PQ6"
 		progressVerb = "Re-encoded"
+	} else if idx.colbertCodec == store.ColBERTCodecTQMSE && idx.colbertTQMSE != nil {
+		label = "Encoding ColBERT segments with TQ-MSE"
+		progressVerb = "Encoded"
 	}
 	fmt.Printf("%s for %d chunks...\n", label, totalChunks)
 
@@ -1814,7 +1847,7 @@ func (idx *Indexer) rewriteScratchColBERTSegments(ctx context.Context, segmentSt
 			}
 			return processed, fmt.Errorf("read ColBERT PQ scratch record: %w", err)
 		}
-		converted, err := convertColBERTSegmentsForCodecStrict(record.ChunkID, record.Segments, idx.colbertCodec, idx.colbertPQ)
+		converted, err := convertColBERTSegmentsForCodecStrict(record.ChunkID, record.Segments, idx.colbertCodec, idx.colbertPQ, idx.colbertTQMSE)
 		if err != nil {
 			return processed, fmt.Errorf("convert scratch chunk %s to %s: %w", record.ChunkID, idx.colbertCodec, err)
 		}
@@ -1927,7 +1960,7 @@ func (idx *Indexer) ExportColBERTToMMap(ctx context.Context, outputDir string) (
 	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	// Build the mmap in a temp location, then atomically replace the live file.
-	mmapStore, err := store.OpenMMapSegmentStore(tempDir, 768)
+	mmapStore, err := store.OpenMMapSegmentStore(tempDir, colbertEmbeddingDims())
 	if err != nil {
 		return 0, fmt.Errorf("failed to create MMap store: %w", err)
 	}
@@ -1936,8 +1969,21 @@ func (idx *Indexer) ExportColBERTToMMap(ctx context.Context, outputDir string) (
 			_ = mmapStore.Close()
 		}
 	}()
+	exportCodec := store.ColBERTCodecInt8
+	var exportPQ *util.ProductQuantizer
+	var exportTQ *util.TQMSEQuantizer
 	if provider, ok := segmentStore.(store.ColBERTMetadataProvider); ok {
-		mmapStore.SetColBERTCodec(provider.ColBERTCodec(), provider.ProductQuantizer())
+		switch provider.ColBERTCodec() {
+		case store.ColBERTCodecPQ6:
+			exportCodec = store.ColBERTCodecPQ6
+			exportPQ = provider.ProductQuantizer()
+		case store.ColBERTCodecTQMSE:
+			exportCodec = store.ColBERTCodecTQMSE
+			exportTQ = provider.TQMSEQuantizer()
+		default:
+			exportCodec = store.ColBERTCodecInt8
+		}
+		mmapStore.SetColBERTCodec(exportCodec, exportPQ, exportTQ)
 	}
 
 	mmapStore.BeginWrite()
@@ -1978,10 +2024,15 @@ func (idx *Indexer) ExportColBERTToMMap(ctx context.Context, outputDir string) (
 				return 0, fmt.Errorf("failed to load segments: %w", err)
 			}
 
-			// Write segments to MMap
+			// Write segments to MMap in the artifact codec. SQLite stores may be
+			// mixed after an upgrade or partial refresh.
 			for chunkID, chunkSegments := range segments {
-				mmapStore.WriteSegments(chunkID, chunkSegments)
-				totalSegments += len(chunkSegments)
+				encodedSegments, err := convertColBERTSegmentsForCodecStrict(chunkID, chunkSegments, exportCodec, exportPQ, exportTQ)
+				if err != nil {
+					return 0, fmt.Errorf("failed to encode chunk %s for MMap export: %w", chunkID, err)
+				}
+				mmapStore.WriteSegments(chunkID, encodedSegments)
+				totalSegments += len(encodedSegments)
 			}
 		}
 
@@ -2060,7 +2111,7 @@ func (idx *Indexer) buildColBERTChunkSegments(ctx context.Context, chunks []stor
 
 	chunkSegments := make(map[string][]store.ColBERTSegment, len(floatSegments))
 	for chunkID, segments := range floatSegments {
-		chunkSegments[chunkID] = convertColBERTSegmentsForCodec(chunkID, segments, idx.colbertCodec, idx.colbertPQ)
+		chunkSegments[chunkID] = convertColBERTSegmentsForCodec(chunkID, segments, idx.colbertCodec, idx.colbertPQ, idx.colbertTQMSE)
 	}
 	return chunkSegments, nil
 }
@@ -2115,9 +2166,9 @@ func (idx *Indexer) buildFloat32ColBERTChunkSegments(ctx context.Context, chunks
 	return chunkSegments, nil
 }
 
-func buildStoredColBERTSegments(chunkID string, segmentTexts []string, embeddings [][]float32, adaptive bool, codec store.ColBERTCodec, pq *util.ProductQuantizer) []store.ColBERTSegment {
+func buildStoredColBERTSegments(chunkID string, segmentTexts []string, embeddings [][]float32, adaptive bool, codec store.ColBERTCodec, pq *util.ProductQuantizer, tq *util.TQMSEQuantizer) []store.ColBERTSegment {
 	segments := buildFloat32ColBERTSegments(segmentTexts, embeddings, adaptive)
-	return convertColBERTSegmentsForCodec(chunkID, segments, codec, pq)
+	return convertColBERTSegmentsForCodec(chunkID, segments, codec, pq, tq)
 }
 
 func buildFloat32ColBERTSegments(segmentTexts []string, embeddings [][]float32, adaptive bool) []store.ColBERTSegment {
@@ -2147,23 +2198,34 @@ func buildFloat32ColBERTSegments(segmentTexts []string, embeddings [][]float32, 
 	return segments
 }
 
-func convertColBERTSegmentsForCodec(chunkID string, segments []store.ColBERTSegment, codec store.ColBERTCodec, pq *util.ProductQuantizer) []store.ColBERTSegment {
-	converted, _ := convertColBERTSegmentsForCodecWithFallback(chunkID, segments, codec, pq, true)
+func convertColBERTSegmentsForCodec(chunkID string, segments []store.ColBERTSegment, codec store.ColBERTCodec, pq *util.ProductQuantizer, tq *util.TQMSEQuantizer) []store.ColBERTSegment {
+	converted, _ := convertColBERTSegmentsForCodecWithFallback(chunkID, segments, codec, pq, tq, true)
 	return converted
 }
 
-func convertColBERTSegmentsForCodecStrict(chunkID string, segments []store.ColBERTSegment, codec store.ColBERTCodec, pq *util.ProductQuantizer) ([]store.ColBERTSegment, error) {
-	return convertColBERTSegmentsForCodecWithFallback(chunkID, segments, codec, pq, false)
+func convertColBERTSegmentsForCodecStrict(chunkID string, segments []store.ColBERTSegment, codec store.ColBERTCodec, pq *util.ProductQuantizer, tq *util.TQMSEQuantizer) ([]store.ColBERTSegment, error) {
+	return convertColBERTSegmentsForCodecWithFallback(chunkID, segments, codec, pq, tq, false)
 }
 
-func convertColBERTSegmentsForCodecWithFallback(chunkID string, segments []store.ColBERTSegment, codec store.ColBERTCodec, pq *util.ProductQuantizer, allowPQFallback bool) ([]store.ColBERTSegment, error) {
+func convertColBERTSegmentsForCodecWithFallback(chunkID string, segments []store.ColBERTSegment, codec store.ColBERTCodec, pq *util.ProductQuantizer, tq *util.TQMSEQuantizer, allowFallback bool) ([]store.ColBERTSegment, error) {
 	if codec == store.ColBERTCodecPQ6 && pq != nil {
 		encoded, err := encodeSegmentsToPQ(chunkID, segments, pq)
 		if err != nil {
-			if !allowPQFallback {
+			if !allowFallback {
 				return nil, err
 			}
 			fmt.Fprintf(os.Stderr, "Warning: ColBERT PQ encode failed for chunk %s, falling back to int8: %v\n", chunkID, err)
+		} else {
+			return encoded, nil
+		}
+	}
+	if codec == store.ColBERTCodecTQMSE && tq != nil {
+		encoded, err := encodeSegmentsToTQMSE(chunkID, segments, tq)
+		if err != nil {
+			if !allowFallback {
+				return nil, err
+			}
+			fmt.Fprintf(os.Stderr, "Warning: ColBERT TQ-MSE encode failed for chunk %s, falling back to int8: %v\n", chunkID, err)
 		} else {
 			return encoded, nil
 		}
@@ -2181,15 +2243,67 @@ func convertColBERTSegmentsForCodecWithFallback(chunkID string, segments []store
 	return segments, nil
 }
 
-func encodeSegmentsToPQ(chunkID string, segments []store.ColBERTSegment, pq *util.ProductQuantizer) ([]store.ColBERTSegment, error) {
+func encodeSegmentsToTQMSE(chunkID string, segments []store.ColBERTSegment, tq *util.TQMSEQuantizer) ([]store.ColBERTSegment, error) {
+	if tq == nil {
+		return nil, fmt.Errorf("nil tqmse quantizer")
+	}
 	encoded := make([]store.ColBERTSegment, len(segments))
+	encoder := tq.NewEncoder()
+	codeSize := tq.CodeSize()
 	for i, seg := range segments {
+		if len(seg.TQCodes) == codeSize {
+			encoded[i] = store.ColBERTSegment{
+				SegmentIdx: seg.SegmentIdx,
+				Text:       seg.Text,
+				TQCodes:    append([]byte(nil), seg.TQCodes...),
+			}
+			continue
+		}
 		emb := seg.Embedding
 		if emb == nil && len(seg.EmbeddingInt8) > 0 {
 			emb = util.DequantizeInt8(seg.EmbeddingInt8, seg.QuantScale, seg.QuantMin)
 			emb = util.NormalizeVector(emb)
 		}
 		if emb == nil {
+			if len(seg.TQCodes) > 0 {
+				return nil, fmt.Errorf("segment %d in chunk %s has malformed TQ-MSE code length %d (expected %d)", seg.SegmentIdx, chunkID, len(seg.TQCodes), codeSize)
+			}
+			return nil, fmt.Errorf("segment %d in chunk %s is missing an encodable embedding", seg.SegmentIdx, chunkID)
+		}
+		code, err := encoder.Encode(emb)
+		if err != nil {
+			return nil, err
+		}
+		encoded[i] = store.ColBERTSegment{
+			SegmentIdx: seg.SegmentIdx,
+			Text:       seg.Text,
+			TQCodes:    append([]byte(nil), code.Codes...),
+		}
+	}
+	return encoded, nil
+}
+
+func encodeSegmentsToPQ(chunkID string, segments []store.ColBERTSegment, pq *util.ProductQuantizer) ([]store.ColBERTSegment, error) {
+	encoded := make([]store.ColBERTSegment, len(segments))
+	codeSize := pq.CodeSize()
+	for i, seg := range segments {
+		if len(seg.PQCodes) == codeSize {
+			encoded[i] = store.ColBERTSegment{
+				SegmentIdx: seg.SegmentIdx,
+				Text:       seg.Text,
+				PQCodes:    append([]byte(nil), seg.PQCodes...),
+			}
+			continue
+		}
+		emb := seg.Embedding
+		if emb == nil && len(seg.EmbeddingInt8) > 0 {
+			emb = util.DequantizeInt8(seg.EmbeddingInt8, seg.QuantScale, seg.QuantMin)
+			emb = util.NormalizeVector(emb)
+		}
+		if emb == nil {
+			if len(seg.PQCodes) > 0 {
+				return nil, fmt.Errorf("segment %d in chunk %s has malformed PQ code length %d (expected %d)", seg.SegmentIdx, chunkID, len(seg.PQCodes), codeSize)
+			}
 			return nil, fmt.Errorf("segment %d in chunk %s is missing an encodable embedding", seg.SegmentIdx, chunkID)
 		}
 		codes, err := pq.Encode(emb)
@@ -2215,9 +2329,24 @@ func decomposeDocumentForColBERT(content string, adaptive bool) []string {
 }
 
 func (idx *Indexer) ensureColBERTCodecReady(ctx context.Context, segmentStore store.ColBERTSegmentStorer) error {
-	if idx.colbertCodec != store.ColBERTCodecPQ6 {
+	if idx.colbertCodec == store.ColBERTCodecTQMSE {
+		if idx.colbertTQMSE == nil {
+			tq, err := newDefaultColBERTTQMSEQuantizer()
+			if err != nil {
+				return fmt.Errorf("create colbert tqmse: %w", err)
+			}
+			idx.colbertTQMSE = tq
+		}
+		idx.colbertPQ = nil
 		return idx.persistColBERTMetadata(ctx)
 	}
+
+	if idx.colbertCodec != store.ColBERTCodecPQ6 {
+		idx.colbertPQ = nil
+		idx.colbertTQMSE = nil
+		return idx.persistColBERTMetadata(ctx)
+	}
+	idx.colbertTQMSE = nil
 	if idx.colbertPQ != nil {
 		return nil
 	}
@@ -2231,6 +2360,7 @@ func (idx *Indexer) ensureColBERTCodecReady(ctx context.Context, segmentStore st
 		fmt.Printf("Skipping PQ6: only %d segment vectors available, keeping int8\n", totalVectors)
 		idx.colbertCodec = store.ColBERTCodecInt8
 		idx.colbertPQ = nil
+		idx.colbertTQMSE = nil
 		return idx.persistColBERTMetadata(ctx)
 	}
 	fmt.Printf("Training ColBERT PQ codebook on %d sampled vectors (%d total)...\n", len(sample), totalVectors)
@@ -2249,6 +2379,7 @@ func (idx *Indexer) ensureColBERTCodecReady(ctx context.Context, segmentStore st
 	}
 
 	idx.colbertPQ = pq
+	idx.colbertTQMSE = nil
 	return nil
 }
 
@@ -2257,7 +2388,7 @@ func (idx *Indexer) persistColBERTMetadata(ctx context.Context) error {
 	if !ok {
 		return nil
 	}
-	return metadataStore.SaveColBERTMetadata(ctx, idx.colbertCodec, idx.colbertPQ)
+	return metadataStore.SaveColBERTMetadata(ctx, idx.colbertCodec, idx.colbertPQ, idx.colbertTQMSE)
 }
 
 func (idx *Indexer) collectColBERTPQTrainingSample(ctx context.Context, segmentStore store.ColBERTSegmentStorer) ([][]float32, int, error) {

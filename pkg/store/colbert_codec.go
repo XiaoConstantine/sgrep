@@ -13,13 +13,20 @@ const (
 	ColBERTCodecUnspecified ColBERTCodec = ""
 	ColBERTCodecInt8        ColBERTCodec = "int8"
 	ColBERTCodecPQ6         ColBERTCodec = "pq6"
+	ColBERTCodecTQMSE       ColBERTCodec = "tqmse"
 )
 
 func (c ColBERTCodec) String() string {
-	if c == ColBERTCodecPQ6 {
+	switch c {
+	case ColBERTCodecPQ6:
 		return string(ColBERTCodecPQ6)
+	case ColBERTCodecTQMSE:
+		return string(ColBERTCodecTQMSE)
+	case ColBERTCodecUnspecified:
+		return string(ColBERTCodecUnspecified)
+	default:
+		return string(ColBERTCodecInt8)
 	}
-	return string(ColBERTCodecInt8)
 }
 
 // IsSpecified reports whether the codec came from an explicit configuration.
@@ -34,34 +41,47 @@ func ParseColBERTCodec(s string) ColBERTCodec {
 		return ColBERTCodecUnspecified
 	case "pq6", "pq":
 		return ColBERTCodecPQ6
+	case "tqmse", "tq-mse", "tq_mse", "tq-mse-4b", "tqmse4":
+		return ColBERTCodecTQMSE
 	default:
 		return ColBERTCodecInt8
 	}
 }
 
 // ResolveColBERTCodec chooses the effective codec, preferring explicit config,
-// then persisted repo metadata, then the safe int8 default.
+// then persisted repo metadata, then the compact TQ-MSE default.
 func ResolveColBERTCodec(requested, existing ColBERTCodec) ColBERTCodec {
 	if requested.IsSpecified() {
-		if requested == ColBERTCodecPQ6 {
+		switch requested {
+		case ColBERTCodecPQ6:
 			return ColBERTCodecPQ6
+		case ColBERTCodecTQMSE:
+			return ColBERTCodecTQMSE
+		default:
+			return ColBERTCodecInt8
 		}
-		return ColBERTCodecInt8
 	}
-	if existing == ColBERTCodecPQ6 {
+	switch existing {
+	case ColBERTCodecPQ6:
 		return ColBERTCodecPQ6
+	case ColBERTCodecTQMSE:
+		return ColBERTCodecTQMSE
+	case ColBERTCodecInt8:
+		return ColBERTCodecInt8
+	default:
+		return ColBERTCodecTQMSE
 	}
-	return ColBERTCodecInt8
 }
 
 // ColBERTMetadataProvider exposes optional codec metadata to query-time code.
 type ColBERTMetadataProvider interface {
 	ColBERTCodec() ColBERTCodec
 	ProductQuantizer() *util.ProductQuantizer
+	TQMSEQuantizer() *util.TQMSEQuantizer
 }
 
 // ColBERTMetadataStore persists optional codec metadata during indexing.
 type ColBERTMetadataStore interface {
-	SaveColBERTMetadata(ctx context.Context, codec ColBERTCodec, pq *util.ProductQuantizer) error
-	LoadColBERTMetadata(ctx context.Context) (ColBERTCodec, *util.ProductQuantizer, error)
+	SaveColBERTMetadata(ctx context.Context, codec ColBERTCodec, pq *util.ProductQuantizer, tq *util.TQMSEQuantizer) error
+	LoadColBERTMetadata(ctx context.Context) (ColBERTCodec, *util.ProductQuantizer, *util.TQMSEQuantizer, error)
 }

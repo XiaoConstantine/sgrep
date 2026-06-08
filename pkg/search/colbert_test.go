@@ -649,3 +649,82 @@ func TestMaxSimPreparedPQMatchesADC(t *testing.T) {
 		t.Fatalf("prepared PQ scorer mismatch: expected %.12f got %.12f diff %.12f", expected, got, diff)
 	}
 }
+
+func TestMaxSimPreparedTQMSEMatchesQuantizerDot(t *testing.T) {
+	tq, err := util.NewTQMSEQuantizer(util.TQMSEConfig{
+		Dims: 4,
+		Bits: 4,
+		Seed: 42,
+	})
+	if err != nil {
+		t.Fatalf("NewTQMSEQuantizer: %v", err)
+	}
+
+	query := util.NormalizeVector([]float32{0.85, 0.15, 0.0, 0.0})
+	rawSegments := [][]float32{
+		util.NormalizeVector([]float32{0.88, 0.12, 0.0, 0.0}),
+		util.NormalizeVector([]float32{0.0, 0.82, 0.18, 0.0}),
+		util.NormalizeVector([]float32{0.15, 0.0, 0.0, 0.85}),
+	}
+
+	prepared, err := tq.PrepareQuery(query)
+	if err != nil {
+		t.Fatalf("PrepareQuery: %v", err)
+	}
+	segments := make([]store.ColBERTSegment, len(rawSegments))
+	expected := math.Inf(-1)
+	for i, emb := range rawSegments {
+		code, err := tq.Encode(emb)
+		if err != nil {
+			t.Fatalf("Encode(%d): %v", i, err)
+		}
+		segments[i] = store.ColBERTSegment{
+			SegmentIdx: i,
+			TQCodes:    code.Codes,
+		}
+		if score := tq.Dot(prepared, code); score > expected {
+			expected = score
+		}
+	}
+
+	term := prepareQueryTermsWithCodecs([][]float32{query}, nil, tq)[0]
+	got := maxSimPreparedTQMSE(term, segments, tq)
+	if diff := math.Abs(expected - got); diff > 1e-9 {
+		t.Fatalf("prepared TQ-MSE scorer mismatch: expected %.12f got %.12f diff %.12f", expected, got, diff)
+	}
+}
+
+func TestMaxSimPreparedTQMSEMalformedCodesFallBackToInt8(t *testing.T) {
+	tq, err := util.NewTQMSEQuantizer(util.TQMSEConfig{
+		Dims: 8,
+		Bits: 3,
+		Seed: 42,
+	})
+	if err != nil {
+		t.Fatalf("NewTQMSEQuantizer: %v", err)
+	}
+
+	query := util.NormalizeVector([]float32{0.7, 0.2, -0.1, 0.05, 0.4, -0.3, 0.1, 0.2})
+	segment := util.NormalizeVector([]float32{0.6, 0.1, -0.2, 0.15, 0.3, -0.25, 0.05, 0.4})
+	quantized, scale, min := util.QuantizeInt8(segment)
+	segments := []store.ColBERTSegment{
+		{
+			SegmentIdx:    0,
+			TQCodes:       make([]byte, tq.CodeSize()-1),
+			EmbeddingInt8: quantized,
+			QuantScale:    scale,
+			QuantMin:      min,
+		},
+	}
+
+	term := prepareQueryTermsWithCodecs([][]float32{query}, nil, tq)[0]
+	if got := maxSimPreparedTQMSE(term, segments, tq); got != -1 {
+		t.Fatalf("expected malformed TQ-MSE codes to be ignored, got %.12f", got)
+	}
+
+	got := maxSimPrepared(term, segments, nil, tq)
+	want := maxSimPreparedInt8(term, segments)
+	if diff := math.Abs(want - got); diff > 1e-9 {
+		t.Fatalf("expected int8 fallback %.12f, got %.12f diff %.12f", want, got, diff)
+	}
+}
