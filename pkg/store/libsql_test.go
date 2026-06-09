@@ -42,6 +42,99 @@ func TestLibSQLStore_Basic(t *testing.T) {
 	}
 }
 
+func TestOpenForSearchFallsBackWhenTQArtifactInvalid(t *testing.T) {
+	t.Setenv("SGREP_VECTOR_BACKEND", "")
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	s, err := OpenLibSQL(dbPath)
+	if err != nil {
+		t.Fatalf("OpenLibSQL failed: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	if err := os.WriteFile(TQVectorPath(dir), make([]byte, tqVectorHeaderSize), 0644); err != nil {
+		t.Fatalf("write invalid TQ artifact: %v", err)
+	}
+
+	opened, err := OpenForSearch(dbPath)
+	if err != nil {
+		t.Fatalf("OpenForSearch failed: %v", err)
+	}
+	defer func() { _ = opened.Close() }()
+	if _, ok := opened.(*LibSQLStore); !ok {
+		t.Fatalf("OpenForSearch returned %T, want *LibSQLStore fallback", opened)
+	}
+}
+
+func TestOpenForSearchTQPreservesFileEmbeddingSearch(t *testing.T) {
+	t.Setenv("SGREP_VECTOR_BACKEND", "")
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	ctx := context.Background()
+
+	s, err := OpenLibSQL(dbPath)
+	if err != nil {
+		t.Fatalf("OpenLibSQL failed: %v", err)
+	}
+	docEmbedding := makeTestEmbedding(768, 0.25)
+	doc := &Document{
+		ID:        "a.go:chunk_1",
+		FilePath:  "a.go",
+		Content:   "package main\nfunc main() {}",
+		StartLine: 1,
+		EndLine:   2,
+		Embedding: docEmbedding,
+	}
+	if err := s.Store(ctx, doc); err != nil {
+		t.Fatalf("Store failed: %v", err)
+	}
+	if err := s.StoreFileEmbedding(ctx, &FileEmbedding{
+		FilePath:   "a.go",
+		Embedding:  docEmbedding,
+		ChunkCount: 1,
+		TotalLines: 2,
+	}); err != nil {
+		t.Fatalf("StoreFileEmbedding failed: %v", err)
+	}
+	if _, err := BuildTQVectorStore(ctx, dir, []string{doc.ID}, [][]float32{docEmbedding}, TQVectorBuildOptions{Dims: 768, Bits: 4, Seed: 42}); err != nil {
+		t.Fatalf("BuildTQVectorStore failed: %v", err)
+	}
+	if err := s.Checkpoint(ctx); err != nil {
+		t.Fatalf("Checkpoint failed: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	opened, err := OpenForSearch(dbPath)
+	if err != nil {
+		t.Fatalf("OpenForSearch failed: %v", err)
+	}
+	defer func() { _ = opened.Close() }()
+	fileStore, ok := opened.(FileEmbeddingStorer)
+	if !ok {
+		t.Fatalf("OpenForSearch returned %T without FileEmbeddingStorer", opened)
+	}
+
+	paths, distances, err := fileStore.SearchFileEmbeddings(ctx, docEmbedding, 1, 2)
+	if err != nil {
+		t.Fatalf("SearchFileEmbeddings failed: %v", err)
+	}
+	if len(paths) != 1 || paths[0] != "a.go" {
+		t.Fatalf("SearchFileEmbeddings paths=%v distances=%v, want a.go", paths, distances)
+	}
+	chunks, err := fileStore.GetChunksByFilePath(ctx, "a.go")
+	if err != nil {
+		t.Fatalf("GetChunksByFilePath failed: %v", err)
+	}
+	if len(chunks) != 1 || chunks[0].ID != doc.ID {
+		t.Fatalf("GetChunksByFilePath chunks=%v, want %s", chunks, doc.ID)
+	}
+}
+
 func TestLibSQLStore_StoreBatch(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")

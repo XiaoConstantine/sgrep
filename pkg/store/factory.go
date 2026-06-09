@@ -4,6 +4,7 @@
 package store
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -17,20 +18,46 @@ func OpenDefault(path string, quantization QuantizationMode) (Storer, error) {
 func OpenForSearch(path string) (Storer, error) {
 	repoDir := filepath.Dir(path)
 	backend := os.Getenv("SGREP_VECTOR_BACKEND")
-	useTQ := backend == "tqmse" || (backend != "sqlite" && backend != "libsql" && HasTQVectorStore(repoDir))
-	var (
-		s   Storer
-		err error
-	)
-	if useTQ {
-		s, err = OpenSQLiteMetadata(path)
-	} else {
-		s, err = OpenLibSQL(path)
+	if backend == "tqmse" {
+		return openTQForSearch(path, repoDir, true)
 	}
+	if backend != "sqlite" && backend != "libsql" && HasTQVectorStore(repoDir) {
+		s, err := openTQForSearch(path, repoDir, false)
+		if err != nil {
+			return nil, err
+		}
+		if s != nil {
+			return s, nil
+		}
+	}
+	return OpenLibSQL(path)
+}
+
+func openTQForSearch(path, repoDir string, forced bool) (Storer, error) {
+	s, err := OpenSQLiteMetadata(path)
 	if err != nil {
 		return nil, err
 	}
-	return OpenTQSearchStoreIfAvailable(s, repoDir)
+	wrapped, err := OpenTQSearchStoreIfAvailable(s, repoDir)
+	if err != nil {
+		return nil, err
+	}
+	tq, ok := wrapped.(*TQSearchStore)
+	if !ok {
+		_ = wrapped.Close()
+		return nil, nil
+	}
+	fileStore, err := OpenLibSQL(path, WithLibSQLReadOnly(true))
+	if err != nil {
+		_ = tq.Close()
+		if forced {
+			return nil, fmt.Errorf("open file embedding delegate: %w", err)
+		}
+		return nil, nil
+	}
+	tq.fileStore = fileStore
+	tq.fileStoreCloser = fileStore
+	return tq, nil
 }
 
 // OpenForStats opens a store for stats queries.

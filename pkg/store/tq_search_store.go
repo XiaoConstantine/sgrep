@@ -9,10 +9,12 @@ import (
 
 // TQSearchStore wraps a metadata/FTS SQL store with a compact dense-vector store.
 type TQSearchStore struct {
-	base   Storer
-	dense  *TQVectorStore
-	loader DocumentLoader
-	bm25   BM25Scorer
+	base            Storer
+	dense           *TQVectorStore
+	loader          DocumentLoader
+	bm25            BM25Scorer
+	fileStore       FileEmbeddingStorer
+	fileStoreCloser interface{ Close() error }
 }
 
 // OpenTQSearchStoreIfAvailable wraps base when a compact vector artifact is present.
@@ -96,7 +98,7 @@ func (s *TQSearchStore) HybridSearch(ctx context.Context, embedding []float32, q
 
 	bm25Scores, err := s.bm25.BM25Scores(ctx, queryTerms)
 	if err != nil {
-		return nil, nil, err
+		return s.Search(ctx, embedding, limit, threshold)
 	}
 
 	for i := range hits {
@@ -130,11 +132,51 @@ func (s *TQSearchStore) DeleteByPath(ctx context.Context, filepath string) error
 	return s.base.DeleteByPath(ctx, filepath)
 }
 
+func (s *TQSearchStore) StoreFileEmbedding(ctx context.Context, fe *FileEmbedding) error {
+	if s.fileStore == nil {
+		return fmt.Errorf("tq search store does not support file embeddings")
+	}
+	return s.fileStore.StoreFileEmbedding(ctx, fe)
+}
+
+func (s *TQSearchStore) StoreFileEmbeddingBatch(ctx context.Context, fes []*FileEmbedding) error {
+	if s.fileStore == nil {
+		return fmt.Errorf("tq search store does not support file embeddings")
+	}
+	return s.fileStore.StoreFileEmbeddingBatch(ctx, fes)
+}
+
+func (s *TQSearchStore) SearchFileEmbeddings(ctx context.Context, embedding []float32, limit int, threshold float64) ([]string, []float64, error) {
+	if s.fileStore == nil {
+		return nil, nil, nil
+	}
+	return s.fileStore.SearchFileEmbeddings(ctx, embedding, limit, threshold)
+}
+
+func (s *TQSearchStore) GetChunksByFilePath(ctx context.Context, filePath string) ([]*Document, error) {
+	if s.fileStore == nil {
+		return nil, nil
+	}
+	return s.fileStore.GetChunksByFilePath(ctx, filePath)
+}
+
+func (s *TQSearchStore) DeleteFileEmbedding(ctx context.Context, filePath string) error {
+	if s.fileStore == nil {
+		return fmt.Errorf("tq search store does not support file embeddings")
+	}
+	return s.fileStore.DeleteFileEmbedding(ctx, filePath)
+}
+
 // Close closes both the dense artifact and base store.
 func (s *TQSearchStore) Close() error {
 	var err error
 	if s.dense != nil {
 		err = s.dense.Close()
+	}
+	if s.fileStoreCloser != nil {
+		if closeErr := s.fileStoreCloser.Close(); err == nil {
+			err = closeErr
+		}
 	}
 	if closeErr := s.base.Close(); err == nil {
 		err = closeErr

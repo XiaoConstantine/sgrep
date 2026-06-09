@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"math"
 	"math/rand"
 	"testing"
@@ -104,6 +105,44 @@ func TestTQSearchStoreHydratesInDenseOrder(t *testing.T) {
 	}
 }
 
+func TestTQSearchStoreHybridFallsBackToSemanticOnBM25Error(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	dims := 64
+	rng := rand.New(rand.NewSource(11))
+
+	ids := []string{"chunk_a", "chunk_b"}
+	vectors := make([][]float32, len(ids))
+	for i := range vectors {
+		vectors[i] = util.NormalizeVector(randomTQVector(rng, dims))
+	}
+	if _, err := BuildTQVectorStore(ctx, tmp, ids, vectors, TQVectorBuildOptions{Dims: dims, Bits: 4, Seed: 42}); err != nil {
+		t.Fatalf("BuildTQVectorStore: %v", err)
+	}
+
+	base := &stubBM25ErrorStore{
+		stubHydrationStore: stubHydrationStore{
+			docs: map[string]*Document{
+				"chunk_a": {ID: "chunk_a", FilePath: "a.go"},
+				"chunk_b": {ID: "chunk_b", FilePath: "b.go"},
+			},
+		},
+	}
+	wrapped, err := OpenTQSearchStoreIfAvailable(base, tmp)
+	if err != nil {
+		t.Fatalf("OpenTQSearchStoreIfAvailable: %v", err)
+	}
+	defer func() { _ = wrapped.Close() }()
+
+	docs, _, err := wrapped.HybridSearch(ctx, vectors[0], `"unterminated`, 1, 2, 0.6, 0.4)
+	if err != nil {
+		t.Fatalf("HybridSearch returned BM25 error instead of semantic fallback: %v", err)
+	}
+	if len(docs) == 0 || docs[0].ID != "chunk_a" {
+		t.Fatalf("HybridSearch fallback docs = %v, want chunk_a first", docs)
+	}
+}
+
 type stubHydrationStore struct {
 	docs map[string]*Document
 }
@@ -128,6 +167,14 @@ func (s *stubHydrationStore) LoadDocumentsByID(_ context.Context, ids []string) 
 		}
 	}
 	return out, nil
+}
+
+type stubBM25ErrorStore struct {
+	stubHydrationStore
+}
+
+func (s *stubBM25ErrorStore) BM25Scores(context.Context, string) (map[string]float64, error) {
+	return nil, errors.New("fts syntax error")
 }
 
 func randomTQVector(rng *rand.Rand, dims int) []float32 {

@@ -251,48 +251,85 @@ func (s *TQVectorStore) load() error {
 		_ = f.Close()
 		return fmt.Errorf("tq vector file too small: %d", stat.Size())
 	}
-	data, err := syscall.Mmap(int(f.Fd()), 0, int(stat.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
-	if err != nil {
+	maxInt := int64(int(^uint(0) >> 1))
+	if stat.Size() > maxInt {
 		_ = f.Close()
-		return fmt.Errorf("mmap tq vectors: %w", err)
+		return fmt.Errorf("tq vector file too large: %d", stat.Size())
 	}
 
-	if string(data[0:4]) != tqVectorMagic {
-		_ = syscall.Munmap(data)
+	header := make([]byte, tqVectorHeaderSize)
+	if _, err := f.ReadAt(header, 0); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("invalid tq vector magic: %q", string(data[0:4]))
+		return fmt.Errorf("read tq vector header: %w", err)
 	}
-	version := binary.LittleEndian.Uint32(data[4:8])
+	if string(header[0:4]) != tqVectorMagic {
+		_ = f.Close()
+		return fmt.Errorf("invalid tq vector magic: %q", string(header[0:4]))
+	}
+	version := binary.LittleEndian.Uint32(header[4:8])
 	if version != tqVectorVersion {
-		_ = syscall.Munmap(data)
 		_ = f.Close()
 		return fmt.Errorf("unsupported tq vector version: %d", version)
 	}
 
-	dims := int(binary.LittleEndian.Uint32(data[8:12]))
-	bits := int(binary.LittleEndian.Uint32(data[12:16]))
-	vectorCount := int(binary.LittleEndian.Uint32(data[16:20]))
-	codeSize := int(binary.LittleEndian.Uint32(data[20:24]))
-	metadataOffset := int(binary.LittleEndian.Uint32(data[24:28]))
-	metadataLen := int(binary.LittleEndian.Uint32(data[28:32]))
-	indexOffset := int(binary.LittleEndian.Uint32(data[32:36]))
-	indexSize := int(binary.LittleEndian.Uint32(data[36:40]))
-	codesOffset := int(binary.LittleEndian.Uint32(data[40:44]))
+	dims64 := int64(binary.LittleEndian.Uint32(header[8:12]))
+	bits64 := int64(binary.LittleEndian.Uint32(header[12:16]))
+	vectorCount64 := int64(binary.LittleEndian.Uint32(header[16:20]))
+	codeSize64 := int64(binary.LittleEndian.Uint32(header[20:24]))
+	metadataOffset64 := int64(binary.LittleEndian.Uint32(header[24:28]))
+	metadataLen64 := int64(binary.LittleEndian.Uint32(header[28:32]))
+	indexOffset64 := int64(binary.LittleEndian.Uint32(header[32:36]))
+	indexSize64 := int64(binary.LittleEndian.Uint32(header[36:40]))
+	codesOffset64 := int64(binary.LittleEndian.Uint32(header[40:44]))
+	fileSize64 := stat.Size()
 
-	if metadataOffset < tqVectorHeaderSize || metadataOffset+metadataLen > len(data) {
-		_ = syscall.Munmap(data)
+	if dims64 > maxInt || bits64 > maxInt || vectorCount64 > maxInt || codeSize64 > maxInt {
+		_ = f.Close()
+		return fmt.Errorf("tq vector header value too large")
+	}
+	if !tqRangeWithin(metadataOffset64, metadataLen64, tqVectorHeaderSize, fileSize64) {
 		_ = f.Close()
 		return fmt.Errorf("invalid tq vector metadata bounds")
 	}
-	if indexOffset < metadataOffset+metadataLen || indexOffset+indexSize > len(data) {
-		_ = syscall.Munmap(data)
+	metadataEnd64 := metadataOffset64 + metadataLen64
+	if !tqRangeWithin(indexOffset64, indexSize64, metadataEnd64, fileSize64) {
 		_ = f.Close()
 		return fmt.Errorf("invalid tq vector index bounds")
 	}
-	if codesOffset < indexOffset+indexSize || codesOffset+vectorCount*codeSize > len(data) {
-		_ = syscall.Munmap(data)
+	if vectorCount64 > 0 && indexSize64/vectorCount64 < 2 {
+		_ = f.Close()
+		return fmt.Errorf("invalid tq vector index bounds")
+	}
+	indexEnd64 := indexOffset64 + indexSize64
+	if !tqRangeWithin(codesOffset64, 0, indexEnd64, fileSize64) {
 		_ = f.Close()
 		return fmt.Errorf("invalid tq vector code bounds")
+	}
+	remainingCodeBytes := fileSize64 - codesOffset64
+	if vectorCount64 > 0 && codeSize64 > remainingCodeBytes/vectorCount64 {
+		_ = f.Close()
+		return fmt.Errorf("invalid tq vector code bounds")
+	}
+	codesLen64 := vectorCount64 * codeSize64
+	if !tqRangeWithin(codesOffset64, codesLen64, indexEnd64, fileSize64) {
+		_ = f.Close()
+		return fmt.Errorf("invalid tq vector code bounds")
+	}
+
+	dims := int(dims64)
+	bits := int(bits64)
+	vectorCount := int(vectorCount64)
+	codeSize := int(codeSize64)
+	metadataOffset := int(metadataOffset64)
+	metadataLen := int(metadataLen64)
+	indexOffset := int(indexOffset64)
+	indexSize := int(indexSize64)
+	codesOffset := int(codesOffset64)
+	fileSize := int(fileSize64)
+	data, err := syscall.Mmap(int(f.Fd()), 0, fileSize, syscall.PROT_READ, syscall.MAP_SHARED)
+	if err != nil {
+		_ = f.Close()
+		return fmt.Errorf("mmap tq vectors: %w", err)
 	}
 
 	q, err := util.DeserializeTQMSEQuantizer(data[metadataOffset : metadataOffset+metadataLen])
@@ -342,6 +379,10 @@ func (s *TQVectorStore) load() error {
 	s.chunkIDs = chunkIDs
 	s.idToIndex = idToIndex
 	return nil
+}
+
+func tqRangeWithin(offset, length, minOffset, fileSize int64) bool {
+	return offset >= minOffset && length >= 0 && offset <= fileSize && length <= fileSize-offset
 }
 
 // Close unmaps and closes the vector artifact.
