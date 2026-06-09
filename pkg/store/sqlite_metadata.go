@@ -68,6 +68,36 @@ func (s *SQLiteMetadataStore) Close() error {
 	return s.db.Close()
 }
 
+// GetChunksByFilePath returns document chunks for a file path from metadata tables.
+func (s *SQLiteMetadataStore) GetChunksByFilePath(ctx context.Context, filePath string) ([]*Document, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, filepath, content, start_line, end_line, metadata, is_test
+		FROM documents
+		WHERE filepath = ?
+		ORDER BY start_line ASC
+	`, filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var docs []*Document
+	for rows.Next() {
+		var doc Document
+		var metadata sql.NullString
+		var isTest int
+		if err := rows.Scan(&doc.ID, &doc.FilePath, &doc.Content, &doc.StartLine, &doc.EndLine, &metadata, &isTest); err != nil {
+			return nil, err
+		}
+		if metadata.Valid && metadata.String != "" {
+			_ = json.Unmarshal([]byte(metadata.String), &doc.Metadata)
+		}
+		doc.IsTest = isTest == 1
+		docs = append(docs, &doc)
+	}
+	return docs, rows.Err()
+}
+
 // LoadDocumentsByID hydrates documents by chunk ID for external vector indexes.
 func (s *SQLiteMetadataStore) LoadDocumentsByID(ctx context.Context, ids []string) (map[string]*Document, error) {
 	docsByID := make(map[string]*Document, len(ids))

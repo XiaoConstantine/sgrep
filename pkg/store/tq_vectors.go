@@ -15,19 +15,20 @@ import (
 )
 
 const (
-	tqVectorFileName    = "vectors.tqmse"
-	tqVectorMagic       = "SGTV"
-	tqVectorVersion     = 1
-	tqVectorHeaderSize  = 64
-	tqVectorDefaultBit  = 4
-	tqVectorDefaultSeed = 42
+	tqVectorFileName     = "vectors.tqmse"
+	tqFileVectorFileName = "file_vectors.tqmse"
+	tqVectorMagic        = "SGTV"
+	tqVectorVersion      = 1
+	tqVectorHeaderSize   = 64
+	tqVectorDefaultBit   = 4
+	tqVectorDefaultSeed  = 42
 )
 
 // TQVectorStore is a memory-mapped compressed dense-vector artifact.
 //
-// It stores one TQ-MSE code per chunk and scans those compressed codes with a
+// It stores one TQ-MSE code per item and scans those compressed codes with a
 // query-side lookup table. SQLite remains responsible for content, metadata,
-// and FTS; this artifact owns only first-stage dense vector scoring.
+// and FTS; this artifact owns dense vector scoring.
 type TQVectorStore struct {
 	path string
 
@@ -42,7 +43,7 @@ type TQVectorStore struct {
 	codesOffset int
 
 	quantizer *util.TQMSEQuantizer
-	chunkIDs  []string
+	ids       []string
 	idToIndex map[string]int
 }
 
@@ -58,9 +59,20 @@ func TQVectorPath(dir string) string {
 	return filepath.Join(dir, tqVectorFileName)
 }
 
+// TQFileVectorPath returns the compact file-level vector artifact path.
+func TQFileVectorPath(dir string) string {
+	return filepath.Join(dir, tqFileVectorFileName)
+}
+
 // HasTQVectorStore reports whether a compact dense vector artifact exists.
 func HasTQVectorStore(dir string) bool {
 	info, err := os.Stat(TQVectorPath(dir))
+	return err == nil && info.Size() >= tqVectorHeaderSize
+}
+
+// HasTQFileVectorStore reports whether a compact file-level vector artifact exists.
+func HasTQFileVectorStore(dir string) bool {
+	info, err := os.Stat(TQFileVectorPath(dir))
 	return err == nil && info.Size() >= tqVectorHeaderSize
 }
 
@@ -72,12 +84,29 @@ func RemoveTQVectorStore(dir string) error {
 	return nil
 }
 
+// RemoveTQFileVectorStore removes the compact file-level vector artifact when present.
+func RemoveTQFileVectorStore(dir string) error {
+	if err := os.Remove(TQFileVectorPath(dir)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // BuildTQVectorStore writes a compact dense vector artifact for chunk vectors.
 func BuildTQVectorStore(ctx context.Context, dir string, chunkIDs []string, embeddings [][]float32, opts TQVectorBuildOptions) (int, error) {
-	if len(chunkIDs) != len(embeddings) {
-		return 0, fmt.Errorf("chunk/vector count mismatch: %d ids, %d vectors", len(chunkIDs), len(embeddings))
+	return buildTQVectorStore(ctx, TQVectorPath(dir), chunkIDs, embeddings, opts)
+}
+
+// BuildTQFileVectorStore writes a compact dense vector artifact for file-level vectors.
+func BuildTQFileVectorStore(ctx context.Context, dir string, filePaths []string, embeddings [][]float32, opts TQVectorBuildOptions) (int, error) {
+	return buildTQVectorStore(ctx, TQFileVectorPath(dir), filePaths, embeddings, opts)
+}
+
+func buildTQVectorStore(ctx context.Context, path string, ids []string, embeddings [][]float32, opts TQVectorBuildOptions) (int, error) {
+	if len(ids) != len(embeddings) {
+		return 0, fmt.Errorf("id/vector count mismatch: %d ids, %d vectors", len(ids), len(embeddings))
 	}
-	if len(chunkIDs) == 0 {
+	if len(ids) == 0 {
 		return 0, nil
 	}
 	dims := opts.Dims
@@ -109,8 +138,8 @@ func BuildTQVectorStore(ctx context.Context, dir string, chunkIDs []string, embe
 		id  string
 		vec []float32
 	}
-	items := make([]item, 0, len(chunkIDs))
-	for i, id := range chunkIDs {
+	items := make([]item, 0, len(ids))
+	for i, id := range ids {
 		if err := ctx.Err(); err != nil {
 			return 0, err
 		}
@@ -127,7 +156,7 @@ func BuildTQVectorStore(ctx context.Context, dir string, chunkIDs []string, embe
 	indexSize := 0
 	for _, item := range items {
 		if len(item.id) > int(^uint16(0)) {
-			return 0, fmt.Errorf("chunk id too long: %s", item.id)
+			return 0, fmt.Errorf("vector id too long: %s", item.id)
 		}
 		indexSize += 2 + len(item.id)
 	}
@@ -137,10 +166,11 @@ func BuildTQVectorStore(ctx context.Context, dir string, chunkIDs []string, embe
 	codesOffset := indexOffset + indexSize
 	totalSize := codesOffset + len(items)*codeSize
 
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return 0, err
 	}
-	f, err := os.CreateTemp(dir, tqVectorFileName+".*.tmp")
+	f, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
 	if err != nil {
 		return 0, err
 	}
@@ -219,7 +249,7 @@ func BuildTQVectorStore(ctx context.Context, dir string, chunkIDs []string, embe
 	if err := f.Close(); err != nil {
 		return 0, err
 	}
-	if err := os.Rename(tmpPath, TQVectorPath(dir)); err != nil {
+	if err := os.Rename(tmpPath, path); err != nil {
 		return 0, err
 	}
 	return len(items), nil
@@ -227,8 +257,17 @@ func BuildTQVectorStore(ctx context.Context, dir string, chunkIDs []string, embe
 
 // OpenTQVectorStore opens an existing compact dense vector artifact.
 func OpenTQVectorStore(dir string) (*TQVectorStore, error) {
+	return openTQVectorStore(TQVectorPath(dir))
+}
+
+// OpenTQFileVectorStore opens an existing compact file-level vector artifact.
+func OpenTQFileVectorStore(dir string) (*TQVectorStore, error) {
+	return openTQVectorStore(TQFileVectorPath(dir))
+}
+
+func openTQVectorStore(path string) (*TQVectorStore, error) {
 	s := &TQVectorStore{
-		path:      TQVectorPath(dir),
+		path:      path,
 		idToIndex: make(map[string]int),
 	}
 	if err := s.load(); err != nil {
@@ -344,7 +383,7 @@ func (s *TQVectorStore) load() error {
 		return fmt.Errorf("tq vector quantizer/header mismatch")
 	}
 
-	chunkIDs := make([]string, vectorCount)
+	ids := make([]string, vectorCount)
 	idToIndex := make(map[string]int, vectorCount)
 	offset := indexOffset
 	for i := 0; i < vectorCount; i++ {
@@ -362,7 +401,7 @@ func (s *TQVectorStore) load() error {
 		}
 		id := string(data[offset : offset+idLen])
 		offset += idLen
-		chunkIDs[i] = id
+		ids[i] = id
 		idToIndex[id] = i
 	}
 
@@ -376,7 +415,7 @@ func (s *TQVectorStore) load() error {
 	s.codeSize = codeSize
 	s.codesOffset = codesOffset
 	s.quantizer = q
-	s.chunkIDs = chunkIDs
+	s.ids = ids
 	s.idToIndex = idToIndex
 	return nil
 }
@@ -433,7 +472,7 @@ func (s *TQVectorStore) Search(ctx context.Context, embedding []float32, limit i
 	s.mu.RLock()
 	data := s.data
 	q := s.quantizer
-	chunkIDs := s.chunkIDs
+	ids := s.ids
 	vectorCount := s.vectorCount
 	codeSize := s.codeSize
 	codesOffset := s.codesOffset
@@ -468,7 +507,7 @@ func (s *TQVectorStore) Search(ctx context.Context, embedding []float32, limit i
 		if distance > threshold {
 			continue
 		}
-		item := DenseSearchResult{ID: chunkIDs[i], Distance: distance}
+		item := DenseSearchResult{ID: ids[i], Distance: distance}
 		if h.Len() < limit {
 			heap.Push(&h, item)
 			continue

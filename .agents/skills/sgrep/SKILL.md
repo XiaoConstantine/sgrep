@@ -16,6 +16,7 @@ Use `sgrep` for semantic and hybrid search across **code** and **agent conversat
 ### Code Search
 - Finding code by **concept**: "error handling", "authentication logic", "rate limiting"
 - Searching for **specific terms** with semantic context: use `--hybrid`
+- Best code-search accuracy after indexing: use `--hybrid --colbert`
 - Exploring unfamiliar codebases
 - When ripgrep patterns keep missing relevant code
 
@@ -31,7 +32,7 @@ Use `sgrep` for semantic and hybrid search across **code** and **agent conversat
 # First time only
 sgrep setup
 
-# Index current directory
+# Index current directory; builds compact TQ-MSE chunk/file vectors by default
 sgrep index .
 
 # Semantic code search
@@ -41,6 +42,10 @@ sgrep "how are errors handled"
 # Hybrid search for specific terms + context
 sgrep --hybrid "JWT validation"
 sgrep --hybrid "authentication middleware"
+
+# Best code-search accuracy
+sgrep --hybrid --colbert "JWT validation"
+sgrep --hybrid --colbert "authentication middleware"
 
 # With code context
 sgrep -c "authentication middleware"
@@ -71,12 +76,15 @@ sgrep conv context <session_id>
 |------|----------|---------|
 | Semantic (default) | Conceptual queries | "how does auth work" |
 | `--hybrid` | Queries with specific terms | "JWT token validation" |
+| `--hybrid --colbert` | Highest code-search accuracy | "authentication middleware" |
 
 **Use `--hybrid`** when your query contains function names, API names, or technical terms that should match exactly.
+Use `--hybrid --colbert` when accuracy matters more than the fastest possible query.
 
 ## Search Hierarchy
 
 1. **sgrep** → Find relevant files/functions by semantic intent
 2. **sgrep --hybrid** → Find code matching intent + specific terms
-3. **ast-grep** → Match structural patterns in those files
-4. **ripgrep** → Exact text for specific symbols
+3. **sgrep --hybrid --colbert** → Rerank candidates with late interaction for best code accuracy
+4. **ast-grep** → Match structural patterns in those files
+5. **ripgrep** → Exact text for specific symbols

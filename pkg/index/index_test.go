@@ -158,6 +158,8 @@ func (s *exportColBERTTestStore) TQMSEQuantizer() *util.TQMSEQuantizer {
 type tqExportTestStore struct {
 	ids          []string
 	vectors      [][]float32
+	filePaths    []string
+	fileVectors  [][]float32
 	checkpointed bool
 }
 
@@ -191,6 +193,10 @@ func (s *tqExportTestStore) Close() error {
 
 func (s *tqExportTestStore) ExportAllVectors(context.Context) ([]string, [][]float32, error) {
 	return append([]string(nil), s.ids...), append([][]float32(nil), s.vectors...), nil
+}
+
+func (s *tqExportTestStore) ExportFileEmbeddings(context.Context) ([]string, [][]float32, error) {
+	return append([]string(nil), s.filePaths...), append([][]float32(nil), s.fileVectors...), nil
 }
 
 func (s *tqExportTestStore) Checkpoint(context.Context) error {
@@ -318,6 +324,12 @@ func TestRebuildTQVectorStoreRemovesStaleArtifactWhenNoVectors(t *testing.T) {
 	if !store.HasTQVectorStore(tmp) {
 		t.Fatal("expected stale TQ vector store to exist")
 	}
+	if _, err := store.BuildTQFileVectorStore(ctx, tmp, []string{"stale.go"}, [][]float32{{1}}, store.TQVectorBuildOptions{Dims: 1}); err != nil {
+		t.Fatalf("BuildTQFileVectorStore: %v", err)
+	}
+	if !store.HasTQFileVectorStore(tmp) {
+		t.Fatal("expected stale file TQ vector store to exist")
+	}
 
 	fake := &tqExportTestStore{}
 	idx := &Indexer{repoDir: tmp, store: fake}
@@ -333,8 +345,56 @@ func TestRebuildTQVectorStoreRemovesStaleArtifactWhenNoVectors(t *testing.T) {
 	if store.HasTQVectorStore(tmp) {
 		t.Fatal("stale TQ vector store was not removed")
 	}
+	if store.HasTQFileVectorStore(tmp) {
+		t.Fatal("stale file TQ vector store was not removed")
+	}
 	if !fake.checkpointed {
 		t.Fatal("expected SQL checkpoint before TQ export")
+	}
+}
+
+func TestRebuildTQVectorStoreExportsFileVectors(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	dims := 64
+	chunkVec := make([]float32, dims)
+	fileVec := make([]float32, dims)
+	chunkVec[0] = 1
+	fileVec[1] = 1
+
+	fake := &tqExportTestStore{
+		ids:         []string{"a.go:chunk_1"},
+		vectors:     [][]float32{chunkVec},
+		filePaths:   []string{"a.go"},
+		fileVectors: [][]float32{fileVec},
+	}
+	idx := &Indexer{repoDir: tmp, store: fake}
+	t.Setenv("SGREP_DIMS", fmt.Sprintf("%d", dims))
+
+	count, err := idx.RebuildTQVectorStore(ctx)
+	if err != nil {
+		t.Fatalf("RebuildTQVectorStore: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("count = %d, want 1", count)
+	}
+	if !store.HasTQVectorStore(tmp) {
+		t.Fatal("expected chunk TQ vector store")
+	}
+	if !store.HasTQFileVectorStore(tmp) {
+		t.Fatal("expected file TQ vector store")
+	}
+	fileStore, err := store.OpenTQFileVectorStore(tmp)
+	if err != nil {
+		t.Fatalf("OpenTQFileVectorStore: %v", err)
+	}
+	defer func() { _ = fileStore.Close() }()
+	hits, err := fileStore.Search(ctx, fileVec, 1, 2)
+	if err != nil {
+		t.Fatalf("Search file TQ vectors: %v", err)
+	}
+	if len(hits) != 1 || hits[0].ID != "a.go" {
+		t.Fatalf("file hits = %+v, want a.go", hits)
 	}
 }
 

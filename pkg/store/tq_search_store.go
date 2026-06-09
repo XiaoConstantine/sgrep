@@ -11,7 +11,9 @@ import (
 type TQSearchStore struct {
 	base            Storer
 	dense           *TQVectorStore
+	fileDense       *TQVectorStore
 	loader          DocumentLoader
+	fileLoader      FileChunkLoader
 	bm25            BM25Scorer
 	fileStore       FileEmbeddingStorer
 	fileStoreCloser interface{ Close() error }
@@ -52,6 +54,14 @@ func OpenTQSearchStoreIfAvailable(base Storer, repoDir string) (Storer, error) {
 	}
 	if bm25, ok := base.(BM25Scorer); ok {
 		wrapped.bm25 = bm25
+	}
+	if fileLoader, ok := base.(FileChunkLoader); ok {
+		wrapped.fileLoader = fileLoader
+		if HasTQFileVectorStore(repoDir) {
+			if fileDense, err := OpenTQFileVectorStore(repoDir); err == nil {
+				wrapped.fileDense = fileDense
+			}
+		}
 	}
 	return wrapped, nil
 }
@@ -124,6 +134,11 @@ func (s *TQSearchStore) Stats(ctx context.Context) (*Stats, error) {
 			stats.SizeBytes += info.Size()
 		}
 	}
+	if s.fileDense != nil {
+		if info, err := os.Stat(s.fileDense.path); err == nil {
+			stats.SizeBytes += info.Size()
+		}
+	}
 	return stats, nil
 }
 
@@ -147,6 +162,19 @@ func (s *TQSearchStore) StoreFileEmbeddingBatch(ctx context.Context, fes []*File
 }
 
 func (s *TQSearchStore) SearchFileEmbeddings(ctx context.Context, embedding []float32, limit int, threshold float64) ([]string, []float64, error) {
+	if s.fileDense != nil {
+		hits, err := s.fileDense.Search(ctx, embedding, limit, threshold)
+		if err != nil {
+			return nil, nil, err
+		}
+		paths := make([]string, len(hits))
+		distances := make([]float64, len(hits))
+		for i, hit := range hits {
+			paths[i] = hit.ID
+			distances[i] = hit.Distance
+		}
+		return paths, distances, nil
+	}
 	if s.fileStore == nil {
 		return nil, nil, nil
 	}
@@ -154,6 +182,9 @@ func (s *TQSearchStore) SearchFileEmbeddings(ctx context.Context, embedding []fl
 }
 
 func (s *TQSearchStore) GetChunksByFilePath(ctx context.Context, filePath string) ([]*Document, error) {
+	if s.fileLoader != nil {
+		return s.fileLoader.GetChunksByFilePath(ctx, filePath)
+	}
 	if s.fileStore == nil {
 		return nil, nil
 	}
@@ -172,6 +203,11 @@ func (s *TQSearchStore) Close() error {
 	var err error
 	if s.dense != nil {
 		err = s.dense.Close()
+	}
+	if s.fileDense != nil {
+		if closeErr := s.fileDense.Close(); err == nil {
+			err = closeErr
+		}
 	}
 	if s.fileStoreCloser != nil {
 		if closeErr := s.fileStoreCloser.Close(); err == nil {

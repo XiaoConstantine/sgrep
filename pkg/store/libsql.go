@@ -1165,6 +1165,35 @@ func (s *LibSQLStore) ExportAllVectors(ctx context.Context) ([]string, [][]float
 	return ids, vecs, nil
 }
 
+// ExportFileEmbeddings returns all file-level embeddings for compact vector export.
+func (s *LibSQLStore) ExportFileEmbeddings(ctx context.Context) ([]string, [][]float32, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT filepath, vector_extract(embedding) FROM file_embeddings WHERE embedding IS NOT NULL`)
+	if err != nil {
+		return nil, nil, fmt.Errorf("query file embeddings: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var filePaths []string
+	var vecs [][]float32
+	for rows.Next() {
+		var filePath string
+		var vecStr string
+		if err := rows.Scan(&filePath, &vecStr); err != nil {
+			continue
+		}
+		vec := parseVectorString(vecStr)
+		if vec == nil {
+			continue
+		}
+		filePaths = append(filePaths, filePath)
+		vecs = append(vecs, vec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("iterate file embeddings: %w", err)
+	}
+	return filePaths, vecs, nil
+}
+
 // Close closes the database.
 func (s *LibSQLStore) Close() error {
 	return s.db.Close()

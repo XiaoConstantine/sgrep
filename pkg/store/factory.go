@@ -47,6 +47,9 @@ func openTQForSearch(path, repoDir string, forced bool) (Storer, error) {
 		_ = wrapped.Close()
 		return nil, nil
 	}
+	if tq.fileDense != nil {
+		return tq, nil
+	}
 	fileStore, err := OpenLibSQL(path, WithLibSQLReadOnly(true))
 	if err != nil {
 		_ = tq.Close()

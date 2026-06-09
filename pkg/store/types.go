@@ -76,11 +76,16 @@ type FileEmbeddingComputer interface {
 	ComputeAndStoreFileEmbeddings(ctx context.Context) (int, error)
 }
 
-// VectorExporter is an optional interface for stores that can export all vectors for MMap storage.
+// VectorExporter is an optional interface for stores that can export all chunk vectors.
 type VectorExporter interface {
 	// ExportAllVectors returns all chunk IDs and their corresponding embeddings.
-	// This is used to export vectors to MMap format for zero-copy access.
 	ExportAllVectors(ctx context.Context) (chunkIDs []string, embeddings [][]float32, err error)
+}
+
+// FileVectorExporter is an optional interface for stores that can export file-level vectors.
+type FileVectorExporter interface {
+	// ExportFileEmbeddings returns all file paths and their corresponding file-level embeddings.
+	ExportFileEmbeddings(ctx context.Context) (filePaths []string, embeddings [][]float32, err error)
 }
 
 // DenseSearchResult is a vector-search hit before document hydration.
@@ -98,6 +103,11 @@ type DenseVectorSearcher interface {
 // DocumentLoader hydrates chunks by ID while preserving metadata/content in the SQL store.
 type DocumentLoader interface {
 	LoadDocumentsByID(ctx context.Context, ids []string) (map[string]*Document, error)
+}
+
+// FileChunkLoader hydrates chunks by file path for document-level search.
+type FileChunkLoader interface {
+	GetChunksByFilePath(ctx context.Context, filePath string) ([]*Document, error)
 }
 
 // BM25Scorer exposes FTS scores without tying dense candidate generation to SQLite vectors.

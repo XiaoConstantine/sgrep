@@ -347,13 +347,13 @@ var indexCmd = &cobra.Command{
 			return err
 		}
 
-		// Export vectors to compact TQ-MSE store for faster, smaller first-stage search.
-		fmt.Println("\nExporting vectors to compact TQ-MSE store...")
+		// Export vectors to compact TQ-MSE stores for faster, smaller semantic retrieval.
+		fmt.Println("\nExporting vectors to compact TQ-MSE stores...")
 		vecCount, err := indexer.RebuildTQVectorStore(ctx)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to export vectors to compact TQ-MSE store: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Warning: failed to export vectors to compact TQ-MSE stores: %v\n", err)
 		} else {
-			fmt.Printf("Exported %d vectors to compact TQ-MSE store\n", vecCount)
+			fmt.Printf("Exported %d chunk vectors to compact TQ-MSE stores\n", vecCount)
 			if err := os.Remove(filepath.Join(indexer.RepoDir(), "vectors.mmap")); err != nil && !os.IsNotExist(err) {
 				fmt.Fprintf(os.Stderr, "Warning: failed to remove legacy vectors.mmap: %v\n", err)
 			}

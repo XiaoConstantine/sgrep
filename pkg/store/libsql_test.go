@@ -69,7 +69,7 @@ func TestOpenForSearchFallsBackWhenTQArtifactInvalid(t *testing.T) {
 	}
 }
 
-func TestOpenForSearchTQPreservesFileEmbeddingSearch(t *testing.T) {
+func TestOpenForSearchTQPreservesFileEmbeddingSearchWithoutFileTQArtifact(t *testing.T) {
 	t.Setenv("SGREP_VECTOR_BACKEND", "")
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
@@ -127,6 +127,81 @@ func TestOpenForSearchTQPreservesFileEmbeddingSearch(t *testing.T) {
 		t.Fatalf("SearchFileEmbeddings paths=%v distances=%v, want a.go", paths, distances)
 	}
 	chunks, err := fileStore.GetChunksByFilePath(ctx, "a.go")
+	if err != nil {
+		t.Fatalf("GetChunksByFilePath failed: %v", err)
+	}
+	if len(chunks) != 1 || chunks[0].ID != doc.ID {
+		t.Fatalf("GetChunksByFilePath chunks=%v, want %s", chunks, doc.ID)
+	}
+}
+
+func TestOpenForSearchTQUsesFileVectorArtifact(t *testing.T) {
+	t.Setenv("SGREP_VECTOR_BACKEND", "")
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	ctx := context.Background()
+
+	s, err := OpenLibSQL(dbPath)
+	if err != nil {
+		t.Fatalf("OpenLibSQL failed: %v", err)
+	}
+	docEmbedding := makeTestEmbedding(768, 0.35)
+	doc := &Document{
+		ID:        "a.go:chunk_1",
+		FilePath:  "a.go",
+		Content:   "package main\nfunc main() {}",
+		StartLine: 1,
+		EndLine:   2,
+		Embedding: docEmbedding,
+	}
+	if err := s.Store(ctx, doc); err != nil {
+		t.Fatalf("Store failed: %v", err)
+	}
+	if err := s.StoreFileEmbedding(ctx, &FileEmbedding{
+		FilePath:   "a.go",
+		Embedding:  docEmbedding,
+		ChunkCount: 1,
+		TotalLines: 2,
+	}); err != nil {
+		t.Fatalf("StoreFileEmbedding failed: %v", err)
+	}
+	if _, err := BuildTQVectorStore(ctx, dir, []string{doc.ID}, [][]float32{docEmbedding}, TQVectorBuildOptions{Dims: 768, Bits: 4, Seed: 42}); err != nil {
+		t.Fatalf("BuildTQVectorStore failed: %v", err)
+	}
+	if _, err := BuildTQFileVectorStore(ctx, dir, []string{doc.FilePath}, [][]float32{docEmbedding}, TQVectorBuildOptions{Dims: 768, Bits: 4, Seed: 42}); err != nil {
+		t.Fatalf("BuildTQFileVectorStore failed: %v", err)
+	}
+	if err := s.Checkpoint(ctx); err != nil {
+		t.Fatalf("Checkpoint failed: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	opened, err := OpenForSearch(dbPath)
+	if err != nil {
+		t.Fatalf("OpenForSearch failed: %v", err)
+	}
+	defer func() { _ = opened.Close() }()
+	tq, ok := opened.(*TQSearchStore)
+	if !ok {
+		t.Fatalf("OpenForSearch returned %T, want *TQSearchStore", opened)
+	}
+	if tq.fileDense == nil {
+		t.Fatal("TQSearchStore did not open file vector artifact")
+	}
+	if tq.fileStore != nil {
+		t.Fatal("TQSearchStore opened libSQL file embedding delegate despite file vector artifact")
+	}
+
+	paths, distances, err := tq.SearchFileEmbeddings(ctx, docEmbedding, 1, 2)
+	if err != nil {
+		t.Fatalf("SearchFileEmbeddings failed: %v", err)
+	}
+	if len(paths) != 1 || paths[0] != "a.go" {
+		t.Fatalf("SearchFileEmbeddings paths=%v distances=%v, want a.go", paths, distances)
+	}
+	chunks, err := tq.GetChunksByFilePath(ctx, "a.go")
 	if err != nil {
 		t.Fatalf("GetChunksByFilePath failed: %v", err)
 	}

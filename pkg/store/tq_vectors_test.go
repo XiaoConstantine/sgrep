@@ -65,6 +65,44 @@ func TestTQVectorStoreSearchRoundTrip(t *testing.T) {
 	}
 }
 
+func TestTQFileVectorStoreSearchRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	dims := 64
+	rng := rand.New(rand.NewSource(43))
+
+	paths := []string{"README.md", "internal/auth.go", "pkg/store.go"}
+	vectors := make([][]float32, len(paths))
+	for i := range vectors {
+		vectors[i] = util.NormalizeVector(randomTQVector(rng, dims))
+	}
+	count, err := BuildTQFileVectorStore(ctx, tmp, paths, vectors, TQVectorBuildOptions{
+		Dims: dims,
+		Bits: 4,
+		Seed: 42,
+	})
+	if err != nil {
+		t.Fatalf("BuildTQFileVectorStore: %v", err)
+	}
+	if count != len(paths) {
+		t.Fatalf("count = %d, want %d", count, len(paths))
+	}
+
+	store, err := OpenTQFileVectorStore(tmp)
+	if err != nil {
+		t.Fatalf("OpenTQFileVectorStore: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	results, err := store.Search(ctx, vectors[1], 1, 2)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 1 || results[0].ID != "internal/auth.go" {
+		t.Fatalf("file result = %+v, want internal/auth.go", results)
+	}
+}
+
 func TestTQSearchStoreHydratesInDenseOrder(t *testing.T) {
 	ctx := context.Background()
 	tmp := t.TempDir()

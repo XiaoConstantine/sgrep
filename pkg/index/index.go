@@ -194,13 +194,20 @@ func (idx *Indexer) Checkpoint(ctx context.Context) error {
 	return store.CheckpointIfNeeded(ctx, idx.store)
 }
 
-// RebuildTQVectorStore checkpoints SQL state, then refreshes the compact
-// first-stage dense vector artifact from active chunk embeddings.
+// RebuildTQVectorStore checkpoints SQL state, then refreshes compact
+// first-stage dense vector artifacts from active chunk and file embeddings.
 func (idx *Indexer) RebuildTQVectorStore(ctx context.Context) (int, error) {
 	if err := idx.Checkpoint(ctx); err != nil {
 		return 0, fmt.Errorf("checkpoint before TQ-MSE export: %w", err)
 	}
-	return idx.ExportVectorsToTQ(ctx, idx.repoDir)
+	chunkCount, err := idx.ExportVectorsToTQ(ctx, idx.repoDir)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := idx.ExportFileVectorsToTQ(ctx, idx.repoDir); err != nil {
+		return 0, err
+	}
+	return chunkCount, nil
 }
 
 // getSgrepHome returns the sgrep home directory (~/.sgrep).
@@ -972,12 +979,12 @@ func (idx *Indexer) Watch(ctx context.Context) error {
 	if err := idx.Index(ctx); err != nil {
 		return err
 	}
-	fmt.Println("Refreshing compact TQ-MSE vector store...")
+	fmt.Println("Refreshing compact TQ-MSE vector stores...")
 	vecCount, err := idx.RebuildTQVectorStore(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to refresh compact TQ-MSE vector store: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: failed to refresh compact TQ-MSE vector stores: %v\n", err)
 	} else {
-		fmt.Printf("Refreshed compact TQ-MSE vector store (%d vectors)\n", vecCount)
+		fmt.Printf("Refreshed compact TQ-MSE vector stores (%d chunk vectors)\n", vecCount)
 	}
 
 	fmt.Println("Watching for changes... (Ctrl+C to stop)")
@@ -1066,9 +1073,9 @@ func (idx *Indexer) Watch(ctx context.Context) error {
 		if changed {
 			vecCount, err := idx.RebuildTQVectorStore(ctx)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error refreshing compact TQ-MSE vector store: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Error refreshing compact TQ-MSE vector stores: %v\n", err)
 			} else {
-				fmt.Printf("Refreshed compact TQ-MSE vector store (%d vectors)\n", vecCount)
+				fmt.Printf("Refreshed compact TQ-MSE vector stores (%d chunk vectors)\n", vecCount)
 			}
 		}
 	}
@@ -2158,6 +2165,34 @@ func (idx *Indexer) ExportVectorsToTQ(ctx context.Context, outputDir string) (in
 	}
 
 	return store.BuildTQVectorStore(ctx, outputDir, chunkIDs, embeddings, store.TQVectorBuildOptions{
+		Dims: colbertEmbeddingDims(),
+		Bits: colbertTQMSEBits,
+		Seed: colbertTQMSESeed,
+	})
+}
+
+// ExportFileVectorsToTQ exports all file-level embeddings to a compact TQ-MSE store.
+func (idx *Indexer) ExportFileVectorsToTQ(ctx context.Context, outputDir string) (int, error) {
+	exporter, ok := idx.store.(store.FileVectorExporter)
+	if !ok {
+		if err := store.RemoveTQFileVectorStore(outputDir); err != nil {
+			return 0, fmt.Errorf("remove stale file TQ-MSE vector store: %w", err)
+		}
+		return 0, nil
+	}
+
+	filePaths, embeddings, err := exporter.ExportFileEmbeddings(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to export file vectors: %w", err)
+	}
+	if len(filePaths) == 0 {
+		if err := store.RemoveTQFileVectorStore(outputDir); err != nil {
+			return 0, fmt.Errorf("remove stale file TQ-MSE vector store: %w", err)
+		}
+		return 0, nil
+	}
+
+	return store.BuildTQFileVectorStore(ctx, outputDir, filePaths, embeddings, store.TQVectorBuildOptions{
 		Dims: colbertEmbeddingDims(),
 		Bits: colbertTQMSEBits,
 		Seed: colbertTQMSESeed,
