@@ -349,7 +349,7 @@ var indexCmd = &cobra.Command{
 
 		// Export vectors to compact TQ-MSE store for faster, smaller first-stage search.
 		fmt.Println("\nExporting vectors to compact TQ-MSE store...")
-		vecCount, err := indexer.ExportVectorsToTQ(ctx, indexer.RepoDir())
+		vecCount, err := indexer.RebuildTQVectorStore(ctx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to export vectors to compact TQ-MSE store: %v\n", err)
 		} else {

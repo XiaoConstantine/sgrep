@@ -155,6 +155,49 @@ func (s *exportColBERTTestStore) TQMSEQuantizer() *util.TQMSEQuantizer {
 	return s.tq
 }
 
+type tqExportTestStore struct {
+	ids          []string
+	vectors      [][]float32
+	checkpointed bool
+}
+
+func (s *tqExportTestStore) Store(context.Context, *store.Document) error {
+	return nil
+}
+
+func (s *tqExportTestStore) StoreBatch(context.Context, []*store.Document) error {
+	return nil
+}
+
+func (s *tqExportTestStore) Search(context.Context, []float32, int, float64) ([]*store.Document, []float64, error) {
+	return nil, nil, nil
+}
+
+func (s *tqExportTestStore) HybridSearch(context.Context, []float32, string, int, float64, float64, float64) ([]*store.Document, []float64, error) {
+	return nil, nil, nil
+}
+
+func (s *tqExportTestStore) Stats(context.Context) (*store.Stats, error) {
+	return &store.Stats{Chunks: int64(len(s.ids))}, nil
+}
+
+func (s *tqExportTestStore) DeleteByPath(context.Context, string) error {
+	return nil
+}
+
+func (s *tqExportTestStore) Close() error {
+	return nil
+}
+
+func (s *tqExportTestStore) ExportAllVectors(context.Context) ([]string, [][]float32, error) {
+	return append([]string(nil), s.ids...), append([][]float32(nil), s.vectors...), nil
+}
+
+func (s *tqExportTestStore) Checkpoint(context.Context) error {
+	s.checkpointed = true
+	return nil
+}
+
 func TestGetSgrepHome(t *testing.T) {
 	t.Run("from_env", func(t *testing.T) {
 		t.Setenv("SGREP_HOME", "/custom/path")
@@ -261,6 +304,37 @@ func TestIndexer_Fields(t *testing.T) {
 	idx := &Indexer{rootPath: "/test", processed: 5, errors: 2}
 	if idx.rootPath != "/test" || idx.processed != 5 || idx.errors != 2 {
 		t.Error("field issue")
+	}
+}
+
+func TestRebuildTQVectorStoreRemovesStaleArtifactWhenNoVectors(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	dims := 64
+
+	if _, err := store.BuildTQVectorStore(ctx, tmp, []string{"stale"}, [][]float32{{1}}, store.TQVectorBuildOptions{Dims: 1}); err != nil {
+		t.Fatalf("BuildTQVectorStore: %v", err)
+	}
+	if !store.HasTQVectorStore(tmp) {
+		t.Fatal("expected stale TQ vector store to exist")
+	}
+
+	fake := &tqExportTestStore{}
+	idx := &Indexer{repoDir: tmp, store: fake}
+	t.Setenv("SGREP_DIMS", fmt.Sprintf("%d", dims))
+
+	count, err := idx.RebuildTQVectorStore(ctx)
+	if err != nil {
+		t.Fatalf("RebuildTQVectorStore: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("count = %d, want 0", count)
+	}
+	if store.HasTQVectorStore(tmp) {
+		t.Fatal("stale TQ vector store was not removed")
+	}
+	if !fake.checkpointed {
+		t.Fatal("expected SQL checkpoint before TQ export")
 	}
 }
 

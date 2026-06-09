@@ -64,6 +64,14 @@ func HasTQVectorStore(dir string) bool {
 	return err == nil && info.Size() >= tqVectorHeaderSize
 }
 
+// RemoveTQVectorStore removes the compact dense vector artifact when present.
+func RemoveTQVectorStore(dir string) error {
+	if err := os.Remove(TQVectorPath(dir)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // BuildTQVectorStore writes a compact dense vector artifact for chunk vectors.
 func BuildTQVectorStore(ctx context.Context, dir string, chunkIDs []string, embeddings [][]float32, opts TQVectorBuildOptions) (int, error) {
 	if len(chunkIDs) != len(embeddings) {
@@ -132,12 +140,15 @@ func BuildTQVectorStore(ctx context.Context, dir string, chunkIDs []string, embe
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return 0, err
 	}
-	tmpPath := TQVectorPath(dir) + ".tmp"
-	f, err := os.Create(tmpPath)
+	f, err := os.CreateTemp(dir, tqVectorFileName+".*.tmp")
 	if err != nil {
 		return 0, err
 	}
-	defer func() { _ = f.Close() }()
+	tmpPath := f.Name()
+	defer func() {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+	}()
 
 	if err := f.Truncate(int64(totalSize)); err != nil {
 		_ = os.Remove(tmpPath)
@@ -206,11 +217,9 @@ func BuildTQVectorStore(ctx context.Context, dir string, chunkIDs []string, embe
 		return 0, err
 	}
 	if err := f.Close(); err != nil {
-		_ = os.Remove(tmpPath)
 		return 0, err
 	}
 	if err := os.Rename(tmpPath, TQVectorPath(dir)); err != nil {
-		_ = os.Remove(tmpPath)
 		return 0, err
 	}
 	return len(items), nil

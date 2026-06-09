@@ -194,6 +194,15 @@ func (idx *Indexer) Checkpoint(ctx context.Context) error {
 	return store.CheckpointIfNeeded(ctx, idx.store)
 }
 
+// RebuildTQVectorStore checkpoints SQL state, then refreshes the compact
+// first-stage dense vector artifact from active chunk embeddings.
+func (idx *Indexer) RebuildTQVectorStore(ctx context.Context) (int, error) {
+	if err := idx.Checkpoint(ctx); err != nil {
+		return 0, fmt.Errorf("checkpoint before TQ-MSE export: %w", err)
+	}
+	return idx.ExportVectorsToTQ(ctx, idx.repoDir)
+}
+
 // getSgrepHome returns the sgrep home directory (~/.sgrep).
 func getSgrepHome() (string, error) {
 	// Check SGREP_HOME env var first
@@ -963,6 +972,13 @@ func (idx *Indexer) Watch(ctx context.Context) error {
 	if err := idx.Index(ctx); err != nil {
 		return err
 	}
+	fmt.Println("Refreshing compact TQ-MSE vector store...")
+	vecCount, err := idx.RebuildTQVectorStore(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to refresh compact TQ-MSE vector store: %v\n", err)
+	} else {
+		fmt.Printf("Refreshed compact TQ-MSE vector store (%d vectors)\n", vecCount)
+	}
 
 	fmt.Println("Watching for changes... (Ctrl+C to stop)")
 
@@ -990,8 +1006,12 @@ func (idx *Indexer) Watch(ctx context.Context) error {
 	var debounce *time.Timer
 	pendingFiles := make(map[string]bool)
 	var mu sync.Mutex
+	var processMu sync.Mutex
 
 	processFiles := func() {
+		processMu.Lock()
+		defer processMu.Unlock()
+
 		mu.Lock()
 		files := make([]string, 0, len(pendingFiles))
 		for f := range pendingFiles {
@@ -999,6 +1019,9 @@ func (idx *Indexer) Watch(ctx context.Context) error {
 		}
 		pendingFiles = make(map[string]bool)
 		mu.Unlock()
+		if len(files) == 0 {
+			return
+		}
 
 		refreshColBERT, err := idx.shouldRefreshColBERT(ctx)
 		if err != nil {
@@ -1006,6 +1029,7 @@ func (idx *Indexer) Watch(ctx context.Context) error {
 			refreshColBERT = false
 		}
 
+		changed := false
 		for _, path := range files {
 			info, statErr := os.Stat(path)
 			if isCodeFile(path) && !idx.ignore.ShouldIgnorePath(path, statErr == nil && info.IsDir()) {
@@ -1015,6 +1039,7 @@ func (idx *Indexer) Watch(ctx context.Context) error {
 					} else {
 						relPath, _ := filepath.Rel(idx.rootPath, path)
 						fmt.Printf("Indexed: %s\n", relPath)
+						changed = true
 					}
 				} else {
 					// File deleted
@@ -1024,6 +1049,7 @@ func (idx *Indexer) Watch(ctx context.Context) error {
 						continue
 					}
 					fmt.Printf("Removed: %s\n", relPath)
+					changed = true
 				}
 			}
 		}
@@ -1034,6 +1060,15 @@ func (idx *Indexer) Watch(ctx context.Context) error {
 				if err := idx.refreshColBERTMMap(ctx, segmentStore); err != nil {
 					fmt.Fprintf(os.Stderr, "Error refreshing ColBERT mmap: %v\n", err)
 				}
+			}
+		}
+
+		if changed {
+			vecCount, err := idx.RebuildTQVectorStore(ctx)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error refreshing compact TQ-MSE vector store: %v\n", err)
+			} else {
+				fmt.Printf("Refreshed compact TQ-MSE vector store (%d vectors)\n", vecCount)
 			}
 		}
 	}
@@ -2116,6 +2151,9 @@ func (idx *Indexer) ExportVectorsToTQ(ctx context.Context, outputDir string) (in
 		return 0, fmt.Errorf("failed to export vectors: %w", err)
 	}
 	if len(chunkIDs) == 0 {
+		if err := store.RemoveTQVectorStore(outputDir); err != nil {
+			return 0, fmt.Errorf("remove stale TQ-MSE vector store: %w", err)
+		}
 		return 0, nil
 	}
 
