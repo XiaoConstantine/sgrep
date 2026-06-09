@@ -36,6 +36,19 @@ func FlushIfNeeded(ctx context.Context, s Storer) error {
 	return nil
 }
 
+// Checkpointer is an optional interface for stores that can checkpoint WAL data.
+type Checkpointer interface {
+	Checkpoint(ctx context.Context) error
+}
+
+// CheckpointIfNeeded checkpoints the store if supported.
+func CheckpointIfNeeded(ctx context.Context, s Storer) error {
+	if c, ok := s.(Checkpointer); ok {
+		return c.Checkpoint(ctx)
+	}
+	return nil
+}
+
 // FTS5Ensurer is an optional interface for stores that support FTS5.
 type FTS5Ensurer interface {
 	EnsureFTS5() error
@@ -68,6 +81,28 @@ type VectorExporter interface {
 	// ExportAllVectors returns all chunk IDs and their corresponding embeddings.
 	// This is used to export vectors to MMap format for zero-copy access.
 	ExportAllVectors(ctx context.Context) (chunkIDs []string, embeddings [][]float32, err error)
+}
+
+// DenseSearchResult is a vector-search hit before document hydration.
+type DenseSearchResult struct {
+	ID       string
+	Distance float64
+}
+
+// DenseVectorSearcher is an optional external vector artifact used for first-stage search.
+type DenseVectorSearcher interface {
+	Search(ctx context.Context, embedding []float32, limit int, threshold float64) ([]DenseSearchResult, error)
+	Close() error
+}
+
+// DocumentLoader hydrates chunks by ID while preserving metadata/content in the SQL store.
+type DocumentLoader interface {
+	LoadDocumentsByID(ctx context.Context, ids []string) (map[string]*Document, error)
+}
+
+// BM25Scorer exposes FTS scores without tying dense candidate generation to SQLite vectors.
+type BM25Scorer interface {
+	BM25Scores(ctx context.Context, queryTerms string) (map[string]float64, error)
 }
 
 // ChunkInfo contains minimal chunk data needed for ColBERT segment computation.

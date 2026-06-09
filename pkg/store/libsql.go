@@ -26,13 +26,15 @@ import (
 // - libsql_vector_idx() for DiskANN indexing
 // - vector_top_k() for approximate nearest neighbor search
 type LibSQLStore struct {
-	db           *sql.DB
-	dims         int
-	dbPath       string
-	quantize     QuantizationMode
-	colbertCodec ColBERTCodec
-	colbertPQ    *util.ProductQuantizer
-	colbertTQMSE *util.TQMSEQuantizer
+	db              *sql.DB
+	dims            int
+	dbPath          string
+	quantize        QuantizationMode
+	colbertCodec    ColBERTCodec
+	colbertPQ       *util.ProductQuantizer
+	colbertTQMSE    *util.TQMSEQuantizer
+	skipVectorCache bool
+	readOnly        bool
 
 	// In-memory cache for small datasets (< inMemoryThreshold)
 	memMu       sync.RWMutex
@@ -59,6 +61,20 @@ func WithLibSQLQuantization(mode QuantizationMode) LibSQLStoreOption {
 	}
 }
 
+// WithLibSQLSkipVectorCache avoids eager vector loading on open.
+func WithLibSQLSkipVectorCache(skip bool) LibSQLStoreOption {
+	return func(s *LibSQLStore) {
+		s.skipVectorCache = skip
+	}
+}
+
+// WithLibSQLReadOnly opens existing indexes without schema or vector-index mutations.
+func WithLibSQLReadOnly(readOnly bool) LibSQLStoreOption {
+	return func(s *LibSQLStore) {
+		s.readOnly = readOnly
+	}
+}
+
 // WithSegmentPooling enables segment pooling for ColBERT compression.
 // maxSegments: maximum segments to keep per chunk (default 5)
 // minSim: minimum similarity threshold for merging (default 0.90)
@@ -75,10 +91,19 @@ func OpenLibSQL(path string, opts ...LibSQLStoreOption) (*LibSQLStore, error) {
 		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
 
+	readOnly := libSQLReadOnlyOption(opts)
+
 	// libSQL uses "file:" prefix for local files
 	dsn := path
 	if !strings.HasPrefix(path, "file:") && !strings.HasPrefix(path, "libsql://") {
 		dsn = "file:" + path
+	}
+	if readOnly && strings.HasPrefix(dsn, "file:") {
+		if strings.Contains(dsn, "?") {
+			dsn += "&mode=ro"
+		} else {
+			dsn += "?mode=ro"
+		}
 	}
 
 	db, err := sql.Open("libsql", dsn)
@@ -115,19 +140,33 @@ func OpenLibSQL(path string, opts ...LibSQLStoreOption) (*LibSQLStore, error) {
 		return nil, err
 	}
 
-	if err := s.initSearchMode(); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	if err := s.reloadColBERTMetadata(context.Background()); err != nil {
-		_ = db.Close()
-		return nil, err
+	if !s.readOnly {
+		if err := s.initSearchMode(); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+		if err := s.reloadColBERTMetadata(context.Background()); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
 	}
 
 	return s, nil
 }
 
+func libSQLReadOnlyOption(opts []LibSQLStoreOption) bool {
+	probe := &LibSQLStore{}
+	for _, opt := range opts {
+		opt(probe)
+	}
+	return probe.readOnly
+}
+
 func (s *LibSQLStore) init() error {
+	if s.readOnly {
+		return s.initReadOnly()
+	}
+
 	// libSQL returns result rows for PRAGMA queries, so use Query instead of Exec
 	pragmas := []string{
 		"PRAGMA journal_mode=WAL",
@@ -210,6 +249,10 @@ func (s *LibSQLStore) init() error {
 
 	// Initialize FTS5 for hybrid search
 	return s.initFTS5()
+}
+
+func (s *LibSQLStore) initReadOnly() error {
+	return nil
 }
 
 // createVectorIndex creates the DiskANN index with appropriate compression.
@@ -435,7 +478,7 @@ func (s *LibSQLStore) initSearchMode() error {
 	atomic.StoreInt64(&s.vectorCount, count)
 
 	// Load vectors into memory for small datasets
-	if count < inMemoryThreshold && count > 0 {
+	if !s.skipVectorCache && count < inMemoryThreshold && count > 0 {
 		return s.loadVectorsToMemory()
 	}
 
@@ -814,11 +857,39 @@ func (s *LibSQLStore) loadDocuments(ctx context.Context, docIDs []string, result
 		return nil, nil, nil
 	}
 
-	placeholders := make([]string, len(results))
-	args := make([]interface{}, len(results))
+	ids := make([]string, len(results))
 	for i, r := range results {
+		ids[i] = docIDs[r.idx]
+	}
+	docsByID, err := s.LoadDocumentsByID(ctx, ids)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	docs := make([]*Document, 0, len(results))
+	distances := make([]float64, 0, len(results))
+	for i, r := range results {
+		if d, ok := docsByID[ids[i]]; ok {
+			docs = append(docs, d)
+			distances = append(distances, r.distance)
+		}
+	}
+
+	return docs, distances, nil
+}
+
+// LoadDocumentsByID hydrates documents by chunk ID for external vector indexes.
+func (s *LibSQLStore) LoadDocumentsByID(ctx context.Context, ids []string) (map[string]*Document, error) {
+	docsByID := make(map[string]*Document, len(ids))
+	if len(ids) == 0 {
+		return docsByID, nil
+	}
+
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
 		placeholders[i] = "?"
-		args[i] = docIDs[r.idx]
+		args[i] = id
 	}
 
 	query := fmt.Sprintf(`
@@ -829,18 +900,17 @@ func (s *LibSQLStore) loadDocuments(ctx context.Context, docIDs []string, result
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 
-	docsByID := make(map[string]*Document, len(results))
 	for rows.Next() {
 		var doc Document
 		var metadataStr string
 		var isTest int
 		if err := rows.Scan(&doc.ID, &doc.FilePath, &doc.Content,
 			&doc.StartLine, &doc.EndLine, &metadataStr, &isTest); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		if metadataStr != "" {
 			_ = json.Unmarshal([]byte(metadataStr), &doc.Metadata)
@@ -848,17 +918,37 @@ func (s *LibSQLStore) loadDocuments(ctx context.Context, docIDs []string, result
 		doc.IsTest = isTest == 1
 		docsByID[doc.ID] = &doc
 	}
+	return docsByID, rows.Err()
+}
 
-	docs := make([]*Document, 0, len(results))
-	distances := make([]float64, 0, len(results))
-	for _, r := range results {
-		if d, ok := docsByID[docIDs[r.idx]]; ok {
-			docs = append(docs, d)
-			distances = append(distances, r.distance)
-		}
+// BM25Scores returns FTS scores keyed by chunk ID.
+func (s *LibSQLStore) BM25Scores(ctx context.Context, queryTerms string) (map[string]float64, error) {
+	scores := make(map[string]float64)
+	if queryTerms == "" {
+		return scores, nil
 	}
-
-	return docs, distances, nil
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT d.id, bm25(documents_fts) AS score
+		FROM documents_fts f
+		JOIN documents d ON d.rowid = f.rowid
+		WHERE documents_fts MATCH ?
+	`, queryTerms)
+	if err != nil {
+		if strings.Contains(err.Error(), "fts5") {
+			return scores, nil
+		}
+		return nil, fmt.Errorf("BM25 query failed: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id string
+		var score float64
+		if err := rows.Scan(&id, &score); err != nil {
+			continue
+		}
+		scores[id] = score
+	}
+	return scores, rows.Err()
 }
 
 // HybridSearch combines vector search with FTS5 BM25.
@@ -883,29 +973,9 @@ func (s *LibSQLStore) HybridSearch(ctx context.Context, embedding []float32, que
 	}
 
 	// Get BM25 scores
-	bm25Scores := make(map[string]float64)
-	bm25Query := `
-		SELECT d.id, bm25(documents_fts) AS score
-		FROM documents_fts f
-		JOIN documents d ON d.rowid = f.rowid
-		WHERE documents_fts MATCH ?
-	`
-	rows, err := s.db.QueryContext(ctx, bm25Query, queryTerms)
+	bm25Scores, err := s.BM25Scores(ctx, queryTerms)
 	if err != nil {
-		if strings.Contains(err.Error(), "fts5") {
-			return s.Search(ctx, embedding, limit, threshold)
-		}
-		return nil, nil, fmt.Errorf("BM25 query failed: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	for rows.Next() {
-		var id string
-		var score float64
-		if err := rows.Scan(&id, &score); err != nil {
-			continue
-		}
-		bm25Scores[id] = score
+		return s.Search(ctx, embedding, limit, threshold)
 	}
 
 	// Compute hybrid scores
@@ -1002,6 +1072,11 @@ func (s *LibSQLStore) Stats(ctx context.Context) (*Stats, error) {
 	if info, err := os.Stat(s.dbPath); err == nil {
 		stats.SizeBytes = info.Size()
 	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if info, err := os.Stat(s.dbPath + suffix); err == nil {
+			stats.SizeBytes += info.Size()
+		}
+	}
 
 	return &stats, nil
 }
@@ -1043,7 +1118,7 @@ func (s *LibSQLStore) VectorCount() int64 {
 func (s *LibSQLStore) ExportAllVectors(ctx context.Context) ([]string, [][]float32, error) {
 	// First try in-memory cache if available
 	s.memMu.RLock()
-	if len(s.vectors) > 0 && len(s.docIDs) == len(s.vectors) {
+	if len(s.vectors) > 0 && len(s.docIDs) == len(s.vectors) && int64(len(s.vectors)) == atomic.LoadInt64(&s.vectorCount) {
 		// Make copies to avoid holding lock
 		ids := make([]string, len(s.docIDs))
 		vecs := make([][]float32, len(s.vectors))
@@ -1093,6 +1168,15 @@ func (s *LibSQLStore) ExportAllVectors(ctx context.Context) ([]string, [][]float
 // Close closes the database.
 func (s *LibSQLStore) Close() error {
 	return s.db.Close()
+}
+
+// Checkpoint flushes WAL data into the main DB and truncates sidecar growth.
+func (s *LibSQLStore) Checkpoint(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`)
+	if err != nil {
+		return err
+	}
+	return rows.Close()
 }
 
 // DB returns the underlying database connection for direct queries.

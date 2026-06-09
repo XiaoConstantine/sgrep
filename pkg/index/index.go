@@ -189,6 +189,11 @@ func (idx *Indexer) RepoDir() string {
 	return idx.repoDir
 }
 
+// Checkpoint flushes store sidecar state when the backend supports it.
+func (idx *Indexer) Checkpoint(ctx context.Context) error {
+	return store.CheckpointIfNeeded(ctx, idx.store)
+}
+
 // getSgrepHome returns the sgrep home directory (~/.sgrep).
 func getSgrepHome() (string, error) {
 	// Check SGREP_HOME env var first
@@ -2097,6 +2102,28 @@ func (idx *Indexer) ExportVectorsToMMap(ctx context.Context, outputDir string) (
 	}
 
 	return mmapStore.VectorCount(), nil
+}
+
+// ExportVectorsToTQ exports all chunk vector embeddings to a compact TQ-MSE store.
+func (idx *Indexer) ExportVectorsToTQ(ctx context.Context, outputDir string) (int, error) {
+	exporter, ok := idx.store.(store.VectorExporter)
+	if !ok {
+		return 0, fmt.Errorf("store does not support vector export")
+	}
+
+	chunkIDs, embeddings, err := exporter.ExportAllVectors(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to export vectors: %w", err)
+	}
+	if len(chunkIDs) == 0 {
+		return 0, nil
+	}
+
+	return store.BuildTQVectorStore(ctx, outputDir, chunkIDs, embeddings, store.TQVectorBuildOptions{
+		Dims: colbertEmbeddingDims(),
+		Bits: colbertTQMSEBits,
+		Seed: colbertTQMSESeed,
+	})
 }
 
 func (idx *Indexer) useAdaptiveColBERTSegments() bool {

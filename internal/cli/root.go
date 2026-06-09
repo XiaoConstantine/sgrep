@@ -347,13 +347,16 @@ var indexCmd = &cobra.Command{
 			return err
 		}
 
-		// Export vectors to MMap for faster search
-		fmt.Println("\nExporting vectors to MMap store...")
-		vecCount, err := indexer.ExportVectorsToMMap(ctx, indexer.RepoDir())
+		// Export vectors to compact TQ-MSE store for faster, smaller first-stage search.
+		fmt.Println("\nExporting vectors to compact TQ-MSE store...")
+		vecCount, err := indexer.ExportVectorsToTQ(ctx, indexer.RepoDir())
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to export vectors to MMap: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Warning: failed to export vectors to compact TQ-MSE store: %v\n", err)
 		} else {
-			fmt.Printf("Exported %d vectors to MMap store\n", vecCount)
+			fmt.Printf("Exported %d vectors to compact TQ-MSE store\n", vecCount)
+			if err := os.Remove(filepath.Join(indexer.RepoDir(), "vectors.mmap")); err != nil && !os.IsNotExist(err) {
+				fmt.Fprintf(os.Stderr, "Warning: failed to remove legacy vectors.mmap: %v\n", err)
+			}
 		}
 
 		// Pre-compute ColBERT segments if requested
@@ -373,6 +376,10 @@ var indexCmd = &cobra.Command{
 			} else {
 				fmt.Printf("Exported %d segments to MMap store\n", segCount)
 			}
+		}
+
+		if err := indexer.Checkpoint(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to checkpoint index: %v\n", err)
 		}
 
 		return nil
