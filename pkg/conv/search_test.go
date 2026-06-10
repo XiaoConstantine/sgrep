@@ -1,6 +1,8 @@
 package conv
 
 import (
+	"context"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -139,6 +141,50 @@ func TestDeduplicateBySession(t *testing.T) {
 	}
 	if !session2Found {
 		t.Error("session-2 not found in deduplicated results")
+	}
+}
+
+func TestSearcherExactUsesKeywordSearchWithoutEmbedder(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(tmpDir, "test.db"), Dims: defaultDims})
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+	session := &Session{
+		ID:          "session-auth",
+		Agent:       AgentClaudeCode,
+		ProjectPath: "/repo/auth",
+		ProjectName: "auth",
+		StartedAt:   time.Now(),
+		EndedAt:     time.Now(),
+		Turns: []Turn{
+			{Index: 0, UserContent: "How do I implement authentication?", AssistContent: "Use JWT tokens for authentication."},
+		},
+	}
+	if err := store.StoreSession(ctx, session); err != nil {
+		t.Fatalf("failed to store session: %v", err)
+	}
+
+	searcher := NewSearcher(store, nil)
+	opts := DefaultSearchOptions()
+	opts.ExactMatch = true
+	opts.Limit = 5
+
+	response, err := searcher.Search(ctx, "authentication", opts)
+	if err != nil {
+		t.Fatalf("exact search failed: %v", err)
+	}
+	if len(response.Results) != 1 {
+		t.Fatalf("expected 1 exact result, got %d", len(response.Results))
+	}
+	if response.Results[0].SessionID != "session-auth" {
+		t.Fatalf("expected session-auth, got %s", response.Results[0].SessionID)
+	}
+	if response.Results[0].MatchType != "keyword" {
+		t.Fatalf("expected keyword match type, got %q", response.Results[0].MatchType)
 	}
 }
 

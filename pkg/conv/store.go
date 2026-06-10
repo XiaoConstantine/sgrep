@@ -50,28 +50,14 @@ func NewStore(cfg StoreConfig) (*Store, error) {
 		return nil, fmt.Errorf("failed to create store directory: %w", err)
 	}
 
-	// Build DSN based on driver
-	dsn := cfg.DBPath
-	if sqliteDriverName == "libsql" && !strings.HasPrefix(dsn, "file:") {
-		dsn = "file:" + dsn
-	}
-
-	// Open database
-	db, err := sql.Open(sqliteDriverName, dsn)
+	store, err := openStore(cfg.DBPath, cfg.Dims, false)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
-	}
-
-	store := &Store{
-		db:       db,
-		dbPath:   cfg.DBPath,
-		dims:     cfg.Dims,
-		mmapPath: filepath.Join(filepath.Dir(cfg.DBPath), "embeddings.mmap"),
+		return nil, err
 	}
 
 	// Initialize schema
 	if err := store.initSchema(); err != nil {
-		_ = db.Close()
+		_ = store.Close()
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
 	}
 
@@ -80,22 +66,58 @@ func NewStore(cfg StoreConfig) (*Store, error) {
 
 // OpenStore opens an existing store.
 func OpenStore(dbPath string) (*Store, error) {
+	return openStore(dbPath, defaultDims, false)
+}
+
+// OpenStoreReadOnly opens an existing store without running schema migrations or writer pragmas.
+// The connection is set to query_only mode so read commands cannot accidentally mutate the DB.
+func OpenStoreReadOnly(dbPath string) (*Store, error) {
+	store, err := openStore(dbPath, defaultDims, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := store.applyReadPragmas(); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+func openStore(dbPath string, dims int, existingOnly bool) (*Store, error) {
+	if dims == 0 {
+		dims = defaultDims
+	}
+
 	dsn := dbPath
-	if sqliteDriverName == "libsql" && !strings.HasPrefix(dsn, "file:") {
+	if (sqliteDriverName == "libsql" || existingOnly) &&
+		!strings.HasPrefix(dsn, "file:") &&
+		!strings.HasPrefix(dsn, "libsql://") {
 		dsn = "file:" + dsn
+	}
+	if existingOnly && strings.HasPrefix(dsn, "file:") {
+		dsn = appendDSNParam(dsn, "mode", "rw")
 	}
 
 	db, err := sql.Open(sqliteDriverName, dsn)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
+	db.SetMaxOpenConns(1)
 
 	return &Store{
 		db:       db,
 		dbPath:   dbPath,
-		dims:     defaultDims,
+		dims:     dims,
 		mmapPath: filepath.Join(filepath.Dir(dbPath), "embeddings.mmap"),
 	}, nil
+}
+
+func appendDSNParam(dsn, key, value string) string {
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	return dsn + sep + key + "=" + value
 }
 
 // Close closes the store.
@@ -218,21 +240,40 @@ func (s *Store) applyPragmas() error {
 	}
 
 	for _, pragma := range pragmas {
-		if sqliteDriverName == "libsql" {
-			rows, err := s.db.Query(pragma)
-			if err != nil {
-				return fmt.Errorf("failed to set pragma %q: %w", pragma, err)
-			}
-			_ = rows.Close()
-			continue
-		}
-
-		if _, err := s.db.Exec(pragma); err != nil {
+		if err := s.execPragma(pragma); err != nil {
 			return fmt.Errorf("failed to set pragma %q: %w", pragma, err)
 		}
 	}
 
 	return nil
+}
+
+func (s *Store) applyReadPragmas() error {
+	pragmas := []string{
+		"PRAGMA busy_timeout=10000",
+		"PRAGMA temp_store=MEMORY",
+		"PRAGMA cache_size=-50000",
+		"PRAGMA query_only=ON",
+	}
+	for _, pragma := range pragmas {
+		if err := s.execPragma(pragma); err != nil {
+			return fmt.Errorf("failed to set pragma %q: %w", pragma, err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) execPragma(pragma string) error {
+	if sqliteDriverName == "libsql" {
+		rows, err := s.db.Query(pragma)
+		if err != nil {
+			return err
+		}
+		return rows.Close()
+	}
+
+	_, err := s.db.Exec(pragma)
+	return err
 }
 
 func (s *Store) dropLegacyVectorIndex() (bool, error) {
@@ -462,6 +503,7 @@ type SearchResult struct {
 	Score         float64
 	UserContent   string
 	AssistContent string
+	MatchType     string
 }
 
 // VectorSearch performs vector similarity search on turn embeddings.
@@ -500,6 +542,7 @@ func (s *Store) VectorSearch(ctx context.Context, embedding []float32, limit int
 		similarity := cosineSimilarity(embedding, docEmb)
 		if similarity >= threshold {
 			r.Score = similarity
+			r.MatchType = "semantic"
 			results = append(results, r)
 		}
 	}
@@ -598,6 +641,7 @@ func (s *Store) HybridSearch(ctx context.Context, embedding []float32, queryTerm
 	var results []SearchResult
 	for turnID, result := range combined {
 		result.Score = rrfScores[turnID]
+		result.MatchType = "hybrid"
 		results = append(results, *result)
 	}
 
@@ -616,33 +660,7 @@ func (s *Store) HybridSearch(ctx context.Context, embedding []float32, queryTerm
 // FilteredSearch performs search with filters.
 func (s *Store) FilteredSearch(ctx context.Context, embedding []float32, opts SearchOptions) ([]SearchResult, error) {
 	// Build WHERE clause for filters
-	var conditions []string
-	var args []interface{}
-
-	if opts.Agent != AgentAll {
-		if opts.Agent == AgentPiMono {
-			conditions = append(conditions, "(sess.agent = ? OR sess.agent = ?)")
-			args = append(args, AgentPiMono, "pi-mono")
-		} else {
-			conditions = append(conditions, "sess.agent = ?")
-			args = append(args, opts.Agent)
-		}
-	}
-
-	if opts.Project != "" {
-		conditions = append(conditions, "(sess.project_name LIKE ? OR sess.project_path LIKE ?)")
-		args = append(args, "%"+opts.Project+"%", "%"+opts.Project+"%")
-	}
-
-	if !opts.Since.IsZero() {
-		conditions = append(conditions, "sess.started_at >= ?")
-		args = append(args, opts.Since)
-	}
-
-	if !opts.Before.IsZero() {
-		conditions = append(conditions, "sess.started_at <= ?")
-		args = append(args, opts.Before)
-	}
+	conditions, args := buildSessionFilters(opts, "sess")
 
 	whereClause := ""
 	if len(conditions) > 0 {
@@ -683,6 +701,7 @@ func (s *Store) FilteredSearch(ctx context.Context, embedding []float32, opts Se
 		similarity := cosineSimilarity(embedding, docEmb)
 		if similarity >= opts.Threshold {
 			r.Score = similarity
+			r.MatchType = "semantic"
 			results = append(results, r)
 		}
 	}
@@ -697,6 +716,88 @@ func (s *Store) FilteredSearch(ctx context.Context, embedding []float32, opts Se
 	}
 
 	return results, rows.Err()
+}
+
+// KeywordSearch performs FTS-only conversation search for exact keyword mode.
+func (s *Store) KeywordSearch(ctx context.Context, queryTerms string, opts SearchOptions) ([]SearchResult, error) {
+	if strings.TrimSpace(queryTerms) == "" || opts.Limit <= 0 {
+		return nil, nil
+	}
+
+	conditions, args := buildSessionFilters(opts, "sess")
+	whereParts := append([]string{"conv_turns_fts MATCH ?"}, conditions...)
+	queryArgs := make([]interface{}, 0, len(args)+2)
+	queryArgs = append(queryArgs, queryTerms)
+	queryArgs = append(queryArgs, args...)
+	queryArgs = append(queryArgs, opts.Limit)
+
+	query := fmt.Sprintf(`
+		SELECT
+			t.id,
+			t.session_id,
+			t.turn_index,
+			t.user_content,
+			t.assistant_content,
+			bm25(conv_turns_fts) as bm25_score
+		FROM conv_turns_fts fts
+		JOIN conv_turns t ON t.rowid = fts.rowid
+		JOIN conv_sessions sess ON t.session_id = sess.id
+		WHERE %s
+		ORDER BY bm25_score
+		LIMIT ?
+	`, strings.Join(whereParts, " AND "))
+
+	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var results []SearchResult
+	for rows.Next() {
+		var r SearchResult
+		var bm25Score float64
+		if err := rows.Scan(&r.TurnID, &r.SessionID, &r.TurnIndex, &r.UserContent, &r.AssistContent, &bm25Score); err != nil {
+			return nil, err
+		}
+		r.Score = 1.0 / float64(len(results)+1)
+		r.MatchType = "keyword"
+		results = append(results, r)
+	}
+
+	return results, rows.Err()
+}
+
+func buildSessionFilters(opts SearchOptions, alias string) ([]string, []interface{}) {
+	var conditions []string
+	var args []interface{}
+
+	if opts.Agent != AgentAll {
+		if opts.Agent == AgentPiMono {
+			conditions = append(conditions, fmt.Sprintf("(%s.agent = ? OR %s.agent = ?)", alias, alias))
+			args = append(args, AgentPiMono, "pi-mono")
+		} else {
+			conditions = append(conditions, fmt.Sprintf("%s.agent = ?", alias))
+			args = append(args, opts.Agent)
+		}
+	}
+
+	if opts.Project != "" {
+		conditions = append(conditions, fmt.Sprintf("(%s.project_name LIKE ? OR %s.project_path LIKE ?)", alias, alias))
+		args = append(args, "%"+opts.Project+"%", "%"+opts.Project+"%")
+	}
+
+	if !opts.Since.IsZero() {
+		conditions = append(conditions, fmt.Sprintf("%s.started_at >= ?", alias))
+		args = append(args, opts.Since)
+	}
+
+	if !opts.Before.IsZero() {
+		conditions = append(conditions, fmt.Sprintf("%s.started_at <= ?", alias))
+		args = append(args, opts.Before)
+	}
+
+	return conditions, args
 }
 
 // GetStats returns index statistics.

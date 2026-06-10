@@ -134,11 +134,8 @@ func (idx *Indexer) indexSession(ctx context.Context, session *Session) error {
 
 	// Skip embedding if no embedder
 	if idx.embedder == nil {
-		fmt.Println("DEBUG: embedder is nil, skipping embeddings")
 		return nil
 	}
-
-	fmt.Printf("DEBUG: processing %d chunks for embeddings\n", len(chunks))
 
 	// Batch process embeddings
 	batchSize := 10
@@ -162,13 +159,10 @@ func (idx *Indexer) indexSession(ctx context.Context, session *Session) error {
 			return fmt.Errorf("failed to generate embeddings: %w", err)
 		}
 
-		fmt.Printf("DEBUG: got %d embeddings, storing...\n", len(embeddings))
-
 		// Store embeddings
 		if err := idx.store.StoreTurnEmbeddingBatch(ctx, turnIDs, embeddings); err != nil {
 			return fmt.Errorf("failed to store embeddings: %w", err)
 		}
-		fmt.Println("DEBUG: stored embeddings successfully")
 	}
 
 	return nil

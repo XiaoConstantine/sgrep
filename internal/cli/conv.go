@@ -178,6 +178,7 @@ func init() {
 	// View flags
 	convViewCmd.Flags().IntVarP(&convTurn, "turn", "n", -1, "Jump to specific turn")
 	convViewCmd.Flags().BoolVar(&convJSON, "json", false, "Output as JSON")
+	convViewCmd.Flags().BoolVar(&convNoColor, "no-color", false, "Disable colored output")
 
 	// Resume flags
 	convResumeCmd.Flags().IntVar(&convResumeFrom, "from", -1, "Resume from specific turn")
@@ -242,14 +243,16 @@ func runConvSearch(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
 	// Open conversation store
-	store, err := openConvStore()
+	store, err := openConvStoreReadOnly()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = store.Close() }()
 
-	// Create embedder
-	embedder := embed.New()
+	var embedder *embed.Embedder
+	if !convExact {
+		embedder = embed.New()
+	}
 
 	// Create searcher
 	searcher := conv.NewSearcher(store, embedder)
@@ -302,7 +305,7 @@ func runConvView(cmd *cobra.Command, args []string) error {
 	sessionID := args[0]
 	ctx := context.Background()
 
-	store, err := openConvStore()
+	store, err := openConvStoreReadOnly()
 	if err != nil {
 		return err
 	}
@@ -345,7 +348,7 @@ func runConvResume(cmd *cobra.Command, args []string) error {
 	sessionID := args[0]
 	ctx := context.Background()
 
-	store, err := openConvStore()
+	store, err := openConvStoreReadOnly()
 	if err != nil {
 		return err
 	}
@@ -374,7 +377,7 @@ func runConvContext(cmd *cobra.Command, args []string) error {
 	sessionID := args[0]
 	ctx := context.Background()
 
-	store, err := openConvStore()
+	store, err := openConvStoreReadOnly()
 	if err != nil {
 		return err
 	}
@@ -407,7 +410,7 @@ func runConvExport(cmd *cobra.Command, args []string) error {
 	sessionID := args[0]
 	ctx := context.Background()
 
-	store, err := openConvStore()
+	store, err := openConvStoreReadOnly()
 	if err != nil {
 		return err
 	}
@@ -438,7 +441,7 @@ func runConvCopy(cmd *cobra.Command, args []string) error {
 	sessionID := args[0]
 	ctx := context.Background()
 
-	store, err := openConvStore()
+	store, err := openConvStoreReadOnly()
 	if err != nil {
 		return err
 	}
@@ -576,7 +579,7 @@ func runConvIndex(cmd *cobra.Command, args []string) error {
 func runConvStatus(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
-	store, err := openConvStore()
+	store, err := openConvStoreReadOnly()
 	if err != nil {
 		fmt.Println("No conversation index found.")
 		fmt.Println("Run 'sgrep conv index' to create one.")
@@ -613,6 +616,11 @@ func runConvStatus(cmd *cobra.Command, args []string) error {
 func openConvStore() (*conv.Store, error) {
 	cfg := conv.DefaultStoreConfig()
 	return conv.NewStore(cfg)
+}
+
+func openConvStoreReadOnly() (*conv.Store, error) {
+	cfg := conv.DefaultStoreConfig()
+	return conv.OpenStoreReadOnly(cfg.DBPath)
 }
 
 func outputConvResults(response *conv.SearchResponse) error {

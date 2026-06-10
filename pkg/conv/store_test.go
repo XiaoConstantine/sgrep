@@ -80,6 +80,55 @@ func TestNewStore_DropsLegacyVectorIndexArtifacts(t *testing.T) {
 	}
 }
 
+func TestOpenStoreReadOnlyDoesNotCreateOrWrite(t *testing.T) {
+	tmpDir := t.TempDir()
+	missingPath := filepath.Join(tmpDir, "missing.db")
+	if store, err := OpenStoreReadOnly(missingPath); err == nil {
+		_ = store.Close()
+		t.Fatal("OpenStoreReadOnly succeeded for missing database")
+	}
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	store, err := NewStore(StoreConfig{DBPath: dbPath, Dims: defaultDims})
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	ctx := context.Background()
+	session := &Session{
+		ID:        "readable-session",
+		Agent:     AgentClaudeCode,
+		StartedAt: time.Now(),
+		EndedAt:   time.Now(),
+		Turns:     []Turn{{Index: 0, UserContent: "hello", AssistContent: "world"}},
+	}
+	if err := store.StoreSession(ctx, session); err != nil {
+		t.Fatalf("failed to store session: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("failed to close writable store: %v", err)
+	}
+
+	readStore, err := OpenStoreReadOnly(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open read-only store: %v", err)
+	}
+	defer func() { _ = readStore.Close() }()
+
+	if _, err := readStore.GetSession(ctx, "readable-session"); err != nil {
+		t.Fatalf("failed to read existing session: %v", err)
+	}
+	err = readStore.StoreSession(ctx, &Session{
+		ID:        "write-should-fail",
+		Agent:     AgentClaudeCode,
+		StartedAt: time.Now(),
+		Turns:     []Turn{{Index: 0, UserContent: "write", AssistContent: "blocked"}},
+	})
+	if err == nil {
+		t.Fatal("StoreSession succeeded on read-only store")
+	}
+}
+
 func TestStore_StoreAndGetSession(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
@@ -322,6 +371,65 @@ func TestStore_FullTextSearch(t *testing.T) {
 	}
 	if !authFound {
 		t.Log("Note: FTS search for 'authentication' may need actual term matching")
+	}
+}
+
+func TestKeywordSearchAppliesFiltersAndLabelsResults(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := NewStore(StoreConfig{DBPath: dbPath, Dims: defaultDims})
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+	sessions := []*Session{
+		{
+			ID:          "session-auth-claude",
+			Agent:       AgentClaudeCode,
+			ProjectPath: "/repo/auth",
+			ProjectName: "auth",
+			StartedAt:   time.Now(),
+			EndedAt:     time.Now(),
+			Turns: []Turn{
+				{Index: 0, UserContent: "authentication authentication", AssistContent: "Use JWT authentication."},
+			},
+		},
+		{
+			ID:          "session-auth-codex",
+			Agent:       AgentCodexCLI,
+			ProjectPath: "/repo/auth",
+			ProjectName: "auth",
+			StartedAt:   time.Now(),
+			EndedAt:     time.Now(),
+			Turns: []Turn{
+				{Index: 0, UserContent: "authentication", AssistContent: "Use session cookies."},
+			},
+		},
+	}
+	for _, session := range sessions {
+		if err := store.StoreSession(ctx, session); err != nil {
+			t.Fatalf("failed to store session: %v", err)
+		}
+	}
+
+	results, err := store.KeywordSearch(ctx, "authentication", SearchOptions{
+		Limit: 10,
+		Agent: AgentClaudeCode,
+	})
+	if err != nil {
+		t.Fatalf("KeywordSearch failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 filtered result, got %d", len(results))
+	}
+	if results[0].SessionID != "session-auth-claude" {
+		t.Fatalf("expected claude session, got %s", results[0].SessionID)
+	}
+	if results[0].MatchType != "keyword" {
+		t.Fatalf("expected keyword match type, got %q", results[0].MatchType)
 	}
 }
 
