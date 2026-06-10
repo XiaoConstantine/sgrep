@@ -288,6 +288,45 @@ func TestBufferedStore_DeleteByPath(t *testing.T) {
 	}
 }
 
+func TestBufferedStore_PruneIndexRemovesStaleChunks(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	s, err := OpenBuffered(dbPath)
+	if err != nil {
+		t.Fatalf("OpenBuffered failed: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	ctx := context.Background()
+	docs := []*Document{
+		{ID: "file1.go:chunk_1", FilePath: "file1.go", Content: "func a() {}", StartLine: 1, EndLine: 1, Embedding: makeTestEmbedding(768, 0.1)},
+		{ID: "file1.go:chunk_2", FilePath: "file1.go", Content: "func b() {}", StartLine: 2, EndLine: 2, Embedding: makeTestEmbedding(768, 0.2)},
+		{ID: "file2.go:chunk_1", FilePath: "file2.go", Content: "func c() {}", StartLine: 1, EndLine: 1, Embedding: makeTestEmbedding(768, 0.3)},
+	}
+	if err := s.StoreBatch(ctx, docs); err != nil {
+		t.Fatalf("StoreBatch failed: %v", err)
+	}
+	if err := s.Flush(ctx); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+
+	if err := s.PruneIndex(ctx, []string{"file1.go:chunk_1"}, []string{"file1.go"}); err != nil {
+		t.Fatalf("PruneIndex failed: %v", err)
+	}
+
+	var docCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM documents`).Scan(&docCount); err != nil {
+		t.Fatalf("query documents failed: %v", err)
+	}
+	if docCount != 1 {
+		t.Fatalf("documents = %d, want 1", docCount)
+	}
+	if s.VectorCount() != 1 {
+		t.Fatalf("vector count = %d, want 1", s.VectorCount())
+	}
+}
+
 func TestBufferedStore_Stats(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")

@@ -351,6 +351,10 @@ of truth for chunk content, metadata, and FTS/BM25.
 - Keeps the legacy SQL vector path available with `sgrep index --sql-vectors`
 - Falls back to SQL vector search only when compact artifacts are missing and SQL vectors exist
 
+`sgrep watch` keeps SQL vectors as its incremental-update backing store so it
+can refresh compact TQ-MSE sidecars after file changes. Run `sgrep index` again
+when you want to re-compact the index after a long watch session.
+
 ## Commands
 
 | Command | Description |

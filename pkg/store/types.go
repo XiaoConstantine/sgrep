@@ -38,6 +38,11 @@ type IndexResetter interface {
 	ResetIndex(ctx context.Context) error
 }
 
+// IndexPruner removes rows that were not seen during a completed full index.
+type IndexPruner interface {
+	PruneIndex(ctx context.Context, liveIDs []string, livePaths []string) error
+}
+
 // Flusher is an optional interface for stores that buffer writes.
 type Flusher interface {
 	Flush(ctx context.Context) error

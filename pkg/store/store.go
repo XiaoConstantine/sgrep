@@ -406,6 +406,35 @@ func (s *Store) ResetIndex(ctx context.Context) error {
 	return tx.Commit()
 }
 
+// PruneIndex removes stale rows after a successful full index has written the live set.
+func (s *Store) PruneIndex(ctx context.Context, liveIDs []string, livePaths []string) error {
+	_ = livePaths
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := populateTempSet(ctx, tx, "_sgrep_live_doc_ids", "id", liveIDs); err != nil {
+		return err
+	}
+
+	staleIDs, err := staleDocumentIDs(ctx, tx)
+	if err != nil {
+		return err
+	}
+	for _, id := range staleIDs {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM vec_embeddings WHERE doc_id = ?`, id); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE id = ?`, id); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
 // Search finds similar documents to the query embedding.
 // Uses two-phase search: KNN first, then load documents.
 func (s *Store) Search(ctx context.Context, embedding []float32, limit int, threshold float64) ([]*Document, []float64, error) {

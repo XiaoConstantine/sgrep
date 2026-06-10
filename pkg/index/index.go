@@ -13,6 +13,7 @@ import (
 	pathpkg "path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -425,17 +426,6 @@ func (idx *Indexer) Index(ctx context.Context) error {
 
 	fmt.Printf("Found %d files to index\n", len(files))
 
-	if resetter, ok := idx.store.(store.IndexResetter); ok {
-		resetTimer := util.NewTimer("reset_index")
-		if err := resetter.ResetIndex(ctx); err != nil {
-			return fmt.Errorf("reset existing index: %w", err)
-		}
-		resetDuration := resetTimer.Stop()
-		if resetDuration > time.Millisecond {
-			stats.RecordStage("reset_index", resetDuration, 1)
-		}
-	}
-
 	// === Three-stage pipeline with global batching ===
 	// Stage 1: File readers (parallel) - read files and chunk them
 	// Stage 2: Embedding batcher (single goroutine) - collect chunks and batch embed
@@ -455,17 +445,23 @@ func (idx *Indexer) Index(ctx context.Context) error {
 	var batcherWg sync.WaitGroup
 	var writerWg sync.WaitGroup
 	var chunkEmbedWall atomic.Int64
+	var liveMu sync.Mutex
+	liveIDs := make(map[string]struct{})
+	livePaths := make(map[string]struct{})
 
 	// Stage 3: Single DB writer goroutine
 	// Note: This goroutine exits when docChan is closed (done after embedWg.Wait())
 	writerWg.Go(func() {
 		for docs := range docChan {
 			writeTimer := util.NewTimer("db_write")
-			if err := idx.storeIndexBatch(ctx, docs); err != nil {
+			err := idx.storeIndexBatch(ctx, docs)
+			writeDuration := writeTimer.Stop()
+			if err != nil {
 				atomic.AddInt64(&idx.errors, 1)
 				fmt.Fprintf(os.Stderr, "Error storing batch: %v\n", err)
+				continue
 			}
-			writeDuration := writeTimer.Stop()
+			recordLiveDocuments(liveIDs, livePaths, &liveMu, docs)
 			stats.RecordOp("db_write", writeDuration, int64(len(docs)))
 		}
 	})
@@ -620,6 +616,20 @@ func (idx *Indexer) Index(ctx context.Context) error {
 		stats.RecordStage("flush", flushDuration, 1)
 	}
 
+	if atomic.LoadInt64(&idx.errors) == 0 {
+		pruneTimer := util.NewTimer("prune_index")
+		pruned, err := idx.pruneStaleIndex(ctx, liveIDs, livePaths)
+		if err != nil {
+			return fmt.Errorf("prune stale index rows: %w", err)
+		}
+		pruneDuration := pruneTimer.Stop()
+		if pruned && pruneDuration > time.Millisecond {
+			stats.RecordStage("prune_index", pruneDuration, 1)
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "Warning: skipped stale index cleanup because indexing had errors")
+	}
+
 	if idx.compactTQ != nil {
 		tqTimer := util.NewTimer("compact_tq_export")
 		chunkCount, fileCount, err := idx.compactTQ.Write(ctx, idx.repoDir)
@@ -661,6 +671,39 @@ func (idx *Indexer) Index(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func recordLiveDocuments(liveIDs, livePaths map[string]struct{}, mu *sync.Mutex, docs []*store.Document) {
+	mu.Lock()
+	defer mu.Unlock()
+	for _, doc := range docs {
+		if doc == nil {
+			continue
+		}
+		if doc.ID != "" {
+			liveIDs[doc.ID] = struct{}{}
+		}
+		if doc.FilePath != "" {
+			livePaths[doc.FilePath] = struct{}{}
+		}
+	}
+}
+
+func (idx *Indexer) pruneStaleIndex(ctx context.Context, liveIDs, livePaths map[string]struct{}) (bool, error) {
+	pruner, ok := idx.store.(store.IndexPruner)
+	if !ok {
+		return false, nil
+	}
+	return true, pruner.PruneIndex(ctx, sortedSet(liveIDs), sortedSet(livePaths))
+}
+
+func sortedSet(set map[string]struct{}) []string {
+	values := make([]string, 0, len(set))
+	for value := range set {
+		values = append(values, value)
+	}
+	sort.Strings(values)
+	return values
 }
 
 func (idx *Indexer) storeIndexBatch(ctx context.Context, docs []*store.Document) error {

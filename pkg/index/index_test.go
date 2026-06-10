@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -204,6 +205,18 @@ func (s *tqExportTestStore) Checkpoint(context.Context) error {
 	return nil
 }
 
+type pruneIndexTestStore struct {
+	tqExportTestStore
+	liveIDs   []string
+	livePaths []string
+}
+
+func (s *pruneIndexTestStore) PruneIndex(ctx context.Context, liveIDs []string, livePaths []string) error {
+	s.liveIDs = append([]string(nil), liveIDs...)
+	s.livePaths = append([]string(nil), livePaths...)
+	return nil
+}
+
 func TestGetSgrepHome(t *testing.T) {
 	t.Run("from_env", func(t *testing.T) {
 		t.Setenv("SGREP_HOME", "/custom/path")
@@ -310,6 +323,28 @@ func TestIndexer_Fields(t *testing.T) {
 	idx := &Indexer{rootPath: "/test", processed: 5, errors: 2}
 	if idx.rootPath != "/test" || idx.processed != 5 || idx.errors != 2 {
 		t.Error("field issue")
+	}
+}
+
+func TestPruneStaleIndexPassesSortedLiveSets(t *testing.T) {
+	fake := &pruneIndexTestStore{}
+	idx := &Indexer{store: fake}
+
+	pruned, err := idx.pruneStaleIndex(context.Background(),
+		map[string]struct{}{"b.go:chunk_1": {}, "a.go:chunk_1": {}},
+		map[string]struct{}{"b.go": {}, "a.go": {}},
+	)
+	if err != nil {
+		t.Fatalf("pruneStaleIndex failed: %v", err)
+	}
+	if !pruned {
+		t.Fatal("expected pruneStaleIndex to use store pruner")
+	}
+	if want := []string{"a.go:chunk_1", "b.go:chunk_1"}; !reflect.DeepEqual(fake.liveIDs, want) {
+		t.Fatalf("live IDs = %v, want %v", fake.liveIDs, want)
+	}
+	if want := []string{"a.go", "b.go"}; !reflect.DeepEqual(fake.livePaths, want) {
+		t.Fatalf("live paths = %v, want %v", fake.livePaths, want)
 	}
 }
 

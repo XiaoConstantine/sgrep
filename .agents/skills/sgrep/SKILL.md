@@ -38,6 +38,9 @@ sgrep index .
 # Legacy compatibility: also persist full SQL vectors
 sgrep index . --sql-vectors
 
+# Watch mode keeps SQL vectors for incremental updates; rerun index to compact
+sgrep watch .
+
 # Semantic code search
 sgrep "database connection pooling"
 sgrep "how are errors handled"

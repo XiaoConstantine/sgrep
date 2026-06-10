@@ -506,6 +506,94 @@ func TestLibSQLStore_DeleteByPath_RemovesLateInteractionArtifacts(t *testing.T) 
 	}
 }
 
+func TestLibSQLStore_PruneIndexPreservesLiveColBERTSegments(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	s, err := OpenLibSQL(dbPath)
+	if err != nil {
+		t.Fatalf("OpenLibSQL failed: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	ctx := context.Background()
+	docs := []*Document{
+		{
+			ID:        "file1.go:chunk_1",
+			FilePath:  "file1.go",
+			Content:   "func first() {}",
+			StartLine: 1,
+			EndLine:   1,
+			Embedding: makeTestEmbedding(768, 0.1),
+		},
+		{
+			ID:        "file2.go:chunk_1",
+			FilePath:  "file2.go",
+			Content:   "func second() {}",
+			StartLine: 1,
+			EndLine:   1,
+			Embedding: makeTestEmbedding(768, 0.2),
+		},
+	}
+	if err := s.StoreBatch(ctx, docs); err != nil {
+		t.Fatalf("StoreBatch failed: %v", err)
+	}
+	if err := s.StoreFileEmbedding(ctx, &FileEmbedding{
+		FilePath:   "file2.go",
+		Embedding:  makeTestEmbedding(768, 0.25),
+		ChunkCount: 1,
+		TotalLines: 1,
+	}); err != nil {
+		t.Fatalf("StoreFileEmbedding failed: %v", err)
+	}
+	if err := s.SaveColBERTMetadata(ctx, ColBERTCodecInt8, nil, nil); err != nil {
+		t.Fatalf("SaveColBERTMetadata failed: %v", err)
+	}
+	if err := s.StoreColBERTSegmentsBatch(ctx, map[string][]ColBERTSegment{
+		"file1.go:chunk_1": {{SegmentIdx: 0, Text: "first", Embedding: makeTestEmbedding(768, 0.3)}},
+		"file2.go:chunk_1": {{SegmentIdx: 0, Text: "second", Embedding: makeTestEmbedding(768, 0.4)}},
+	}); err != nil {
+		t.Fatalf("StoreColBERTSegmentsBatch failed: %v", err)
+	}
+
+	if err := s.PruneIndex(ctx, []string{"file1.go:chunk_1"}, []string{"file1.go"}); err != nil {
+		t.Fatalf("PruneIndex failed: %v", err)
+	}
+
+	liveSegments, err := s.GetColBERTSegments(ctx, "file1.go:chunk_1")
+	if err != nil {
+		t.Fatalf("GetColBERTSegments(live) failed: %v", err)
+	}
+	if len(liveSegments) != 1 {
+		t.Fatalf("expected live ColBERT segment to remain, got %d", len(liveSegments))
+	}
+	staleSegments, err := s.GetColBERTSegments(ctx, "file2.go:chunk_1")
+	if err != nil {
+		t.Fatalf("GetColBERTSegments(stale) failed: %v", err)
+	}
+	if len(staleSegments) != 0 {
+		t.Fatalf("expected stale ColBERT segment to be pruned, got %d", len(staleSegments))
+	}
+
+	var staleDocs int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM documents WHERE filepath = ?`, "file2.go").Scan(&staleDocs); err != nil {
+		t.Fatalf("query stale docs failed: %v", err)
+	}
+	if staleDocs != 0 {
+		t.Fatalf("expected stale document to be pruned, got %d", staleDocs)
+	}
+	var staleFiles int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM file_embeddings WHERE filepath = ?`, "file2.go").Scan(&staleFiles); err != nil {
+		t.Fatalf("query stale file embeddings failed: %v", err)
+	}
+	if staleFiles != 0 {
+		t.Fatalf("expected stale file embedding to be pruned, got %d", staleFiles)
+	}
+	if s.ColBERTCodec() != ColBERTCodecInt8 {
+		t.Fatalf("PruneIndex reset ColBERT metadata, got codec %q", s.ColBERTCodec())
+	}
+}
+
 func TestLibSQLStore_GetChunksForColBERT_LoadsDescriptionViaJSONExtract(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")

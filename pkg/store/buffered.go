@@ -510,6 +510,50 @@ func (s *BufferedStore) ResetIndex(ctx context.Context) error {
 	return nil
 }
 
+// PruneIndex removes stale rows after a successful full index has written the live set.
+func (s *BufferedStore) PruneIndex(ctx context.Context, liveIDs []string, livePaths []string) error {
+	_ = livePaths
+	if err := s.Flush(ctx); err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := populateTempSet(ctx, tx, "_sgrep_live_doc_ids", "id", liveIDs); err != nil {
+		return err
+	}
+
+	staleIDs, err := staleDocumentIDs(ctx, tx)
+	if err != nil {
+		return err
+	}
+	for _, id := range staleIDs {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM vec_embeddings WHERE doc_id = ?`, id); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE id = ?`, id); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	var count int64
+	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM vec_embeddings`).Scan(&count)
+	atomic.StoreInt64(&s.vectorCount, count)
+	s.memMu.Lock()
+	s.docIDs = nil
+	s.vectors = nil
+	s.memMu.Unlock()
+	return nil
+}
+
 // flushBufferLocked flushes up to vec0ChunkSize embeddings to sqlite-vec.
 // Must be called with writeMu held.
 func (s *BufferedStore) flushBufferLocked(ctx context.Context) error {

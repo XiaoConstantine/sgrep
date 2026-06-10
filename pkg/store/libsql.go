@@ -775,6 +775,45 @@ func (s *LibSQLStore) ResetIndex(ctx context.Context) error {
 	return nil
 }
 
+// PruneIndex removes stale rows after a successful full index has written the live set.
+func (s *LibSQLStore) PruneIndex(ctx context.Context, liveIDs []string, livePaths []string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := populateTempSet(ctx, tx, "_sgrep_live_doc_ids", "id", liveIDs); err != nil {
+		return err
+	}
+	if err := populateTempSet(ctx, tx, "_sgrep_live_paths", "filepath", livePaths); err != nil {
+		return err
+	}
+
+	for _, query := range []string{
+		`DELETE FROM colbert_segments WHERE chunk_id NOT IN (SELECT id FROM _sgrep_live_doc_ids)`,
+		`DELETE FROM file_embeddings WHERE filepath NOT IN (SELECT filepath FROM _sgrep_live_paths)`,
+		`DELETE FROM documents WHERE id NOT IN (SELECT id FROM _sgrep_live_doc_ids)`,
+	} {
+		if _, err := tx.ExecContext(ctx, query); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	var count int64
+	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM documents WHERE embedding IS NOT NULL`).Scan(&count)
+	atomic.StoreInt64(&s.vectorCount, count)
+	s.memMu.Lock()
+	s.docIDs = nil
+	s.vectors = nil
+	s.memMu.Unlock()
+	return nil
+}
+
 // Search finds similar documents using DiskANN index or in-memory search.
 func (s *LibSQLStore) Search(ctx context.Context, embedding []float32, limit int, threshold float64) ([]*Document, []float64, error) {
 	count := atomic.LoadInt64(&s.vectorCount)
