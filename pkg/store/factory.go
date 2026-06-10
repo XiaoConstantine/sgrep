@@ -36,6 +36,9 @@ func OpenForSearch(path string) (Storer, error) {
 func openTQForSearch(path, repoDir string, forced bool) (Storer, error) {
 	s, err := OpenSQLiteMetadata(path)
 	if err != nil {
+		if !forced {
+			return nil, nil
+		}
 		return nil, err
 	}
 	wrapped, err := OpenTQSearchStoreIfAvailable(s, repoDir)
