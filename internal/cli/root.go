@@ -41,6 +41,7 @@ var (
 	// Index flags
 	indexWorkers                 int
 	indexQuantize                string
+	indexSQLVectors              bool
 	indexColBERTPreindex         bool
 	indexColBERTAdaptiveSegments bool
 	indexColBERTCodec            string
@@ -290,8 +291,63 @@ func findIndexDir(startPath string) (string, error) {
 	if _, err := os.Stat(indexPath); err == nil {
 		return indexPath, nil
 	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil && resolved != abs {
+		repoID = hashPath(resolved)
+		indexPath = filepath.Join(sgrepHome, "repos", repoID, "index.db")
+		if _, err := os.Stat(indexPath); err == nil {
+			return indexPath, nil
+		}
+	}
+	if indexPath, ok := findIndexDirByMetadata(sgrepHome, abs); ok {
+		return indexPath, nil
+	}
 
 	return "", fmt.Errorf("no index found for %s. Run 'sgrep index .' first", abs)
+}
+
+func findIndexDirByMetadata(sgrepHome, targetPath string) (string, bool) {
+	reposDir := filepath.Join(sgrepHome, "repos")
+	entries, err := os.ReadDir(reposDir)
+	if err != nil {
+		return "", false
+	}
+	targetCanonical := canonicalDiskPath(targetPath)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		repoDir := filepath.Join(reposDir, entry.Name())
+		metadataPath := filepath.Join(repoDir, "metadata.json")
+		data, err := os.ReadFile(metadataPath)
+		if err != nil {
+			continue
+		}
+		var metadata struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal(data, &metadata); err != nil || metadata.Path == "" {
+			continue
+		}
+		if canonicalDiskPath(metadata.Path) != targetCanonical {
+			continue
+		}
+		indexPath := filepath.Join(repoDir, "index.db")
+		if _, err := os.Stat(indexPath); err == nil {
+			return indexPath, true
+		}
+	}
+	return "", false
+}
+
+func canonicalDiskPath(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = path
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
+	return filepath.Clean(abs)
 }
 
 // getSgrepHome returns the sgrep home directory (~/.sgrep).
@@ -333,6 +389,7 @@ var indexCmd = &cobra.Command{
 		if indexQuantize != "" {
 			cfg.Quantization = store.ParseQuantizationMode(indexQuantize)
 		}
+		cfg.CompactVectorStorage = !indexSQLVectors
 		cfg.AdaptiveColBERTSegments = indexColBERTAdaptiveSegments
 		cfg.ColBERTCodec = store.ParseColBERTCodec(indexColBERTCodec)
 
@@ -347,16 +404,21 @@ var indexCmd = &cobra.Command{
 			return err
 		}
 
-		// Export vectors to compact TQ-MSE stores for faster, smaller semantic retrieval.
-		fmt.Println("\nExporting vectors to compact TQ-MSE stores...")
-		vecCount, err := indexer.RebuildTQVectorStore(ctx)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to export vectors to compact TQ-MSE stores: %v\n", err)
+		if indexer.CompactVectorStoreWritten() {
+			chunkCount, fileCount := indexer.CompactVectorStoreCounts()
+			fmt.Printf("Wrote compact TQ-MSE vector stores (%d chunk vectors, %d file vectors)\n", chunkCount, fileCount)
 		} else {
-			fmt.Printf("Exported %d chunk vectors to compact TQ-MSE stores\n", vecCount)
-			if err := os.Remove(filepath.Join(indexer.RepoDir(), "vectors.mmap")); err != nil && !os.IsNotExist(err) {
-				fmt.Fprintf(os.Stderr, "Warning: failed to remove legacy vectors.mmap: %v\n", err)
+			// Export vectors to compact TQ-MSE stores for faster, smaller semantic retrieval.
+			fmt.Println("\nExporting vectors to compact TQ-MSE stores...")
+			vecCount, err := indexer.RebuildTQVectorStore(ctx)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to export vectors to compact TQ-MSE stores: %v\n", err)
+			} else {
+				fmt.Printf("Exported %d chunk vectors to compact TQ-MSE stores\n", vecCount)
 			}
+		}
+		if err := os.Remove(filepath.Join(indexer.RepoDir(), "vectors.mmap")); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "Warning: failed to remove legacy vectors.mmap: %v\n", err)
 		}
 
 		// Pre-compute ColBERT segments if requested
@@ -376,6 +438,8 @@ var indexCmd = &cobra.Command{
 			} else {
 				fmt.Printf("Exported %d segments to MMap store\n", segCount)
 			}
+		} else if err := os.Remove(filepath.Join(indexer.RepoDir(), "colbert_segments.mmap")); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "Warning: failed to remove stale colbert_segments.mmap: %v\n", err)
 		}
 
 		if err := indexer.Checkpoint(ctx); err != nil {
@@ -390,6 +454,7 @@ func init() {
 	// Add index-specific flags
 	indexCmd.Flags().IntVar(&indexWorkers, "workers", 0, "Number of parallel workers (default: 2x CPU cores, max 16)")
 	indexCmd.Flags().StringVar(&indexQuantize, "quantize", "int8", "Quantization mode: none (4x size), int8 (1x size), binary (0.125x size)")
+	indexCmd.Flags().BoolVar(&indexSQLVectors, "sql-vectors", false, "Also store full first-stage vectors in SQLite/libSQL for legacy vector search")
 	indexCmd.Flags().BoolVar(&indexColBERTPreindex, "colbert-preindex", true, "Pre-compute ColBERT segment embeddings for fast query-time scoring (default: true)")
 	indexCmd.Flags().BoolVar(&indexColBERTAdaptiveSegments, "colbert-adaptive-segments", false, "Use adaptive sqrt(M) segment budgets during ColBERT preindexing (experimental)")
 	indexCmd.Flags().StringVar(&indexColBERTCodec, "colbert-codec", "", "ColBERT segment codec: tqmse, int8, or pq6 (default: reuse existing repo codec, otherwise tqmse)")
@@ -407,7 +472,9 @@ var watchCmd = &cobra.Command{
 		}
 
 		ctx := context.Background()
-		indexer, err := index.New(path)
+		cfg := index.DefaultIndexConfig()
+		cfg.CompactVectorStorage = false
+		indexer, err := index.NewWithConfig(path, cfg)
 		if err != nil {
 			return fmt.Errorf("failed to create indexer: %w", err)
 		}

@@ -398,6 +398,74 @@ func TestRebuildTQVectorStoreExportsFileVectors(t *testing.T) {
 	}
 }
 
+func TestCompactVectorCollectorWritesChunkAndFileStores(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	dims := 64
+	t.Setenv("SGREP_DIMS", fmt.Sprintf("%d", dims))
+
+	a1 := make([]float32, dims)
+	a1[0] = 1
+	a2 := make([]float32, dims)
+	a2[0] = 0.9
+	a2[1] = 0.1
+	a2 = util.NormalizeVector(a2)
+	b1 := make([]float32, dims)
+	b1[1] = 1
+	collector, err := newCompactVectorCollector()
+	if err != nil {
+		t.Fatalf("newCompactVectorCollector: %v", err)
+	}
+	if err := collector.AddDocuments([]*store.Document{
+		{ID: "a.go:chunk_1", FilePath: "a.go", Embedding: a1, StartLine: 1, EndLine: 10},
+		{ID: "a.go:chunk_2", FilePath: "a.go", Embedding: a2, StartLine: 11, EndLine: 20},
+		{ID: "b.go:chunk_1", FilePath: "b.go", Embedding: b1, StartLine: 1, EndLine: 10},
+	}); err != nil {
+		t.Fatalf("AddDocuments: %v", err)
+	}
+
+	chunkCount, fileCount, err := collector.Write(ctx, tmp)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if chunkCount != 3 {
+		t.Fatalf("chunk count = %d, want 3", chunkCount)
+	}
+	if fileCount != 2 {
+		t.Fatalf("file count = %d, want 2", fileCount)
+	}
+
+	chunkStore, err := store.OpenTQVectorStore(tmp)
+	if err != nil {
+		t.Fatalf("OpenTQVectorStore: %v", err)
+	}
+	defer func() { _ = chunkStore.Close() }()
+	chunkHits, err := chunkStore.Search(ctx, a1, 1, 2)
+	if err != nil {
+		t.Fatalf("Search chunk store: %v", err)
+	}
+	if len(chunkHits) != 1 || chunkHits[0].ID != "a.go:chunk_1" {
+		t.Fatalf("chunk hits = %+v, want a.go:chunk_1", chunkHits)
+	}
+
+	fileStore, err := store.OpenTQFileVectorStore(tmp)
+	if err != nil {
+		t.Fatalf("OpenTQFileVectorStore: %v", err)
+	}
+	defer func() { _ = fileStore.Close() }()
+	fileQuery := make([]float32, dims)
+	for i := range fileQuery {
+		fileQuery[i] = (a1[i] + a2[i]) / 2
+	}
+	fileHits, err := fileStore.Search(ctx, fileQuery, 1, 2)
+	if err != nil {
+		t.Fatalf("Search file store: %v", err)
+	}
+	if len(fileHits) != 1 || fileHits[0].ID != "a.go" {
+		t.Fatalf("file hits = %+v, want a.go", fileHits)
+	}
+}
+
 func TestDefaultIndexConfig(t *testing.T) {
 	cfg := DefaultIndexConfig()
 	if cfg == nil {

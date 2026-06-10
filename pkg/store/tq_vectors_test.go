@@ -65,6 +65,50 @@ func TestTQVectorStoreSearchRoundTrip(t *testing.T) {
 	}
 }
 
+func TestTQVectorAccumulatorWritesSearchableChunkStore(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	dims := 64
+
+	acc, err := NewTQVectorAccumulator(TQVectorBuildOptions{Dims: dims, Bits: 4, Seed: 42})
+	if err != nil {
+		t.Fatalf("NewTQVectorAccumulator: %v", err)
+	}
+	query := make([]float32, dims)
+	query[0] = 1
+	other := make([]float32, dims)
+	other[1] = 1
+	if err := acc.Add("query", query); err != nil {
+		t.Fatalf("Add query: %v", err)
+	}
+	if err := acc.Add("other", other); err != nil {
+		t.Fatalf("Add other: %v", err)
+	}
+	if acc.Count() != 2 {
+		t.Fatalf("Count = %d, want 2", acc.Count())
+	}
+	count, err := acc.WriteChunkStore(ctx, tmp)
+	if err != nil {
+		t.Fatalf("WriteChunkStore: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("written count = %d, want 2", count)
+	}
+
+	store, err := OpenTQVectorStore(tmp)
+	if err != nil {
+		t.Fatalf("OpenTQVectorStore: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	results, err := store.Search(ctx, query, 1, 2)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 1 || results[0].ID != "query" {
+		t.Fatalf("results = %+v, want query", results)
+	}
+}
+
 func TestTQFileVectorStoreSearchRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	tmp := t.TempDir()
@@ -181,6 +225,55 @@ func TestTQSearchStoreHybridFallsBackToSemanticOnBM25Error(t *testing.T) {
 	}
 }
 
+func TestTQSearchStoreHybridUnionsDenseAndBM25Candidates(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	dims := 64
+
+	query := make([]float32, dims)
+	query[0] = 1
+	lexicalVec := make([]float32, dims)
+	lexicalVec[1] = 1
+	if _, err := BuildTQVectorStore(ctx, tmp,
+		[]string{"dense", "lexical"},
+		[][]float32{query, lexicalVec},
+		TQVectorBuildOptions{Dims: dims, Bits: 4, Seed: 42},
+	); err != nil {
+		t.Fatalf("BuildTQVectorStore: %v", err)
+	}
+
+	base := &stubBM25SearchStore{
+		stubHydrationStore: stubHydrationStore{
+			docs: map[string]*Document{
+				"dense":   {ID: "dense", FilePath: "dense.go"},
+				"lexical": {ID: "lexical", FilePath: "lexical.go"},
+			},
+		},
+		results: []BM25SearchResult{{ID: "lexical", Score: -1}},
+	}
+	wrapped, err := OpenTQSearchStoreIfAvailable(base, tmp)
+	if err != nil {
+		t.Fatalf("OpenTQSearchStoreIfAvailable: %v", err)
+	}
+	defer func() { _ = wrapped.Close() }()
+
+	docs, _, err := wrapped.HybridSearch(ctx, query, "lexical", 1, 0.2, 0.1, 0.9)
+	if err != nil {
+		t.Fatalf("HybridSearch: %v", err)
+	}
+	if len(docs) != 1 || docs[0].ID != "lexical" {
+		t.Fatalf("HybridSearch docs = %v, want lexical BM25 candidate first", docs)
+	}
+
+	docs, _, err = wrapped.HybridSearch(ctx, query, "lexical", 1, -1, 0.1, 0.9)
+	if err != nil {
+		t.Fatalf("HybridSearch with no dense hits: %v", err)
+	}
+	if len(docs) != 1 || docs[0].ID != "lexical" {
+		t.Fatalf("HybridSearch with no dense hits docs = %v, want lexical BM25 candidate", docs)
+	}
+}
+
 type stubHydrationStore struct {
 	docs map[string]*Document
 }
@@ -213,6 +306,27 @@ type stubBM25ErrorStore struct {
 
 func (s *stubBM25ErrorStore) BM25Scores(context.Context, string) (map[string]float64, error) {
 	return nil, errors.New("fts syntax error")
+}
+
+type stubBM25SearchStore struct {
+	stubHydrationStore
+	results []BM25SearchResult
+}
+
+func (s *stubBM25SearchStore) BM25Scores(context.Context, string) (map[string]float64, error) {
+	scores := make(map[string]float64, len(s.results))
+	for _, result := range s.results {
+		scores[result.ID] = result.Score
+	}
+	return scores, nil
+}
+
+func (s *stubBM25SearchStore) BM25Search(_ context.Context, _ string, limit int) ([]BM25SearchResult, error) {
+	results := append([]BM25SearchResult(nil), s.results...)
+	if limit > 0 && len(results) > limit {
+		results = results[:limit]
+	}
+	return results, nil
 }
 
 func randomTQVector(rng *rand.Rand, dims int) []float32 {

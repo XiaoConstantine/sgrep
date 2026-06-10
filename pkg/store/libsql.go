@@ -678,6 +678,103 @@ func (s *LibSQLStore) StoreBatch(ctx context.Context, docs []*Document) error {
 	return nil
 }
 
+// StoreMetadataBatch saves document content/metadata without SQL vector payloads.
+func (s *LibSQLStore) StoreMetadataBatch(ctx context.Context, docs []*Document) error {
+	if len(docs) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT OR REPLACE INTO documents (id, filepath, content, start_line, end_line, metadata, is_test)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = stmt.Close() }()
+
+	for _, doc := range docs {
+		metadata, _ := json.Marshal(doc.Metadata)
+		isTest := 0
+		if doc.IsTest {
+			isTest = 1
+		}
+
+		if _, err := stmt.ExecContext(ctx, doc.ID, doc.FilePath, doc.Content, doc.StartLine, doc.EndLine, string(metadata), isTest); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	atomic.StoreInt64(&s.vectorCount, 0)
+	s.memMu.Lock()
+	s.docIDs = nil
+	s.vectors = nil
+	s.memMu.Unlock()
+	return nil
+}
+
+// ClearVectorStorage removes SQL vector payloads after compact TQ sidecars are available.
+func (s *LibSQLStore) ClearVectorStorage(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `UPDATE documents SET embedding = NULL WHERE embedding IS NOT NULL`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM file_embeddings`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `VACUUM`); err != nil {
+		return err
+	}
+	atomic.StoreInt64(&s.vectorCount, 0)
+	s.memMu.Lock()
+	s.docIDs = nil
+	s.vectors = nil
+	s.memMu.Unlock()
+	return nil
+}
+
+// ResetIndex removes all index-owned rows before a full rebuild.
+func (s *LibSQLStore) ResetIndex(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, query := range []string{
+		`DELETE FROM colbert_segments`,
+		`DELETE FROM colbert_metadata`,
+		`DELETE FROM file_embeddings`,
+		`DELETE FROM documents`,
+	} {
+		if _, err := tx.ExecContext(ctx, query); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	atomic.StoreInt64(&s.vectorCount, 0)
+	s.memMu.Lock()
+	s.docIDs = nil
+	s.vectors = nil
+	s.memMu.Unlock()
+	s.colbertCodec = ColBERTCodecUnspecified
+	s.colbertPQ = nil
+	s.colbertTQMSE = nil
+	return nil
+}
+
 // Search finds similar documents using DiskANN index or in-memory search.
 func (s *LibSQLStore) Search(ctx context.Context, embedding []float32, limit int, threshold float64) ([]*Document, []float64, error) {
 	count := atomic.LoadInt64(&s.vectorCount)
@@ -924,31 +1021,53 @@ func (s *LibSQLStore) LoadDocumentsByID(ctx context.Context, ids []string) (map[
 // BM25Scores returns FTS scores keyed by chunk ID.
 func (s *LibSQLStore) BM25Scores(ctx context.Context, queryTerms string) (map[string]float64, error) {
 	scores := make(map[string]float64)
-	if queryTerms == "" {
-		return scores, nil
+	results, err := s.bm25Search(ctx, queryTerms, 0)
+	if err != nil {
+		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	for _, result := range results {
+		scores[result.ID] = result.Score
+	}
+	return scores, nil
+}
+
+// BM25Search returns ranked FTS candidates keyed by chunk ID.
+func (s *LibSQLStore) BM25Search(ctx context.Context, queryTerms string, limit int) ([]BM25SearchResult, error) {
+	return s.bm25Search(ctx, queryTerms, limit)
+}
+
+func (s *LibSQLStore) bm25Search(ctx context.Context, queryTerms string, limit int) ([]BM25SearchResult, error) {
+	if queryTerms == "" {
+		return nil, nil
+	}
+	query := `
 		SELECT d.id, bm25(documents_fts) AS score
 		FROM documents_fts f
 		JOIN documents d ON d.rowid = f.rowid
 		WHERE documents_fts MATCH ?
-	`, queryTerms)
+	`
+	args := []interface{}{queryTerms}
+	if limit > 0 {
+		query += ` ORDER BY score ASC LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		if strings.Contains(err.Error(), "fts5") {
-			return scores, nil
+		if strings.Contains(err.Error(), "fts5") || strings.Contains(err.Error(), "no such table") {
+			return nil, nil
 		}
 		return nil, fmt.Errorf("BM25 query failed: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
+	var results []BM25SearchResult
 	for rows.Next() {
-		var id string
-		var score float64
-		if err := rows.Scan(&id, &score); err != nil {
+		var result BM25SearchResult
+		if err := rows.Scan(&result.ID, &result.Score); err != nil {
 			continue
 		}
-		scores[id] = score
+		results = append(results, result)
 	}
-	return scores, rows.Err()
+	return results, rows.Err()
 }
 
 // HybridSearch combines vector search with FTS5 BM25.

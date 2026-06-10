@@ -54,6 +54,91 @@ type TQVectorBuildOptions struct {
 	Seed uint64
 }
 
+// TQVectorAccumulator incrementally encodes vectors for a compact dense-vector artifact.
+type TQVectorAccumulator struct {
+	dims      int
+	bits      int
+	quantizer *util.TQMSEQuantizer
+	encoder   *util.TQMSEEncoder
+	scratch   util.TQMSECode
+	ids       []string
+	codes     [][]byte
+}
+
+// NewTQVectorAccumulator creates an incremental TQ-MSE vector accumulator.
+func NewTQVectorAccumulator(opts TQVectorBuildOptions) (*TQVectorAccumulator, error) {
+	dims := opts.Dims
+	if dims <= 0 {
+		dims = getDims()
+	}
+	bits := opts.Bits
+	if bits <= 0 {
+		bits = tqVectorDefaultBit
+	}
+	seed := opts.Seed
+	if seed == 0 {
+		seed = tqVectorDefaultSeed
+	}
+	q, err := util.NewTQMSEQuantizer(util.TQMSEConfig{
+		Dims: dims,
+		Bits: bits,
+		Seed: seed,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &TQVectorAccumulator{
+		dims:      dims,
+		bits:      bits,
+		quantizer: q,
+		encoder:   q.NewEncoder(),
+		scratch:   util.TQMSECode{Codes: make([]byte, q.CodeSize())},
+	}, nil
+}
+
+// Add normalizes and encodes one vector into the accumulator.
+func (a *TQVectorAccumulator) Add(id string, embedding []float32) error {
+	if id == "" {
+		return nil
+	}
+	if len(embedding) != a.dims {
+		return fmt.Errorf("vector %s has %d dims, expected %d", id, len(embedding), a.dims)
+	}
+	norm := util.NormalizeVectorCopy(embedding)
+	code, err := a.encoder.EncodeInto(a.scratch, norm)
+	if err != nil {
+		return fmt.Errorf("encode vector %s: %w", id, err)
+	}
+	a.scratch = code
+	a.ids = append(a.ids, id)
+	a.codes = append(a.codes, append([]byte(nil), code.Codes...))
+	return nil
+}
+
+// Count returns the number of encoded vectors.
+func (a *TQVectorAccumulator) Count() int {
+	if a == nil {
+		return 0
+	}
+	return len(a.ids)
+}
+
+// WriteChunkStore writes the accumulator as the default chunk-vector artifact.
+func (a *TQVectorAccumulator) WriteChunkStore(ctx context.Context, dir string) (int, error) {
+	if a == nil || a.Count() == 0 {
+		return 0, RemoveTQVectorStore(dir)
+	}
+	return buildTQVectorStoreFromCodes(ctx, TQVectorPath(dir), a.ids, a.codes, a.quantizer, a.dims, a.bits)
+}
+
+// WriteFileStore writes the accumulator as the default file-vector artifact.
+func (a *TQVectorAccumulator) WriteFileStore(ctx context.Context, dir string) (int, error) {
+	if a == nil || a.Count() == 0 {
+		return 0, RemoveTQFileVectorStore(dir)
+	}
+	return buildTQVectorStoreFromCodes(ctx, TQFileVectorPath(dir), a.ids, a.codes, a.quantizer, a.dims, a.bits)
+}
+
 // TQVectorPath returns the default compact dense vector artifact path.
 func TQVectorPath(dir string) string {
 	return filepath.Join(dir, tqVectorFileName)
@@ -129,16 +214,12 @@ func buildTQVectorStore(ctx context.Context, path string, ids []string, embeddin
 	if err != nil {
 		return 0, err
 	}
-	metadata, err := q.Serialize()
-	if err != nil {
-		return 0, fmt.Errorf("serialize tq vector quantizer: %w", err)
-	}
 
-	type item struct {
-		id  string
-		vec []float32
-	}
-	items := make([]item, 0, len(ids))
+	encoder := q.NewEncoder()
+	codeSize := q.CodeSize()
+	code := util.TQMSECode{Codes: make([]byte, codeSize)}
+	norm := make([]float32, dims)
+	codes := make([][]byte, 0, len(ids))
 	for i, id := range ids {
 		if err := ctx.Err(); err != nil {
 			return 0, err
@@ -147,7 +228,45 @@ func buildTQVectorStore(ctx context.Context, path string, ids []string, embeddin
 		if len(vec) != dims {
 			return 0, fmt.Errorf("vector %s has %d dims, expected %d", id, len(vec), dims)
 		}
-		items = append(items, item{id: id, vec: vec})
+		copy(norm, vec)
+		norm = util.NormalizeVector(norm)
+		encoded, err := encoder.EncodeInto(code, norm)
+		if err != nil {
+			return 0, fmt.Errorf("encode vector %s: %w", id, err)
+		}
+		codes = append(codes, append([]byte(nil), encoded.Codes...))
+	}
+
+	return buildTQVectorStoreFromCodes(ctx, path, ids, codes, q, dims, bits)
+}
+
+func buildTQVectorStoreFromCodes(ctx context.Context, path string, ids []string, codes [][]byte, q *util.TQMSEQuantizer, dims, bits int) (int, error) {
+	if len(ids) != len(codes) {
+		return 0, fmt.Errorf("id/code count mismatch: %d ids, %d codes", len(ids), len(codes))
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	metadata, err := q.Serialize()
+	if err != nil {
+		return 0, fmt.Errorf("serialize tq vector quantizer: %w", err)
+	}
+
+	type item struct {
+		id   string
+		code []byte
+	}
+	items := make([]item, 0, len(ids))
+	codeSize := q.CodeSize()
+	for i, id := range ids {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		code := codes[i]
+		if len(code) != codeSize {
+			return 0, fmt.Errorf("vector %s has code size %d, expected %d", id, len(code), codeSize)
+		}
+		items = append(items, item{id: id, code: code})
 	}
 	sort.Slice(items, func(i, j int) bool {
 		return items[i].id < items[j].id
@@ -160,7 +279,6 @@ func buildTQVectorStore(ctx context.Context, path string, ids []string, embeddin
 		}
 		indexSize += 2 + len(item.id)
 	}
-	codeSize := q.CodeSize()
 	metadataOffset := tqVectorHeaderSize
 	indexOffset := metadataOffset + len(metadata)
 	codesOffset := indexOffset + indexSize
@@ -219,24 +337,13 @@ func buildTQVectorStore(ctx context.Context, path string, ids []string, embeddin
 		return 0, err
 	}
 
-	encoder := q.NewEncoder()
-	code := util.TQMSECode{Codes: make([]byte, codeSize)}
-	norm := make([]float32, dims)
 	codeOffset := int64(codesOffset)
 	for _, item := range items {
 		if err := ctx.Err(); err != nil {
 			_ = os.Remove(tmpPath)
 			return 0, err
 		}
-		copy(norm, item.vec)
-		norm = util.NormalizeVector(norm)
-		var err error
-		code, err = encoder.EncodeInto(code, norm)
-		if err != nil {
-			_ = os.Remove(tmpPath)
-			return 0, fmt.Errorf("encode vector %s: %w", item.id, err)
-		}
-		if _, err := f.WriteAt(code.Codes, codeOffset); err != nil {
+		if _, err := f.WriteAt(item.code, codeOffset); err != nil {
 			_ = os.Remove(tmpPath)
 			return 0, err
 		}
@@ -523,6 +630,53 @@ func (s *TQVectorStore) Search(ctx context.Context, embedding []float32, limit i
 		results[i] = heap.Pop(&h).(DenseSearchResult)
 	}
 	return results, nil
+}
+
+// ScoreByID returns compressed dense-vector distances for the requested IDs.
+func (s *TQVectorStore) ScoreByID(ctx context.Context, embedding []float32, ids []string) (map[string]float64, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	s.mu.RLock()
+	data := s.data
+	q := s.quantizer
+	idToIndex := s.idToIndex
+	codeSize := s.codeSize
+	codesOffset := s.codesOffset
+	dims := s.dims
+	s.mu.RUnlock()
+
+	if len(data) == 0 || q == nil || len(idToIndex) == 0 {
+		return nil, nil
+	}
+	if len(embedding) != dims {
+		return nil, fmt.Errorf("query has %d dims, expected %d", len(embedding), dims)
+	}
+
+	query := util.NormalizeVectorCopy(embedding)
+	prepared, err := q.PrepareQuery(query)
+	if err != nil {
+		return nil, err
+	}
+
+	distances := make(map[string]float64, len(ids))
+	code := util.TQMSECode{}
+	for i, id := range ids {
+		if i&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		idx, ok := idToIndex[id]
+		if !ok {
+			continue
+		}
+		start := codesOffset + idx*codeSize
+		code.Codes = data[start : start+codeSize]
+		distances[id] = 1.0 - q.Dot(prepared, code)
+	}
+	return distances, nil
 }
 
 type tqResultMaxHeap []DenseSearchResult

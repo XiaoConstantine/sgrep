@@ -343,6 +343,69 @@ func (s *Store) StoreBatch(ctx context.Context, docs []*Document) error {
 	return tx.Commit()
 }
 
+// StoreMetadataBatch saves document content/metadata without SQL vector payloads.
+func (s *Store) StoreMetadataBatch(ctx context.Context, docs []*Document) error {
+	if len(docs) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	docStmt, err := tx.PrepareContext(ctx,
+		`INSERT OR REPLACE INTO documents (id, filepath, content, start_line, end_line, metadata, is_test)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = docStmt.Close() }()
+
+	for _, doc := range docs {
+		metadata, _ := json.Marshal(doc.Metadata)
+		isTest := 0
+		if doc.IsTest {
+			isTest = 1
+		}
+		if _, err := docStmt.ExecContext(ctx, doc.ID, doc.FilePath, doc.Content, doc.StartLine, doc.EndLine, string(metadata), isTest); err != nil {
+			return fmt.Errorf("failed to insert document %s: %w", doc.ID, err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+// ClearVectorStorage removes sqlite-vec payloads after compact TQ sidecars are available.
+func (s *Store) ClearVectorStorage(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM vec_embeddings`); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `VACUUM`)
+	return err
+}
+
+// ResetIndex removes all index-owned rows before a full rebuild.
+func (s *Store) ResetIndex(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, query := range []string{
+		`DELETE FROM vec_embeddings`,
+		`DELETE FROM documents`,
+	} {
+		if _, err := tx.ExecContext(ctx, query); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
 // Search finds similar documents to the query embedding.
 // Uses two-phase search: KNN first, then load documents.
 func (s *Store) Search(ctx context.Context, embedding []float32, limit int, threshold float64) ([]*Document, []float64, error) {
@@ -538,10 +601,10 @@ func (s *Store) HybridSearch(ctx context.Context, embedding []float32, queryTerm
 	`
 
 	rows, err := s.db.QueryContext(ctx, query,
-		blob, fetchLimit,       // semantic params
-		queryTerms,             // lexical params
+		blob, fetchLimit, // semantic params
+		queryTerms,                 // lexical params
 		semanticWeight, bm25Weight, // score weights
-		threshold, limit,       // filter and limit
+		threshold, limit, // filter and limit
 	)
 	if err != nil {
 		// If FTS5 query fails (e.g., syntax error), fall back to semantic-only

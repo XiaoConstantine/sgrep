@@ -413,6 +413,103 @@ func (s *BufferedStore) StoreBatch(ctx context.Context, docs []*Document) error 
 	return nil
 }
 
+// StoreMetadataBatch saves document content/metadata without SQL vector payloads.
+func (s *BufferedStore) StoreMetadataBatch(ctx context.Context, docs []*Document) error {
+	if len(docs) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	docStmt, err := tx.PrepareContext(ctx,
+		`INSERT OR REPLACE INTO documents (id, filepath, content, start_line, end_line, metadata, is_test)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = docStmt.Close() }()
+
+	for _, doc := range docs {
+		metadata, _ := json.Marshal(doc.Metadata)
+		isTest := 0
+		if doc.IsTest {
+			isTest = 1
+		}
+		if _, err := docStmt.ExecContext(ctx, doc.ID, doc.FilePath, doc.Content, doc.StartLine, doc.EndLine, string(metadata), isTest); err != nil {
+			return fmt.Errorf("failed to insert document %s: %w", doc.ID, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	s.writeMu.Lock()
+	s.writeBuffer = nil
+	s.writeMu.Unlock()
+	s.memMu.Lock()
+	s.docIDs = nil
+	s.vectors = nil
+	s.memMu.Unlock()
+	atomic.StoreInt64(&s.vectorCount, 0)
+	return nil
+}
+
+// ClearVectorStorage removes sqlite-vec payloads after compact TQ sidecars are available.
+func (s *BufferedStore) ClearVectorStorage(ctx context.Context) error {
+	s.writeMu.Lock()
+	s.writeBuffer = nil
+	s.writeMu.Unlock()
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM vec_embeddings`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `VACUUM`); err != nil {
+		return err
+	}
+	s.memMu.Lock()
+	s.docIDs = nil
+	s.vectors = nil
+	s.memMu.Unlock()
+	atomic.StoreInt64(&s.vectorCount, 0)
+	return nil
+}
+
+// ResetIndex removes all index-owned rows before a full rebuild.
+func (s *BufferedStore) ResetIndex(ctx context.Context) error {
+	s.writeMu.Lock()
+	s.writeBuffer = nil
+	s.writeMu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, query := range []string{
+		`DELETE FROM vec_embeddings`,
+		`DELETE FROM documents`,
+	} {
+		if _, err := tx.ExecContext(ctx, query); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	s.memMu.Lock()
+	s.docIDs = nil
+	s.vectors = nil
+	s.memMu.Unlock()
+	atomic.StoreInt64(&s.vectorCount, 0)
+	return nil
+}
+
 // flushBufferLocked flushes up to vec0ChunkSize embeddings to sqlite-vec.
 // Must be called with writeMu held.
 func (s *BufferedStore) flushBufferLocked(ctx context.Context) error {
@@ -1038,5 +1135,3 @@ func (s *BufferedStore) Close() error {
 	}
 	return s.db.Close()
 }
-
-

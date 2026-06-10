@@ -333,9 +333,10 @@ Use `sgrep list` to see all indexed repositories.
 
 ## Storage Backends
 
-sgrep supports two SQL index backends. The default libSQL build also exports
-compact `vectors.tqmse` and `file_vectors.tqmse` artifacts after indexing and
-uses them automatically for chunk and document-level semantic retrieval.
+sgrep supports two SQL index backends. Full indexing writes compact
+`vectors.tqmse` and `file_vectors.tqmse` artifacts by default and uses them for
+chunk and document-level semantic retrieval. SQLite/libSQL remains the source
+of truth for chunk content, metadata, and FTS/BM25.
 
 | Backend | Build Command | Storage Efficiency | Best For |
 |---------|--------------|-------------------|----------|
@@ -345,9 +346,10 @@ uses them automatically for chunk and document-level semantic retrieval.
 **Default build advantages:**
 - Uses `vectors.tqmse` for compact chunk-level semantic retrieval
 - Uses `file_vectors.tqmse` for compact document/file-level semantic retrieval
-- Keeps libSQL as the source of truth for chunks, file embeddings, and FTS/BM25
-- Native F32_BLOB column type for vectors
-- Falls back to libSQL search if the compact artifact is missing or invalid
+- Avoids full SQL vector blobs during normal full indexing
+- Keeps libSQL as the source of truth for chunks, metadata, and FTS/BM25
+- Keeps the legacy SQL vector path available with `sgrep index --sql-vectors`
+- Falls back to SQL vector search only when compact artifacts are missing and SQL vectors exist
 
 ## Commands
 
@@ -432,7 +434,8 @@ SGREP_HOME=~/.sgrep                    # Data storage location
 SGREP_ENDPOINT=http://localhost:8080   # Override embedding server URL
 SGREP_PORT=8080                        # Embedding server port
 SGREP_DIMS=768                         # Vector dimensions
-SGREP_VECTOR_BACKEND=tqmse             # Force TQ-MSE search; sqlite/libsql disables it
+SGREP_VECTOR_BACKEND=tqmse             # Force TQ-MSE search
+SGREP_VECTOR_BACKEND=libsql            # Force legacy SQL vector search (requires --sql-vectors index)
 ```
 
 ## How It Works
@@ -440,7 +443,7 @@ SGREP_VECTOR_BACKEND=tqmse             # Force TQ-MSE search; sqlite/libsql disa
 1. **Setup**: `sgrep setup` downloads the embedding model and verifies llama-server
 2. **Indexing**: Files are chunked using AST-aware splitting (Go, TS, Python) or size-based fallback
 3. **Embedding**: Each chunk is embedded via llama.cpp (local, auto-started)
-4. **Storage**: Vectors are stored in libSQL and exported to `vectors.tqmse` / `file_vectors.tqmse`; ColBERT segments are precomputed by default
+4. **Storage**: Chunk/file vectors are encoded into `vectors.tqmse` / `file_vectors.tqmse`; SQL stores chunk content, metadata, and FTS. `--sql-vectors` also keeps full SQL vectors.
 5. **Search**: Query embedded → vector/hybrid retrieval → optional ColBERT late interaction → optional rerank
 
 **Smart skip for large repos**: When indexing repos with >1000 files, sgrep automatically filters out test files, generated code (*.pb.go, *.generated.go), and vendored directories to speed up indexing.
@@ -520,7 +523,7 @@ Recent `dspy-go` benchmark on Apple M3 Pro + Metal (532 files, 7,735 chunks, 35,
 Notes:
 - Chunk and document-level semantic retrieval use TQ-MSE artifacts by default
   in the libSQL build; set `SGREP_VECTOR_BACKEND=libsql` to force the old
-  libSQL vector path.
+  libSQL vector path only for indexes built with `--sql-vectors`.
 - The default ColBERT segment codec is `tqmse`, which targets about half the
   segment storage of int8 while keeping int8 available as a conservative
   `--colbert-codec int8` override.

@@ -58,6 +58,67 @@ func TestBufferedStore_Basic(t *testing.T) {
 	}
 }
 
+func TestBufferedStore_ResetIndexClearsDocumentsAndVectors(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	s, err := OpenBuffered(dbPath)
+	if err != nil {
+		t.Fatalf("OpenBuffered failed: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	ctx := context.Background()
+	doc := &Document{
+		ID:        "test-1",
+		FilePath:  "test.go",
+		Content:   "func hello() {}",
+		StartLine: 1,
+		EndLine:   1,
+		Embedding: makeTestEmbedding(768, 0.5),
+	}
+	if err := s.Store(ctx, doc); err != nil {
+		t.Fatalf("Store failed: %v", err)
+	}
+	if err := s.Flush(ctx); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+
+	if err := s.ResetIndex(ctx); err != nil {
+		t.Fatalf("ResetIndex failed: %v", err)
+	}
+	stats, err := s.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats failed: %v", err)
+	}
+	if stats.Documents != 0 || stats.Chunks != 0 {
+		t.Fatalf("stats after reset = %+v, want no documents/chunks", stats)
+	}
+	if s.VectorCount() != 0 {
+		t.Fatalf("VectorCount after reset = %d, want 0", s.VectorCount())
+	}
+
+	tables := map[string]string{
+		"vec_embeddings": `SELECT COUNT(*) FROM vec_embeddings`,
+	}
+	var ftsExists int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name = 'documents_fts'`).Scan(&ftsExists); err != nil {
+		t.Fatalf("check documents_fts failed: %v", err)
+	}
+	if ftsExists > 0 {
+		tables["documents_fts"] = `SELECT COUNT(*) FROM documents_fts`
+	}
+	for table, query := range tables {
+		var count int
+		if err := s.db.QueryRowContext(ctx, query).Scan(&count); err != nil {
+			t.Fatalf("count %s failed: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("%s count = %d, want 0", table, count)
+		}
+	}
+}
+
 func TestBufferedStore_BatchFlush(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")

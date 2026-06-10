@@ -95,6 +95,14 @@ func TestExtractSearchTermsAND(t *testing.T) {
 	}
 }
 
+func TestExtractHybridSearchTerms_CompoundIdentifiers(t *testing.T) {
+	got := ExtractHybridSearchTerms("span config sql watcher buffer")
+	want := "(span OR spanconfig OR spanconfigsql OR spanconfigsqlwatcher) AND (config OR spanconfig OR configsql OR spanconfigsql OR configsqlwatcher OR spanconfigsqlwatcher OR configsqlwatcherbuffer) AND (sql OR configsql OR sqlwatcher OR spanconfigsql OR configsqlwatcher OR sqlwatcherbuffer OR spanconfigsqlwatcher OR configsqlwatcherbuffer) AND (watcher OR sqlwatcher OR watcherbuffer OR configsqlwatcher OR sqlwatcherbuffer OR spanconfigsqlwatcher OR configsqlwatcherbuffer) AND (buffer OR watcherbuffer OR sqlwatcherbuffer OR configsqlwatcherbuffer)"
+	if got != want {
+		t.Fatalf("ExtractHybridSearchTerms() = %q, want %q", got, want)
+	}
+}
+
 func TestEscapeFTS5(t *testing.T) {
 	tests := []struct {
 		name     string

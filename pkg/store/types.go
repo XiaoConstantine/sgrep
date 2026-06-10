@@ -23,6 +23,21 @@ type Storer interface {
 	Close() error
 }
 
+// MetadataBatchStorer stores document metadata/content without SQL vector payloads.
+type MetadataBatchStorer interface {
+	StoreMetadataBatch(ctx context.Context, docs []*Document) error
+}
+
+// VectorStorageClearer removes SQL/vector-extension payloads after compact sidecars are written.
+type VectorStorageClearer interface {
+	ClearVectorStorage(ctx context.Context) error
+}
+
+// IndexResetter clears index-owned rows before a full rebuild.
+type IndexResetter interface {
+	ResetIndex(ctx context.Context) error
+}
+
 // Flusher is an optional interface for stores that buffer writes.
 type Flusher interface {
 	Flush(ctx context.Context) error
@@ -94,6 +109,12 @@ type DenseSearchResult struct {
 	Distance float64
 }
 
+// BM25SearchResult is an FTS hit before document hydration.
+type BM25SearchResult struct {
+	ID    string
+	Score float64
+}
+
 // DenseVectorSearcher is an optional external vector artifact used for first-stage search.
 type DenseVectorSearcher interface {
 	Search(ctx context.Context, embedding []float32, limit int, threshold float64) ([]DenseSearchResult, error)
@@ -113,6 +134,11 @@ type FileChunkLoader interface {
 // BM25Scorer exposes FTS scores without tying dense candidate generation to SQLite vectors.
 type BM25Scorer interface {
 	BM25Scores(ctx context.Context, queryTerms string) (map[string]float64, error)
+}
+
+// BM25Searcher exposes ranked FTS candidates for dense+lexical fusion.
+type BM25Searcher interface {
+	BM25Search(ctx context.Context, queryTerms string, limit int) ([]BM25SearchResult, error)
 }
 
 // ChunkInfo contains minimal chunk data needed for ColBERT segment computation.

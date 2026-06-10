@@ -35,6 +35,9 @@ sgrep setup
 # Index current directory; builds compact TQ-MSE chunk/file vectors by default
 sgrep index .
 
+# Legacy compatibility: also persist full SQL vectors
+sgrep index . --sql-vectors
+
 # Semantic code search
 sgrep "database connection pooling"
 sgrep "how are errors handled"

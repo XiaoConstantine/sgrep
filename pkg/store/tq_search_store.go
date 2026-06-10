@@ -102,6 +102,46 @@ func (s *TQSearchStore) HybridSearch(ctx context.Context, embedding []float32, q
 	if err != nil {
 		return nil, nil, err
 	}
+
+	if searcher, ok := s.bm25.(BM25Searcher); ok {
+		lexicalHits, err := searcher.BM25Search(ctx, queryTerms, fetchLimit)
+		if err != nil {
+			return s.Search(ctx, embedding, limit, threshold)
+		}
+		if len(hits) == 0 && len(lexicalHits) == 0 {
+			return nil, nil, nil
+		}
+		if len(lexicalHits) > 0 {
+			denseIDs := make(map[string]struct{}, len(hits))
+			for _, hit := range hits {
+				denseIDs[hit.ID] = struct{}{}
+			}
+			ids := make([]string, 0, len(lexicalHits))
+			seen := make(map[string]struct{}, len(lexicalHits))
+			for _, hit := range lexicalHits {
+				if hit.ID == "" {
+					continue
+				}
+				if _, ok := denseIDs[hit.ID]; ok {
+					continue
+				}
+				if _, ok := seen[hit.ID]; ok {
+					continue
+				}
+				seen[hit.ID] = struct{}{}
+				ids = append(ids, hit.ID)
+			}
+			if len(ids) > 0 {
+				if distances, err := s.dense.ScoreByID(ctx, embedding, ids); err == nil {
+					for id, distance := range distances {
+						hits = append(hits, DenseSearchResult{ID: id, Distance: distance})
+					}
+				}
+			}
+		}
+		return s.loadDenseHits(ctx, fuseHybridCandidates(hits, lexicalHits, limit, semanticWeight, bm25Weight))
+	}
+
 	if len(hits) == 0 {
 		return nil, nil, nil
 	}

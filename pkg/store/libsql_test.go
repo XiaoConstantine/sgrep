@@ -42,6 +42,76 @@ func TestLibSQLStore_Basic(t *testing.T) {
 	}
 }
 
+func TestLibSQLStore_ResetIndexClearsArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	s, err := OpenLibSQL(dbPath)
+	if err != nil {
+		t.Fatalf("OpenLibSQL failed: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	ctx := context.Background()
+	embedding := makeTestEmbedding(768, 0.5)
+	doc := &Document{
+		ID:        "test.go:chunk_1",
+		FilePath:  "test.go",
+		Content:   "func hello() {}",
+		StartLine: 1,
+		EndLine:   1,
+		Embedding: embedding,
+	}
+	if err := s.Store(ctx, doc); err != nil {
+		t.Fatalf("Store failed: %v", err)
+	}
+	if err := s.StoreFileEmbedding(ctx, &FileEmbedding{
+		FilePath:   "test.go",
+		Embedding:  embedding,
+		ChunkCount: 1,
+		TotalLines: 1,
+	}); err != nil {
+		t.Fatalf("StoreFileEmbedding failed: %v", err)
+	}
+	if err := s.StoreColBERTSegments(ctx, doc.ID, []ColBERTSegment{{
+		SegmentIdx:    0,
+		Text:          "func hello",
+		Embedding:     embedding,
+		EmbeddingInt8: []int8{1, 2, 3},
+		QuantScale:    1,
+	}}); err != nil {
+		t.Fatalf("StoreColBERTSegments failed: %v", err)
+	}
+
+	if err := s.ResetIndex(ctx); err != nil {
+		t.Fatalf("ResetIndex failed: %v", err)
+	}
+	stats, err := s.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats failed: %v", err)
+	}
+	if stats.Documents != 0 || stats.Chunks != 0 {
+		t.Fatalf("stats after reset = %+v, want no documents/chunks", stats)
+	}
+	if s.VectorCount() != 0 {
+		t.Fatalf("VectorCount after reset = %d, want 0", s.VectorCount())
+	}
+
+	for table, query := range map[string]string{
+		"documents_fts":    `SELECT COUNT(*) FROM documents_fts`,
+		"file_embeddings":  `SELECT COUNT(*) FROM file_embeddings`,
+		"colbert_segments": `SELECT COUNT(*) FROM colbert_segments`,
+	} {
+		var count int
+		if err := s.db.QueryRowContext(ctx, query).Scan(&count); err != nil {
+			t.Fatalf("count %s failed: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("%s count = %d, want 0", table, count)
+		}
+	}
+}
+
 func TestOpenForSearchFallsBackWhenTQArtifactInvalid(t *testing.T) {
 	t.Setenv("SGREP_VECTOR_BACKEND", "")
 	dir := t.TempDir()

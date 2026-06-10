@@ -143,32 +143,54 @@ func (s *SQLiteMetadataStore) LoadDocumentsByID(ctx context.Context, ids []strin
 // BM25Scores returns FTS scores keyed by chunk ID.
 func (s *SQLiteMetadataStore) BM25Scores(ctx context.Context, queryTerms string) (map[string]float64, error) {
 	scores := make(map[string]float64)
-	if queryTerms == "" {
-		return scores, nil
+	results, err := s.bm25Search(ctx, queryTerms, 0)
+	if err != nil {
+		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	for _, result := range results {
+		scores[result.ID] = result.Score
+	}
+	return scores, nil
+}
+
+// BM25Search returns ranked FTS candidates keyed by chunk ID.
+func (s *SQLiteMetadataStore) BM25Search(ctx context.Context, queryTerms string, limit int) ([]BM25SearchResult, error) {
+	return s.bm25Search(ctx, queryTerms, limit)
+}
+
+func (s *SQLiteMetadataStore) bm25Search(ctx context.Context, queryTerms string, limit int) ([]BM25SearchResult, error) {
+	if queryTerms == "" {
+		return nil, nil
+	}
+	query := `
 		SELECT d.id, bm25(documents_fts) AS score
 		FROM documents_fts f
 		JOIN documents d ON d.rowid = f.rowid
 		WHERE documents_fts MATCH ?
-	`, queryTerms)
+	`
+	args := []interface{}{queryTerms}
+	if limit > 0 {
+		query += ` ORDER BY score ASC LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		if strings.Contains(err.Error(), "fts5") || strings.Contains(err.Error(), "no such table") {
-			return scores, nil
+			return nil, nil
 		}
 		return nil, fmt.Errorf("BM25 query failed: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
+	var results []BM25SearchResult
 	for rows.Next() {
-		var id string
-		var score float64
-		if err := rows.Scan(&id, &score); err != nil {
+		var result BM25SearchResult
+		if err := rows.Scan(&result.ID, &result.Score); err != nil {
 			continue
 		}
-		scores[id] = score
+		results = append(results, result)
 	}
-	return scores, rows.Err()
+	return results, rows.Err()
 }
 
 func sqliteIndexSizeBytes(path string) int64 {

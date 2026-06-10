@@ -344,7 +344,7 @@ func (s *Searcher) SearchWithOptions(ctx context.Context, query string, opts Sea
 
 		if opts.UseHybrid {
 			// Hybrid search: combine semantic + BM25
-			queryTerms := ExtractSearchTerms(query)
+			queryTerms := ExtractHybridSearchTerms(query)
 			docs, distances, err = s.store.HybridSearch(ctx, queryEmb, queryTerms,
 				fetchLimit, opts.Threshold, opts.SemanticWeight, opts.BM25Weight)
 		} else {

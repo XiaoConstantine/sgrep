@@ -33,6 +33,7 @@ type IndexConfig struct {
 	EmbedBatchSize          int                    // Number of chunks to batch for embedding (default: 64)
 	Quantization            store.QuantizationMode // Vector quantization mode (none, int8, binary)
 	SmartSkip               bool                   // Enable smart skipping for large repos (default: true)
+	CompactVectorStorage    bool                   // Store first-stage vectors in TQ-MSE sidecars instead of SQL blobs
 	AdaptiveColBERTSegments bool                   // Enable token-aware sqrt(M) ColBERT segment budgets
 	ColBERTCodec            store.ColBERTCodec     // Late interaction segment codec (tqmse, int8, pq6)
 }
@@ -90,6 +91,7 @@ func DefaultIndexConfig() *IndexConfig {
 		EmbedBatchSize:          embedBatchSize,
 		Quantization:            store.QuantizeInt8, // Default to int8 for 4x storage savings
 		SmartSkip:               true,               // Enable smart skipping for large repos
+		CompactVectorStorage:    true,
 		AdaptiveColBERTSegments: false,
 		ColBERTCodec:            store.ColBERTCodecUnspecified,
 	}
@@ -107,6 +109,10 @@ type Indexer struct {
 	colbertCodec store.ColBERTCodec
 	colbertPQ    *util.ProductQuantizer
 	colbertTQMSE *util.TQMSEQuantizer
+	compactTQ    *compactVectorCollector
+	tqChunks     int
+	tqFiles      int
+	tqBuilt      bool
 	processed    int64
 	errors       int64
 }
@@ -257,11 +263,106 @@ type chunkItem struct {
 	isTest     bool
 }
 
+type compactVectorCollector struct {
+	chunks *store.TQVectorAccumulator
+	files  map[string]*compactFileVector
+}
+
+type compactFileVector struct {
+	sum        []float32
+	chunkCount int
+}
+
+func newCompactVectorCollector() (*compactVectorCollector, error) {
+	opts := store.TQVectorBuildOptions{
+		Dims: colbertEmbeddingDims(),
+		Bits: colbertTQMSEBits,
+		Seed: colbertTQMSESeed,
+	}
+	chunks, err := store.NewTQVectorAccumulator(opts)
+	if err != nil {
+		return nil, err
+	}
+	return &compactVectorCollector{
+		chunks: chunks,
+		files:  make(map[string]*compactFileVector),
+	}, nil
+}
+
+func (c *compactVectorCollector) AddDocuments(docs []*store.Document) error {
+	for _, doc := range docs {
+		if err := c.chunks.Add(doc.ID, doc.Embedding); err != nil {
+			return err
+		}
+		norm := util.NormalizeVectorCopy(doc.Embedding)
+		file := c.files[doc.FilePath]
+		if file == nil {
+			file = &compactFileVector{sum: make([]float32, len(norm))}
+			c.files[doc.FilePath] = file
+		}
+		if len(file.sum) != len(norm) {
+			return fmt.Errorf("file %s has mixed vector dims: %d and %d", doc.FilePath, len(file.sum), len(norm))
+		}
+		for i, v := range norm {
+			file.sum[i] += v
+		}
+		file.chunkCount++
+	}
+	return nil
+}
+
+func (c *compactVectorCollector) Write(ctx context.Context, repoDir string) (int, int, error) {
+	chunkCount, err := c.chunks.WriteChunkStore(ctx, repoDir)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	fileAcc, err := store.NewTQVectorAccumulator(store.TQVectorBuildOptions{
+		Dims: colbertEmbeddingDims(),
+		Bits: colbertTQMSEBits,
+		Seed: colbertTQMSESeed,
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	for filePath, file := range c.files {
+		if file.chunkCount == 0 {
+			continue
+		}
+		mean := make([]float32, len(file.sum))
+		scale := float32(1.0 / float64(file.chunkCount))
+		for i, v := range file.sum {
+			mean[i] = v * scale
+		}
+		if err := fileAcc.Add(filePath, mean); err != nil {
+			return 0, 0, err
+		}
+	}
+	fileCount, err := fileAcc.WriteFileStore(ctx, repoDir)
+	if err != nil {
+		return 0, 0, err
+	}
+	return chunkCount, fileCount, nil
+}
+
 // Index indexes all files in the root path.
 func (idx *Indexer) Index(ctx context.Context) error {
 	startTime := time.Now()
 	debugLevel := util.GetDebugLevel()
 	stats := util.NewTimingStats(debugLevel)
+	idx.processed = 0
+	idx.errors = 0
+	idx.tqChunks = 0
+	idx.tqFiles = 0
+	idx.tqBuilt = false
+	idx.compactTQ = nil
+	if idx.indexCfg.CompactVectorStorage {
+		collector, err := newCompactVectorCollector()
+		if err != nil {
+			return fmt.Errorf("initialize compact TQ-MSE collector: %w", err)
+		}
+		idx.compactTQ = collector
+	}
 
 	fmt.Printf("Indexing %s...\n", idx.rootPath)
 	util.Debugf(util.DebugSummary, "Indexing %s", idx.rootPath)
@@ -324,6 +425,17 @@ func (idx *Indexer) Index(ctx context.Context) error {
 
 	fmt.Printf("Found %d files to index\n", len(files))
 
+	if resetter, ok := idx.store.(store.IndexResetter); ok {
+		resetTimer := util.NewTimer("reset_index")
+		if err := resetter.ResetIndex(ctx); err != nil {
+			return fmt.Errorf("reset existing index: %w", err)
+		}
+		resetDuration := resetTimer.Stop()
+		if resetDuration > time.Millisecond {
+			stats.RecordStage("reset_index", resetDuration, 1)
+		}
+	}
+
 	// === Three-stage pipeline with global batching ===
 	// Stage 1: File readers (parallel) - read files and chunk them
 	// Stage 2: Embedding batcher (single goroutine) - collect chunks and batch embed
@@ -349,7 +461,7 @@ func (idx *Indexer) Index(ctx context.Context) error {
 	writerWg.Go(func() {
 		for docs := range docChan {
 			writeTimer := util.NewTimer("db_write")
-			if err := idx.store.StoreBatch(ctx, docs); err != nil {
+			if err := idx.storeIndexBatch(ctx, docs); err != nil {
 				atomic.AddInt64(&idx.errors, 1)
 				fmt.Fprintf(os.Stderr, "Error storing batch: %v\n", err)
 			}
@@ -508,15 +620,35 @@ func (idx *Indexer) Index(ctx context.Context) error {
 		stats.RecordStage("flush", flushDuration, 1)
 	}
 
-	// Compute document-level embeddings (mean of chunk embeddings per file)
-	fileEmbedTimer := util.NewTimer("file_embeddings")
-	fileCount, err := idx.computeFileEmbeddings(ctx)
-	fileEmbedDuration := fileEmbedTimer.Stop()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to compute file embeddings: %v\n", err)
-	} else if fileCount > 0 {
-		stats.RecordStage("file_embeddings", fileEmbedDuration, int64(fileCount))
-		util.Debugf(util.DebugSummary, "Computed %d file embeddings in %v", fileCount, fileEmbedDuration.Round(time.Millisecond))
+	if idx.compactTQ != nil {
+		tqTimer := util.NewTimer("compact_tq_export")
+		chunkCount, fileCount, err := idx.compactTQ.Write(ctx, idx.repoDir)
+		tqDuration := tqTimer.Stop()
+		if err != nil {
+			return fmt.Errorf("write compact TQ-MSE vector stores: %w", err)
+		}
+		idx.tqChunks = chunkCount
+		idx.tqFiles = fileCount
+		idx.tqBuilt = true
+		stats.RecordStage("compact_tq_export", tqDuration, int64(chunkCount+fileCount))
+		if clearer, ok := idx.store.(store.VectorStorageClearer); ok {
+			clearTimer := util.NewTimer("clear_sql_vectors")
+			if err := clearer.ClearVectorStorage(ctx); err != nil {
+				return fmt.Errorf("clear SQL vector storage: %w", err)
+			}
+			stats.RecordStage("clear_sql_vectors", clearTimer.Stop(), 1)
+		}
+	} else {
+		// Compute document-level embeddings (mean of chunk embeddings per file)
+		fileEmbedTimer := util.NewTimer("file_embeddings")
+		fileCount, err := idx.computeFileEmbeddings(ctx)
+		fileEmbedDuration := fileEmbedTimer.Stop()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to compute file embeddings: %v\n", err)
+		} else if fileCount > 0 {
+			stats.RecordStage("file_embeddings", fileEmbedDuration, int64(fileCount))
+			util.Debugf(util.DebugSummary, "Computed %d file embeddings in %v", fileCount, fileEmbedDuration.Round(time.Millisecond))
+		}
 	}
 
 	elapsed := time.Since(startTime)
@@ -529,6 +661,30 @@ func (idx *Indexer) Index(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (idx *Indexer) storeIndexBatch(ctx context.Context, docs []*store.Document) error {
+	if idx.compactTQ == nil {
+		return idx.store.StoreBatch(ctx, docs)
+	}
+	if metadataStore, ok := idx.store.(store.MetadataBatchStorer); ok {
+		if err := metadataStore.StoreMetadataBatch(ctx, docs); err != nil {
+			return err
+		}
+	} else if err := idx.store.StoreBatch(ctx, docs); err != nil {
+		return err
+	}
+	return idx.compactTQ.AddDocuments(docs)
+}
+
+// CompactVectorStoreWritten reports whether Index wrote compact TQ-MSE sidecars directly.
+func (idx *Indexer) CompactVectorStoreWritten() bool {
+	return idx.tqBuilt
+}
+
+// CompactVectorStoreCounts returns chunk and file vector counts from direct TQ-MSE indexing.
+func (idx *Indexer) CompactVectorStoreCounts() (int, int) {
+	return idx.tqChunks, idx.tqFiles
 }
 
 // readAndChunkFile reads a file and returns chunk items ready for batching.

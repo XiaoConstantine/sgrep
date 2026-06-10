@@ -33,6 +33,19 @@ func ExtractSearchTerms(query string) string {
 	return strings.Join(terms, " OR ")
 }
 
+// ExtractHybridSearchTerms converts a natural language query to FTS5 MATCH syntax
+// with code-identifier compound expansions for hybrid lexical retrieval.
+func ExtractHybridSearchTerms(query string) string {
+	terms := extractTerms(query)
+	if len(terms) == 0 {
+		return ""
+	}
+	if len(terms) == 1 {
+		return terms[0]
+	}
+	return strings.Join(groupedCompoundTerms(terms), " AND ")
+}
+
 // ExtractSearchTermsAND converts a natural language query to FTS5 MATCH syntax.
 // Returns terms joined with AND for strict matching.
 func ExtractSearchTermsAND(query string) string {
@@ -67,6 +80,61 @@ func extractTerms(query string) []string {
 	}
 
 	return terms
+}
+
+func groupedCompoundTerms(terms []string) []string {
+	compounds := compoundTermsByInputIndex(terms)
+	groups := make([]string, 0, len(terms))
+	for i, term := range terms {
+		alternatives := make([]string, 0, 1+len(compounds[i]))
+		seen := make(map[string]struct{}, 1+len(compounds[i]))
+		add := func(value string) {
+			if value == "" {
+				return
+			}
+			if _, ok := seen[value]; ok {
+				return
+			}
+			seen[value] = struct{}{}
+			alternatives = append(alternatives, value)
+		}
+		add(term)
+		for _, compound := range compounds[i] {
+			add(compound)
+		}
+		if len(alternatives) == 1 {
+			groups = append(groups, alternatives[0])
+			continue
+		}
+		groups = append(groups, "("+strings.Join(alternatives, " OR ")+")")
+	}
+	return groups
+}
+
+func compoundTermsByInputIndex(terms []string) map[int][]string {
+	compounds := make(map[int][]string, len(terms))
+	const maxNgram = 4
+	for width := 2; width <= maxNgram && width <= len(terms); width++ {
+		for start := 0; start+width <= len(terms); start++ {
+			var b strings.Builder
+			skip := false
+			for _, term := range terms[start : start+width] {
+				if strings.Contains(term, `"`) {
+					skip = true
+					break
+				}
+				b.WriteString(term)
+			}
+			if skip {
+				continue
+			}
+			compound := b.String()
+			for i := start; i < start+width; i++ {
+				compounds[i] = append(compounds[i], compound)
+			}
+		}
+	}
+	return compounds
 }
 
 // escapeFTS5 escapes special characters for FTS5 queries.
