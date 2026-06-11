@@ -41,9 +41,9 @@ func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions)
 		}
 
 		// Generate query embedding
-		queryEmb, err := s.embedder.Embed(ctx, query)
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate query embedding: %w", err)
+		queryEmb, embedErr := s.embedder.Embed(ctx, query)
+		if embedErr != nil {
+			return nil, fmt.Errorf("failed to generate query embedding: %w", embedErr)
 		}
 
 		hasFilters := opts.Agent != AgentAll || opts.Project != "" || !opts.Since.IsZero() || !opts.Before.IsZero()
