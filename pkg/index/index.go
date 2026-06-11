@@ -616,7 +616,8 @@ func (idx *Indexer) Index(ctx context.Context) error {
 		stats.RecordStage("flush", flushDuration, 1)
 	}
 
-	if atomic.LoadInt64(&idx.errors) == 0 {
+	hadErrors := atomic.LoadInt64(&idx.errors) != 0
+	if !hadErrors {
 		pruneTimer := util.NewTimer("prune_index")
 		pruned, err := idx.pruneStaleIndex(ctx, liveIDs, livePaths)
 		if err != nil {
@@ -630,35 +631,8 @@ func (idx *Indexer) Index(ctx context.Context) error {
 		fmt.Fprintln(os.Stderr, "Warning: skipped stale index cleanup because indexing had errors")
 	}
 
-	if idx.compactTQ != nil {
-		tqTimer := util.NewTimer("compact_tq_export")
-		chunkCount, fileCount, err := idx.compactTQ.Write(ctx, idx.repoDir)
-		tqDuration := tqTimer.Stop()
-		if err != nil {
-			return fmt.Errorf("write compact TQ-MSE vector stores: %w", err)
-		}
-		idx.tqChunks = chunkCount
-		idx.tqFiles = fileCount
-		idx.tqBuilt = true
-		stats.RecordStage("compact_tq_export", tqDuration, int64(chunkCount+fileCount))
-		if clearer, ok := idx.store.(store.VectorStorageClearer); ok {
-			clearTimer := util.NewTimer("clear_sql_vectors")
-			if err := clearer.ClearVectorStorage(ctx); err != nil {
-				return fmt.Errorf("clear SQL vector storage: %w", err)
-			}
-			stats.RecordStage("clear_sql_vectors", clearTimer.Stop(), 1)
-		}
-	} else {
-		// Compute document-level embeddings (mean of chunk embeddings per file)
-		fileEmbedTimer := util.NewTimer("file_embeddings")
-		fileCount, err := idx.computeFileEmbeddings(ctx)
-		fileEmbedDuration := fileEmbedTimer.Stop()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to compute file embeddings: %v\n", err)
-		} else if fileCount > 0 {
-			stats.RecordStage("file_embeddings", fileEmbedDuration, int64(fileCount))
-			util.Debugf(util.DebugSummary, "Computed %d file embeddings in %v", fileCount, fileEmbedDuration.Round(time.Millisecond))
-		}
+	if err := idx.refreshDerivedVectorArtifacts(ctx, stats, hadErrors); err != nil {
+		return err
 	}
 
 	elapsed := time.Since(startTime)
@@ -695,6 +669,56 @@ func (idx *Indexer) pruneStaleIndex(ctx context.Context, liveIDs, livePaths map[
 		return false, nil
 	}
 	return true, pruner.PruneIndex(ctx, sortedSet(liveIDs), sortedSet(livePaths))
+}
+
+func (idx *Indexer) refreshDerivedVectorArtifacts(ctx context.Context, stats *util.TimingStats, hadErrors bool) error {
+	if idx.compactTQ != nil {
+		if hadErrors {
+			fmt.Fprintln(os.Stderr, "Warning: skipped compact TQ-MSE export because indexing had errors")
+			return nil
+		}
+		return idx.writeCompactVectorStores(ctx, stats)
+	}
+
+	if hadErrors {
+		fmt.Fprintln(os.Stderr, "Warning: skipped file embedding refresh because indexing had errors")
+		return nil
+	}
+
+	// Compute document-level embeddings (mean of chunk embeddings per file)
+	fileEmbedTimer := util.NewTimer("file_embeddings")
+	fileCount, err := idx.computeFileEmbeddings(ctx)
+	fileEmbedDuration := fileEmbedTimer.Stop()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to compute file embeddings: %v\n", err)
+		return nil
+	}
+	if fileCount > 0 {
+		stats.RecordStage("file_embeddings", fileEmbedDuration, int64(fileCount))
+		util.Debugf(util.DebugSummary, "Computed %d file embeddings in %v", fileCount, fileEmbedDuration.Round(time.Millisecond))
+	}
+	return nil
+}
+
+func (idx *Indexer) writeCompactVectorStores(ctx context.Context, stats *util.TimingStats) error {
+	tqTimer := util.NewTimer("compact_tq_export")
+	chunkCount, fileCount, err := idx.compactTQ.Write(ctx, idx.repoDir)
+	tqDuration := tqTimer.Stop()
+	if err != nil {
+		return fmt.Errorf("write compact TQ-MSE vector stores: %w", err)
+	}
+	idx.tqChunks = chunkCount
+	idx.tqFiles = fileCount
+	idx.tqBuilt = true
+	stats.RecordStage("compact_tq_export", tqDuration, int64(chunkCount+fileCount))
+	if clearer, ok := idx.store.(store.VectorStorageClearer); ok {
+		clearTimer := util.NewTimer("clear_sql_vectors")
+		if err := clearer.ClearVectorStorage(ctx); err != nil {
+			return fmt.Errorf("clear SQL vector storage: %w", err)
+		}
+		stats.RecordStage("clear_sql_vectors", clearTimer.Stop(), 1)
+	}
+	return nil
 }
 
 func sortedSet(set map[string]struct{}) []string {

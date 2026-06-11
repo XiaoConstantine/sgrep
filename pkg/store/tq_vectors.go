@@ -149,42 +149,53 @@ func TQFileVectorPath(dir string) string {
 	return filepath.Join(dir, tqFileVectorFileName)
 }
 
+// HasTQVectorStoreAtPath reports whether a compact dense vector artifact exists.
+func HasTQVectorStoreAtPath(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Size() >= tqVectorHeaderSize
+}
+
 // HasTQVectorStore reports whether a compact dense vector artifact exists.
 func HasTQVectorStore(dir string) bool {
-	info, err := os.Stat(TQVectorPath(dir))
-	return err == nil && info.Size() >= tqVectorHeaderSize
+	return HasTQVectorStoreAtPath(TQVectorPath(dir))
 }
 
 // HasTQFileVectorStore reports whether a compact file-level vector artifact exists.
 func HasTQFileVectorStore(dir string) bool {
-	info, err := os.Stat(TQFileVectorPath(dir))
-	return err == nil && info.Size() >= tqVectorHeaderSize
+	return HasTQVectorStoreAtPath(TQFileVectorPath(dir))
+}
+
+// RemoveTQVectorStoreAtPath removes a compact dense vector artifact when present.
+func RemoveTQVectorStoreAtPath(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 // RemoveTQVectorStore removes the compact dense vector artifact when present.
 func RemoveTQVectorStore(dir string) error {
-	if err := os.Remove(TQVectorPath(dir)); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
+	return RemoveTQVectorStoreAtPath(TQVectorPath(dir))
 }
 
 // RemoveTQFileVectorStore removes the compact file-level vector artifact when present.
 func RemoveTQFileVectorStore(dir string) error {
-	if err := os.Remove(TQFileVectorPath(dir)); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
+	return RemoveTQVectorStoreAtPath(TQFileVectorPath(dir))
+}
+
+// BuildTQVectorStoreAtPath writes a compact dense vector artifact to path.
+func BuildTQVectorStoreAtPath(ctx context.Context, path string, ids []string, embeddings [][]float32, opts TQVectorBuildOptions) (int, error) {
+	return buildTQVectorStore(ctx, path, ids, embeddings, opts)
 }
 
 // BuildTQVectorStore writes a compact dense vector artifact for chunk vectors.
 func BuildTQVectorStore(ctx context.Context, dir string, chunkIDs []string, embeddings [][]float32, opts TQVectorBuildOptions) (int, error) {
-	return buildTQVectorStore(ctx, TQVectorPath(dir), chunkIDs, embeddings, opts)
+	return BuildTQVectorStoreAtPath(ctx, TQVectorPath(dir), chunkIDs, embeddings, opts)
 }
 
 // BuildTQFileVectorStore writes a compact dense vector artifact for file-level vectors.
 func BuildTQFileVectorStore(ctx context.Context, dir string, filePaths []string, embeddings [][]float32, opts TQVectorBuildOptions) (int, error) {
-	return buildTQVectorStore(ctx, TQFileVectorPath(dir), filePaths, embeddings, opts)
+	return BuildTQVectorStoreAtPath(ctx, TQFileVectorPath(dir), filePaths, embeddings, opts)
 }
 
 func buildTQVectorStore(ctx context.Context, path string, ids []string, embeddings [][]float32, opts TQVectorBuildOptions) (int, error) {
@@ -364,15 +375,16 @@ func buildTQVectorStoreFromCodes(ctx context.Context, path string, ids []string,
 
 // OpenTQVectorStore opens an existing compact dense vector artifact.
 func OpenTQVectorStore(dir string) (*TQVectorStore, error) {
-	return openTQVectorStore(TQVectorPath(dir))
+	return OpenTQVectorStoreAtPath(TQVectorPath(dir))
 }
 
 // OpenTQFileVectorStore opens an existing compact file-level vector artifact.
 func OpenTQFileVectorStore(dir string) (*TQVectorStore, error) {
-	return openTQVectorStore(TQFileVectorPath(dir))
+	return OpenTQVectorStoreAtPath(TQFileVectorPath(dir))
 }
 
-func openTQVectorStore(path string) (*TQVectorStore, error) {
+// OpenTQVectorStoreAtPath opens an existing compact dense vector artifact.
+func OpenTQVectorStoreAtPath(path string) (*TQVectorStore, error) {
 	s := &TQVectorStore{
 		path:      path,
 		idToIndex: make(map[string]int),

@@ -572,6 +572,11 @@ func runConvIndex(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	vecCount, err := indexer.RebuildTQVectorStore(ctx)
+	if err != nil {
+		return fmt.Errorf("refresh compact TQ-MSE conversation vectors: %w", err)
+	}
+	fmt.Printf("Refreshed compact TQ-MSE conversation vectors (%d turns)\n", vecCount)
 	fmt.Printf("\nTotal: %d sessions, %d turns indexed\n", totalSessions, totalTurns)
 	return nil
 }

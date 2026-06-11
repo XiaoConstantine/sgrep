@@ -177,7 +177,12 @@ func indexConversationsOnce(ctx context.Context, indexer *conv.Indexer, parsers 
 			totalTurns += result.TurnsIndexed
 		}
 	}
+	vecCount, err := indexer.RebuildTQVectorStore(ctx)
+	if err != nil {
+		return fmt.Errorf("refresh compact TQ-MSE conversation vectors: %w", err)
+	}
 	if verbose {
+		fmt.Printf("Refreshed compact TQ-MSE conversation vectors (%d turns)\n", vecCount)
 		fmt.Printf("Initial index complete: %d sessions, %d turns\n", totalSessions, totalTurns)
 	}
 	return nil
@@ -194,6 +199,7 @@ func processConvJobs(ctx context.Context, indexer *conv.Indexer, pending map[str
 	}
 	mu.Unlock()
 
+	var indexedTurns int
 	for _, job := range jobs {
 		sessions, err := job.parser.Parse(job.path)
 		if err != nil {
@@ -220,6 +226,19 @@ func processConvJobs(ctx context.Context, indexer *conv.Indexer, pending map[str
 		if verbose && result.SessionsIndexed > 0 {
 			fmt.Printf("Indexed %d sessions (%d turns) from %s\n",
 				result.SessionsIndexed, result.TurnsIndexed, job.path)
+		}
+		indexedTurns += result.TurnsIndexed
+	}
+	if indexedTurns > 0 {
+		vecCount, err := indexer.RebuildTQVectorStore(ctx)
+		if err != nil {
+			if verbose {
+				fmt.Fprintf(os.Stderr, "Warning: refresh compact TQ-MSE conversation vectors failed: %v\n", err)
+			}
+			return
+		}
+		if verbose {
+			fmt.Printf("Refreshed compact TQ-MSE conversation vectors (%d turns)\n", vecCount)
 		}
 	}
 }

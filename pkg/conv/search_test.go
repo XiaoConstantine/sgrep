@@ -188,6 +188,75 @@ func TestSearcherExactUsesKeywordSearchWithoutEmbedder(t *testing.T) {
 	}
 }
 
+func TestFilteredHybridSearchAppliesAgentFilter(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(tmpDir, "test.db"), Dims: defaultDims})
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+	now := time.Now()
+	sessions := []*Session{
+		{
+			ID:          "claude-auth",
+			Agent:       AgentClaudeCode,
+			ProjectPath: "/repo/auth",
+			ProjectName: "auth",
+			StartedAt:   now,
+			EndedAt:     now,
+			Turns: []Turn{
+				{Index: 0, UserContent: "authentication jwt", AssistContent: "claude answer"},
+			},
+		},
+		{
+			ID:          "codex-auth",
+			Agent:       AgentCodexCLI,
+			ProjectPath: "/repo/auth",
+			ProjectName: "auth",
+			StartedAt:   now,
+			EndedAt:     now,
+			Turns: []Turn{
+				{Index: 0, UserContent: "authentication jwt", AssistContent: "codex answer"},
+			},
+		},
+	}
+	for _, session := range sessions {
+		if err := store.StoreSession(ctx, session); err != nil {
+			t.Fatalf("failed to store session: %v", err)
+		}
+	}
+
+	embedding := make([]float32, defaultDims)
+	embedding[0] = 1
+	if err := store.StoreTurnEmbeddingBatch(ctx,
+		[]string{"claude-auth:0", "codex-auth:0"},
+		[][]float32{embedding, embedding},
+	); err != nil {
+		t.Fatalf("failed to store embeddings: %v", err)
+	}
+
+	opts := DefaultSearchOptions()
+	opts.Agent = AgentCodexCLI
+	opts.Limit = 10
+	opts.Threshold = 0
+
+	results, err := store.FilteredHybridSearch(ctx, embedding, "authentication", opts)
+	if err != nil {
+		t.Fatalf("hybrid search failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 filtered result, got %d", len(results))
+	}
+	if results[0].SessionID != "codex-auth" {
+		t.Fatalf("expected codex-auth, got %s", results[0].SessionID)
+	}
+	if results[0].MatchType != "hybrid" {
+		t.Fatalf("expected hybrid match type, got %q", results[0].MatchType)
+	}
+}
+
 func TestConversationHit_Fields(t *testing.T) {
 	hit := ConversationHit{
 		SessionID:   "test-session",

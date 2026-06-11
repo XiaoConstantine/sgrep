@@ -3,6 +3,7 @@ package conv
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -558,6 +559,183 @@ func TestStore_StoreTurnEmbedding(t *testing.T) {
 			t.Error("turn should not be in 'needs embedding' list after storing embedding")
 		}
 	}
+}
+
+func TestStore_RebuildTQVectorStoreLoadsForReadOnlySearch(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := NewStore(StoreConfig{DBPath: dbPath, Dims: defaultDims})
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	ctx := context.Background()
+	session := &Session{
+		ID:        "tq-search-test",
+		Agent:     AgentCodexCLI,
+		StartedAt: time.Now(),
+		EndedAt:   time.Now(),
+		Turns: []Turn{
+			{Index: 0, UserContent: "turboquant mse search", AssistContent: "compact vector sidecar"},
+			{Index: 1, UserContent: "database migration", AssistContent: "schema update"},
+		},
+	}
+	if err := store.StoreSession(ctx, session); err != nil {
+		t.Fatalf("failed to store session: %v", err)
+	}
+
+	first := make([]float32, defaultDims)
+	first[0] = 1
+	second := make([]float32, defaultDims)
+	second[1] = 1
+	if err := store.StoreTurnEmbeddingBatch(ctx,
+		[]string{"tq-search-test:0", "tq-search-test:1"},
+		[][]float32{first, second},
+	); err != nil {
+		t.Fatalf("failed to store embeddings: %v", err)
+	}
+
+	count, err := store.RebuildTQVectorStore(ctx)
+	if err != nil {
+		t.Fatalf("RebuildTQVectorStore failed: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("TQ vector count = %d, want 2", count)
+	}
+	if store.tq == nil {
+		t.Fatal("expected writable store to load rebuilt TQ sidecar")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("failed to close writable store: %v", err)
+	}
+
+	t.Setenv("SGREP_CONV_VECTOR_BACKEND", "tqmse")
+	readStore, err := OpenStoreReadOnly(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open read-only TQ store: %v", err)
+	}
+	defer func() { _ = readStore.Close() }()
+	if readStore.tq == nil {
+		t.Fatal("expected read-only store to load TQ sidecar")
+	}
+
+	results, err := readStore.VectorSearch(ctx, first, 2, 0)
+	if err != nil {
+		t.Fatalf("VectorSearch failed: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected TQ vector search result")
+	}
+	if results[0].TurnID != "tq-search-test:0" {
+		t.Fatalf("top result = %s, want tq-search-test:0", results[0].TurnID)
+	}
+	if results[0].MatchType != "semantic" {
+		t.Fatalf("match type = %q, want semantic", results[0].MatchType)
+	}
+}
+
+func TestStore_StaleTQVectorStoreRejectedAfterSameCountEmbeddingUpdate(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := NewStore(StoreConfig{DBPath: dbPath, Dims: defaultDims})
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	ctx := context.Background()
+	session := &Session{
+		ID:        "tq-stale-test",
+		Agent:     AgentCodexCLI,
+		StartedAt: time.Now(),
+		EndedAt:   time.Now(),
+		Turns: []Turn{
+			{Index: 0, UserContent: "old topic", AssistContent: "old answer"},
+			{Index: 1, UserContent: "new topic", AssistContent: "new answer"},
+		},
+	}
+	if err := store.StoreSession(ctx, session); err != nil {
+		t.Fatalf("failed to store session: %v", err)
+	}
+
+	first := make([]float32, defaultDims)
+	first[0] = 1
+	second := make([]float32, defaultDims)
+	second[1] = 1
+	if err := store.StoreTurnEmbeddingBatch(ctx,
+		[]string{"tq-stale-test:0", "tq-stale-test:1"},
+		[][]float32{first, second},
+	); err != nil {
+		t.Fatalf("failed to store initial embeddings: %v", err)
+	}
+	if _, err := store.RebuildTQVectorStore(ctx); err != nil {
+		t.Fatalf("RebuildTQVectorStore failed: %v", err)
+	}
+
+	// Update the same turn IDs with the same vector count. Count-only validation
+	// would accept the stale sidecar and rank tq-stale-test:1 for query second.
+	if err := store.StoreTurnEmbeddingBatch(ctx,
+		[]string{"tq-stale-test:0", "tq-stale-test:1"},
+		[][]float32{second, first},
+	); err != nil {
+		t.Fatalf("failed to update embeddings: %v", err)
+	}
+	if store.tq != nil {
+		t.Fatal("expected in-process TQ sidecar to be invalidated after embedding update")
+	}
+	results, err := store.VectorSearch(ctx, second, 2, 0)
+	if err != nil {
+		t.Fatalf("same-process VectorSearch failed: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected same-process SQL fallback search result")
+	}
+	if results[0].TurnID != "tq-stale-test:0" {
+		t.Fatalf("same-process top result = %s, want tq-stale-test:0", results[0].TurnID)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("failed to close writable store: %v", err)
+	}
+
+	t.Run("default backend falls back to SQL", func(t *testing.T) {
+		t.Setenv("SGREP_CONV_VECTOR_BACKEND", "")
+		t.Setenv("SGREP_VECTOR_BACKEND", "")
+
+		readStore, err := OpenStoreReadOnly(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open read-only store: %v", err)
+		}
+		defer func() { _ = readStore.Close() }()
+		if readStore.tq != nil {
+			t.Fatal("expected stale TQ sidecar to stay unloaded")
+		}
+
+		results, err := readStore.VectorSearch(ctx, second, 2, 0)
+		if err != nil {
+			t.Fatalf("VectorSearch failed: %v", err)
+		}
+		if len(results) == 0 {
+			t.Fatal("expected SQL fallback search result")
+		}
+		if results[0].TurnID != "tq-stale-test:0" {
+			t.Fatalf("top result = %s, want tq-stale-test:0", results[0].TurnID)
+		}
+	})
+
+	t.Run("forced TQ rejects stale sidecar", func(t *testing.T) {
+		t.Setenv("SGREP_CONV_VECTOR_BACKEND", "tqmse")
+		t.Setenv("SGREP_VECTOR_BACKEND", "")
+
+		readStore, err := OpenStoreReadOnly(dbPath)
+		if err == nil {
+			_ = readStore.Close()
+			t.Fatal("expected stale TQ sidecar error")
+		}
+		if !strings.Contains(err.Error(), "stale") {
+			t.Fatalf("OpenStoreReadOnly error = %v, want stale sidecar error", err)
+		}
+	})
 }
 
 func TestStore_SessionExists(t *testing.T) {

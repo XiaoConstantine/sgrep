@@ -119,6 +119,11 @@ func (idx *Indexer) IndexSession(ctx context.Context, session *Session) error {
 	return idx.indexSession(ctx, session)
 }
 
+// RebuildTQVectorStore refreshes the compact TQ-MSE sidecar for conversation search.
+func (idx *Indexer) RebuildTQVectorStore(ctx context.Context) (int, error) {
+	return idx.store.RebuildTQVectorStore(ctx)
+}
+
 // indexSession indexes a single session and its turns.
 func (idx *Indexer) indexSession(ctx context.Context, session *Session) error {
 	// Estimate tokens

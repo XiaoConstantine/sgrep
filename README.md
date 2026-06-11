@@ -79,8 +79,12 @@ sgrep setup
 sgrep index .
 
 # Optional: override the default TQ-MSE ColBERT codec
+sgrep index . --colbert-codec tqmse
 sgrep index . --colbert-codec int8
 sgrep index . --colbert-codec pq6
+
+# Optional: keep full SQL vectors for legacy vector search
+sgrep index . --sql-vectors
 
 # Semantic search (quick)
 sgrep "error handling for database connections"
@@ -116,23 +120,32 @@ sgrep conv index --source pi
 # Watch mode (auto-index new conversations)
 sgrep conv index --watch
 
+# Re-index all cached sessions
+sgrep conv index --force
+
 # Search conversations
 sgrep conv "authentication"
 sgrep conv search "authentication" --agent codex --limit 5
 sgrep conv search "session compaction" --agent pi --limit 5
 sgrep conv "JWT token" --hybrid
 sgrep conv "database migration" --agent claude --since 7d
+sgrep conv "auth" --exact
+sgrep conv "bug fix" --project payment-service --after 2026-01-01 --before 2026-06-01
 
 # View, export, or resume a session
 sgrep conv view <session_id>
+sgrep conv view <session_id> --turn 3 --no-color
 sgrep conv export <session_id> -o conversation.md
+sgrep conv export <session_id> --format json -o conversation.json
 sgrep conv resume <session_id>
 
 # Extract context for injection into new session
 sgrep conv context <session_id>
+sgrep conv context <session_id> --turns 10 --copy
 
 # Copy to clipboard
 sgrep conv copy <session_id>
+sgrep conv copy <session_id> --turn 2 --code-only
 
 # Check index status
 sgrep conv status
@@ -140,8 +153,10 @@ sgrep conv status
 
 **Watch mode** monitors conversation directories for all agents and automatically indexes new sessions as they're created. This ensures your conversation search stays up-to-date without manual re-indexing.
 
-Conversations are stored at `~/.sgrep/conversations/conv.db`. Re-running
-`sgrep conv index` backfills missing embeddings for existing sessions.
+Conversations are stored at `~/.sgrep/conversations/conv.db` with compact
+TQ-MSE turn vectors in `~/.sgrep/conversations/turn_embeddings.tqmse`.
+Re-running `sgrep conv index` backfills missing embeddings for existing
+sessions and refreshes the compact conversation vector sidecar.
 
 Default search output includes the agent session/conversation ID so you can jump
 straight to `view`, `resume`, or external agent tooling with the exact session
@@ -237,7 +252,7 @@ sgrep --hybrid --colbert --semantic-weight 0.5 --bm25-weight 0.5 "JWT token"
 # Basic setup (embedding model only, ~130MB)
 sgrep setup
 
-# With cross-encoder reranking (~1.6GB additional)
+# With cross-encoder reranking (~636MB additional)
 sgrep setup --with-rerank
 ```
 
@@ -324,7 +339,8 @@ All data is stored in `~/.sgrep/`:
 │   └── d4e5f6/              # Hash of /path/to/repo2
 │       └── ...
 ├── conversations/
-│   └── conv.db              # Conversation search index
+│   ├── conv.db              # Conversation metadata, embeddings, and FTS
+│   └── turn_embeddings.tqmse # Compact TQ-MSE conversation turn vectors
 ├── server.pid               # Embedding server PID
 └── server.log               # Embedding server logs
 ```
@@ -361,10 +377,19 @@ when you want to re-compact the index after a long watch session.
 |---------|-------------|
 | `sgrep [query]` | Semantic search (default) |
 | `sgrep index [path]` | Index a directory |
+| `sgrep index [path] --colbert-codec tqmse/int8/pq6` | Select ColBERT segment codec |
+| `sgrep index [path] --sql-vectors` | Also store full SQL vectors for legacy search |
 | `sgrep watch [path]` | Watch and auto-index |
 | `sgrep list` | List all indexed repos |
 | `sgrep status` | Show index status |
 | `sgrep clear` | Clear index |
+| `sgrep conv [search] <query>` | Search indexed agent conversations |
+| `sgrep conv index [--source agent] [--watch] [--force]` | Index or watch conversations |
+| `sgrep conv view <session_id> [--turn N] [--no-color]` | View a conversation |
+| `sgrep conv export <session_id> --format markdown/json/html` | Export a conversation |
+| `sgrep conv context <session_id> [--turns N] [--copy]` | Extract context for a new session |
+| `sgrep conv copy <session_id> [--turn N] [--code-only]` | Copy a conversation or turn |
+| `sgrep conv status` | Show conversation index status |
 | `sgrep setup` | Download embedding model, verify llama-server |
 | `sgrep setup --with-rerank` | Also download reranker model (~636MB) |
 | `sgrep server start` | Manually start embedding server |
@@ -420,7 +445,7 @@ This creates:
 | `-c, --context` | Show code context |
 | `--json` | JSON output for agents |
 | `-q, --quiet` | Minimal output (paths only) |
-| `--threshold F` | L2 distance threshold (default: 1.5, lower = stricter) |
+| `--threshold F` | Cosine distance threshold (default: 1.5, lower = stricter) |
 | `-t, --include-tests` | Include test files in results (excluded by default) |
 | `--all-chunks` | Show all matching chunks (disable deduplication) |
 | `--hybrid` | Enable hybrid search (semantic + BM25) |
@@ -440,6 +465,8 @@ SGREP_PORT=8080                        # Embedding server port
 SGREP_DIMS=768                         # Vector dimensions
 SGREP_VECTOR_BACKEND=tqmse             # Force TQ-MSE search
 SGREP_VECTOR_BACKEND=libsql            # Force legacy SQL vector search (requires --sql-vectors index)
+SGREP_CONV_VECTOR_BACKEND=tqmse        # Force TQ-MSE conversation vector search
+SGREP_CONV_VECTOR_BACKEND=sqlite       # Force legacy SQL conversation vector scan
 ```
 
 ## How It Works

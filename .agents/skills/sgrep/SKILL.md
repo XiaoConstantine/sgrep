@@ -21,7 +21,7 @@ Use `sgrep` for semantic and hybrid search across **code** and **agent conversat
 - When ripgrep patterns keep missing relevant code
 
 ### Conversation Search
-- Finding past discussions with **Claude Code**, **Codex CLI**, or **Cursor**
+- Finding past discussions with **Claude Code**, **Codex CLI**, **Cursor**, **OpenCode**, or **Pi**
 - Recalling how you solved a similar problem before
 - Building context from previous sessions for new tasks
 - Searching across all your coding agent interactions
@@ -31,9 +31,15 @@ Use `sgrep` for semantic and hybrid search across **code** and **agent conversat
 ```bash
 # First time only
 sgrep setup
+sgrep setup --with-rerank  # optional, only for --rerank
 
 # Index current directory; builds compact TQ-MSE chunk/file vectors by default
 sgrep index .
+
+# Optional ColBERT segment codec override
+sgrep index . --colbert-codec tqmse
+sgrep index . --colbert-codec int8
+sgrep index . --colbert-codec pq6
 
 # Legacy compatibility: also persist full SQL vectors
 sgrep index . --sql-vectors
@@ -63,17 +69,32 @@ sgrep --json "rate limiting"
 ## Conversation Search
 
 ```bash
-# Index conversations
+# Index conversations; refreshes compact TQ-MSE turn vectors
 sgrep conv index
+sgrep conv index --source codex
+sgrep conv index --source claude
+sgrep conv index --source opencode
+sgrep conv index --source pi
+sgrep conv index --watch
+sgrep conv index --force
 
 # Search conversations
 sgrep conv "authentication flow"
 sgrep conv "JWT refresh_token" --hybrid
 sgrep conv "database migration" --agent claude --since 7d
+sgrep conv "bug fix" --project payment-service --after 2026-01-01 --before 2026-06-01
+sgrep conv "exact phrase" --exact
+sgrep conv "auth" --json -n 1
 
-# View or export a session
+# View, export, context, and copy helpers
 sgrep conv view <session_id>
+sgrep conv view <session_id> --turn 3 --no-color
+sgrep conv export <session_id> --format markdown -o conversation.md
+sgrep conv export <session_id> --format json -o conversation.json
 sgrep conv context <session_id>
+sgrep conv context <session_id> --turns 10 --copy
+sgrep conv copy <session_id> --turn 2 --code-only
+sgrep conv status
 ```
 
 ## Semantic vs Hybrid

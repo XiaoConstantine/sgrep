@@ -9,8 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	storepkg "github.com/XiaoConstantine/sgrep/pkg/store"
 )
 
 const (
@@ -18,14 +22,39 @@ const (
 	schemaVersion = 2
 	// Default embedding dimensions for nomic-embed-text
 	defaultDims = 768
+	// Compact TQ-MSE sidecar for conversation turn embeddings.
+	convTQVectorFileName = "turn_embeddings.tqmse"
+
+	convTQVectorGenerationKey        = "tq_vector_generation"
+	convTQVectorSidecarGenerationKey = "tq_vector_sidecar_generation"
+	convTQVectorSidecarCountKey      = "tq_vector_sidecar_count"
 )
 
 // Store handles conversation storage and retrieval.
 type Store struct {
-	db       *sql.DB
-	dbPath   string
-	dims     int
-	mmapPath string
+	db     *sql.DB
+	dbPath string
+	dims   int
+
+	tqPath string
+	tqMu   sync.RWMutex
+	tq     *storepkg.TQVectorStore
+}
+
+type tqVectorMetadata struct {
+	generation           int64
+	sidecarGeneration    int64
+	sidecarCount         int64
+	hasSidecarGeneration bool
+	hasSidecarCount      bool
+}
+
+type sqlQuerier interface {
+	QueryContext(context.Context, string, ...interface{}) (*sql.Rows, error)
+}
+
+type sqlExecutor interface {
+	ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
 }
 
 // StoreConfig configures the conversation store.
@@ -60,13 +89,25 @@ func NewStore(cfg StoreConfig) (*Store, error) {
 		_ = store.Close()
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
 	}
+	if err := store.loadTQIfAvailable(context.Background()); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
 
 	return store, nil
 }
 
 // OpenStore opens an existing store.
 func OpenStore(dbPath string) (*Store, error) {
-	return openStore(dbPath, defaultDims, false)
+	store, err := openStore(dbPath, defaultDims, false)
+	if err != nil {
+		return nil, err
+	}
+	if err := store.loadTQIfAvailable(context.Background()); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	return store, nil
 }
 
 // OpenStoreReadOnly opens an existing store without running schema migrations or writer pragmas.
@@ -77,6 +118,10 @@ func OpenStoreReadOnly(dbPath string) (*Store, error) {
 		return nil, err
 	}
 	if err := store.applyReadPragmas(); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	if err := store.loadTQIfAvailable(context.Background()); err != nil {
 		_ = store.Close()
 		return nil, err
 	}
@@ -105,10 +150,10 @@ func openStore(dbPath string, dims int, existingOnly bool) (*Store, error) {
 	db.SetMaxOpenConns(1)
 
 	return &Store{
-		db:       db,
-		dbPath:   dbPath,
-		dims:     dims,
-		mmapPath: filepath.Join(filepath.Dir(dbPath), "embeddings.mmap"),
+		db:     db,
+		dbPath: dbPath,
+		dims:   dims,
+		tqPath: filepath.Join(filepath.Dir(dbPath), convTQVectorFileName),
 	}, nil
 }
 
@@ -122,7 +167,228 @@ func appendDSNParam(dsn, key, value string) string {
 
 // Close closes the store.
 func (s *Store) Close() error {
-	return s.db.Close()
+	s.tqMu.Lock()
+	tq := s.tq
+	s.tq = nil
+	s.tqMu.Unlock()
+
+	var err error
+	if tq != nil {
+		err = tq.Close()
+	}
+	if closeErr := s.db.Close(); err == nil {
+		err = closeErr
+	}
+	return err
+}
+
+// TQVectorPath returns the compact TQ-MSE sidecar path for turn embeddings.
+func (s *Store) TQVectorPath() string {
+	return s.tqPath
+}
+
+func conversationVectorBackend() string {
+	if backend := strings.ToLower(os.Getenv("SGREP_CONV_VECTOR_BACKEND")); backend != "" {
+		return backend
+	}
+	return strings.ToLower(os.Getenv("SGREP_VECTOR_BACKEND"))
+}
+
+func (s *Store) loadTQIfAvailable(ctx context.Context) error {
+	backend := conversationVectorBackend()
+	if backend == "sqlite" || backend == "libsql" {
+		return nil
+	}
+	if s.tqPath == "" || !storepkg.HasTQVectorStoreAtPath(s.tqPath) {
+		if backend == "tqmse" {
+			return fmt.Errorf("SGREP_CONV_VECTOR_BACKEND=tqmse but %s is missing", s.tqPath)
+		}
+		return nil
+	}
+
+	tq, err := storepkg.OpenTQVectorStoreAtPath(s.tqPath)
+	if err != nil {
+		if backend == "tqmse" {
+			return err
+		}
+		return nil
+	}
+
+	valid, err := s.validateTQVectorStore(ctx, tq, backend)
+	if err != nil || !valid {
+		_ = tq.Close()
+		return err
+	}
+
+	s.tqMu.Lock()
+	valid, err = s.validateTQVectorStore(ctx, tq, backend)
+	if err != nil || !valid {
+		s.tqMu.Unlock()
+		_ = tq.Close()
+		return err
+	}
+	old := s.tq
+	s.tq = tq
+	s.tqMu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
+	return nil
+}
+
+func (s *Store) validateTQVectorStore(ctx context.Context, tq *storepkg.TQVectorStore, backend string) (bool, error) {
+	count, err := s.turnEmbeddingCount(ctx)
+	if err != nil {
+		if backend == "tqmse" {
+			return false, fmt.Errorf("check conversation embedding count: %w", err)
+		}
+		return false, nil
+	}
+	if count != tq.VectorCount() {
+		if backend == "tqmse" {
+			return false, fmt.Errorf("conversation TQ-MSE vector count %d does not match SQL embeddings %d", tq.VectorCount(), count)
+		}
+		return false, nil
+	}
+	metadata, err := s.tqVectorMetadata(ctx)
+	if err != nil {
+		if backend == "tqmse" {
+			return false, fmt.Errorf("check conversation TQ-MSE metadata: %w", err)
+		}
+		return false, nil
+	}
+	if !metadata.sidecarClean(count) {
+		if backend == "tqmse" {
+			return false, fmt.Errorf("conversation TQ-MSE vector store is stale; run sgrep conv index")
+		}
+		return false, nil
+	}
+	return true, nil
+}
+
+func (s *Store) turnEmbeddingCount(ctx context.Context) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM conv_turn_embeddings WHERE embedding IS NOT NULL`).Scan(&count)
+	return count, err
+}
+
+func (m tqVectorMetadata) sidecarClean(sqlCount int) bool {
+	return m.hasSidecarGeneration &&
+		m.hasSidecarCount &&
+		m.generation == m.sidecarGeneration &&
+		m.sidecarCount == int64(sqlCount)
+}
+
+func (s *Store) tqVectorMetadata(ctx context.Context) (tqVectorMetadata, error) {
+	return tqVectorMetadataFrom(ctx, s.db)
+}
+
+func tqVectorMetadataFrom(ctx context.Context, q sqlQuerier) (tqVectorMetadata, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT key, value
+		FROM conv_metadata
+		WHERE key IN (?, ?, ?)
+	`, convTQVectorGenerationKey, convTQVectorSidecarGenerationKey, convTQVectorSidecarCountKey)
+	if err != nil {
+		return tqVectorMetadata{}, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var metadata tqVectorMetadata
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return tqVectorMetadata{}, err
+		}
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return tqVectorMetadata{}, fmt.Errorf("parse %s=%q: %w", key, value, err)
+		}
+		switch key {
+		case convTQVectorGenerationKey:
+			metadata.generation = parsed
+		case convTQVectorSidecarGenerationKey:
+			metadata.sidecarGeneration = parsed
+			metadata.hasSidecarGeneration = true
+		case convTQVectorSidecarCountKey:
+			metadata.sidecarCount = parsed
+			metadata.hasSidecarCount = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return tqVectorMetadata{}, err
+	}
+	return metadata, nil
+}
+
+func bumpTQVectorGeneration(ctx context.Context, exec sqlExecutor) error {
+	if _, err := exec.ExecContext(ctx, `
+		INSERT OR IGNORE INTO conv_metadata (key, value)
+		VALUES (?, '0')
+	`, convTQVectorGenerationKey); err != nil {
+		return err
+	}
+	_, err := exec.ExecContext(ctx, `
+		UPDATE conv_metadata
+		SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+		WHERE key = ?
+	`, convTQVectorGenerationKey)
+	return err
+}
+
+func (s *Store) markTQVectorSidecarClean(ctx context.Context, generation int64, count int) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT OR IGNORE INTO conv_metadata (key, value)
+		VALUES (?, '0')
+	`, convTQVectorGenerationKey); err != nil {
+		return false, err
+	}
+	metadata, err := tqVectorMetadataFrom(ctx, tx)
+	if err != nil {
+		return false, err
+	}
+	if metadata.generation != generation {
+		return false, nil
+	}
+	if err := setMetadataValue(ctx, tx, convTQVectorSidecarGenerationKey, strconv.FormatInt(generation, 10)); err != nil {
+		return false, err
+	}
+	if err := setMetadataValue(ctx, tx, convTQVectorSidecarCountKey, strconv.Itoa(count)); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	committed = true
+	return true, nil
+}
+
+func setMetadataValue(ctx context.Context, exec sqlExecutor, key, value string) error {
+	_, err := exec.ExecContext(ctx, `
+		INSERT OR REPLACE INTO conv_metadata (key, value)
+		VALUES (?, ?)
+	`, key, value)
+	return err
+}
+
+func (s *Store) closeTQLocked() error {
+	if s.tq == nil {
+		return nil
+	}
+	err := s.tq.Close()
+	s.tq = nil
+	return err
 }
 
 // initSchema creates the database schema.
@@ -367,28 +633,8 @@ func (s *Store) StoreSession(ctx context.Context, session *Session) error {
 
 // StoreTurnEmbedding stores an embedding for a turn.
 func (s *Store) StoreTurnEmbedding(ctx context.Context, turnID string, embedding []float32) error {
-	blob := float32ToBlob(embedding)
-	var err error
-	if sqliteDriverName == "libsql" {
-		_, err = s.db.ExecContext(ctx, `
-			INSERT OR REPLACE INTO conv_turn_embeddings (turn_id, embedding)
-			VALUES (?, vector32(?))
-		`, turnID, blob)
-	} else {
-		// For sqlite3, store raw blob
-		_, err = s.db.ExecContext(ctx, `
-			INSERT OR REPLACE INTO conv_turn_embeddings (turn_id, embedding)
-			VALUES (?, ?)
-		`, turnID, blob)
-	}
-	return err
-}
-
-// StoreTurnEmbeddingBatch stores embeddings for multiple turns.
-func (s *Store) StoreTurnEmbeddingBatch(ctx context.Context, turnIDs []string, embeddings [][]float32) error {
-	if len(turnIDs) != len(embeddings) {
-		return fmt.Errorf("turnIDs and embeddings length mismatch")
-	}
+	s.tqMu.Lock()
+	defer s.tqMu.Unlock()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -400,6 +646,61 @@ func (s *Store) StoreTurnEmbeddingBatch(ctx context.Context, turnIDs []string, e
 			_ = tx.Rollback()
 		}
 	}()
+
+	if err := bumpTQVectorGeneration(ctx, tx); err != nil {
+		return fmt.Errorf("mark conversation TQ-MSE vectors stale: %w", err)
+	}
+
+	blob := float32ToBlob(embedding)
+	if sqliteDriverName == "libsql" {
+		_, err = tx.ExecContext(ctx, `
+			INSERT OR REPLACE INTO conv_turn_embeddings (turn_id, embedding)
+			VALUES (?, vector32(?))
+		`, turnID, blob)
+	} else {
+		// For sqlite3, store raw blob
+		_, err = tx.ExecContext(ctx, `
+			INSERT OR REPLACE INTO conv_turn_embeddings (turn_id, embedding)
+			VALUES (?, ?)
+		`, turnID, blob)
+	}
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	_ = s.closeTQLocked()
+	return nil
+}
+
+// StoreTurnEmbeddingBatch stores embeddings for multiple turns.
+func (s *Store) StoreTurnEmbeddingBatch(ctx context.Context, turnIDs []string, embeddings [][]float32) error {
+	if len(turnIDs) != len(embeddings) {
+		return fmt.Errorf("turnIDs and embeddings length mismatch")
+	}
+	if len(turnIDs) == 0 {
+		return nil
+	}
+
+	s.tqMu.Lock()
+	defer s.tqMu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if err := bumpTQVectorGeneration(ctx, tx); err != nil {
+		return fmt.Errorf("mark conversation TQ-MSE vectors stale: %w", err)
+	}
 
 	var stmtSQL string
 	if sqliteDriverName == "libsql" {
@@ -423,11 +724,126 @@ func (s *Store) StoreTurnEmbeddingBatch(ctx context.Context, turnIDs []string, e
 	}
 
 	if err := tx.Commit(); err != nil {
-		_ = tx.Rollback()
 		return err
 	}
 	committed = true
+	_ = s.closeTQLocked()
 	return nil
+}
+
+// ExportTurnEmbeddings returns all turn embeddings for compact TQ-MSE export.
+func (s *Store) ExportTurnEmbeddings(ctx context.Context) ([]string, [][]float32, error) {
+	return exportTurnEmbeddingsFrom(ctx, s.db, s.dims)
+}
+
+func (s *Store) exportTurnEmbeddingsSnapshot(ctx context.Context) (int64, []string, [][]float32, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	metadata, err := tqVectorMetadataFrom(ctx, tx)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	ids, embeddings, err := exportTurnEmbeddingsFrom(ctx, tx, s.dims)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, nil, nil, err
+	}
+	committed = true
+	return metadata.generation, ids, embeddings, nil
+}
+
+func exportTurnEmbeddingsFrom(ctx context.Context, q sqlQuerier, dims int) ([]string, [][]float32, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT turn_id, embedding
+		FROM conv_turn_embeddings
+		WHERE embedding IS NOT NULL
+		ORDER BY turn_id
+	`)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	ids := make([]string, 0)
+	embeddings := make([][]float32, 0)
+	for rows.Next() {
+		var id string
+		var blob []byte
+		if err := rows.Scan(&id, &blob); err != nil {
+			return nil, nil, err
+		}
+		embedding := blobToFloat32(blob)
+		if len(embedding) != dims {
+			continue
+		}
+		ids = append(ids, id)
+		embeddings = append(embeddings, embedding)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	return ids, embeddings, nil
+}
+
+// RebuildTQVectorStore refreshes the compact TQ-MSE turn-vector sidecar from SQL embeddings.
+func (s *Store) RebuildTQVectorStore(ctx context.Context) (int, error) {
+	generation, ids, embeddings, err := s.exportTurnEmbeddingsSnapshot(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("export conversation turn embeddings: %w", err)
+	}
+
+	s.tqMu.Lock()
+	if err := s.closeTQLocked(); err != nil {
+		s.tqMu.Unlock()
+		return 0, err
+	}
+	s.tqMu.Unlock()
+
+	if len(ids) == 0 {
+		if err := storepkg.RemoveTQVectorStoreAtPath(s.tqPath); err != nil {
+			return 0, err
+		}
+		clean, err := s.markTQVectorSidecarClean(ctx, generation, 0)
+		if err != nil {
+			return 0, err
+		}
+		if !clean {
+			return 0, fmt.Errorf("conversation embeddings changed while refreshing compact TQ-MSE vectors")
+		}
+		return 0, nil
+	}
+
+	count, err := storepkg.BuildTQVectorStoreAtPath(ctx, s.tqPath, ids, embeddings, storepkg.TQVectorBuildOptions{
+		Dims: s.dims,
+		Bits: 4,
+		Seed: 42,
+	})
+	if err != nil {
+		_ = s.loadTQIfAvailable(ctx)
+		return 0, err
+	}
+	clean, err := s.markTQVectorSidecarClean(ctx, generation, count)
+	if err != nil {
+		return 0, err
+	}
+	if !clean {
+		return count, fmt.Errorf("conversation embeddings changed while refreshing compact TQ-MSE vectors")
+	}
+	if err := s.loadTQIfAvailable(ctx); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 // GetSession retrieves a session by ID.
@@ -510,6 +926,10 @@ type SearchResult struct {
 // Uses manual cosine similarity since libSQL's vector_top_k may not be available.
 // Returns results with Score as similarity (0-1, higher is better).
 func (s *Store) VectorSearch(ctx context.Context, embedding []float32, limit int, threshold float64) ([]SearchResult, error) {
+	if results, ok, err := s.tqVectorSearch(ctx, embedding, limit, threshold); ok || err != nil {
+		return results, err
+	}
+
 	// Get all embeddings and compute similarity manually
 	// This is less efficient than native vector search but works with any SQLite
 	rows, err := s.db.QueryContext(ctx, `
@@ -558,6 +978,90 @@ func (s *Store) VectorSearch(ctx context.Context, embedding []float32, limit int
 	}
 
 	return results, rows.Err()
+}
+
+func (s *Store) tqVectorSearch(ctx context.Context, embedding []float32, limit int, threshold float64) ([]SearchResult, bool, error) {
+	s.tqMu.RLock()
+	defer s.tqMu.RUnlock()
+	tq := s.tq
+	if tq == nil {
+		return nil, false, nil
+	}
+
+	distanceThreshold := 1.0 - threshold
+	if threshold <= 0 {
+		distanceThreshold = 2.0
+	}
+	hits, err := tq.Search(ctx, embedding, limit, distanceThreshold)
+	if err != nil {
+		return nil, true, err
+	}
+	if len(hits) == 0 {
+		return nil, true, nil
+	}
+
+	ids := make([]string, len(hits))
+	for i, hit := range hits {
+		ids[i] = hit.ID
+	}
+	resultsByID, err := s.loadSearchResultsByTurnID(ctx, ids)
+	if err != nil {
+		return nil, true, err
+	}
+
+	results := make([]SearchResult, 0, len(hits))
+	for _, hit := range hits {
+		result, ok := resultsByID[hit.ID]
+		if !ok {
+			continue
+		}
+		result.Score = clampSimilarity(1.0 - hit.Distance)
+		result.MatchType = "semantic"
+		results = append(results, result)
+	}
+	return results, true, nil
+}
+
+func (s *Store) loadSearchResultsByTurnID(ctx context.Context, ids []string) (map[string]SearchResult, error) {
+	results := make(map[string]SearchResult, len(ids))
+	const batchSize = 500
+	for start := 0; start < len(ids); start += batchSize {
+		end := start + batchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[start:end]
+		placeholders := make([]string, len(batch))
+		args := make([]interface{}, len(batch))
+		for i, id := range batch {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+			SELECT id, session_id, turn_index, user_content, assistant_content
+			FROM conv_turns
+			WHERE id IN (%s)
+		`, strings.Join(placeholders, ",")), args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var result SearchResult
+			if err := rows.Scan(&result.TurnID, &result.SessionID, &result.TurnIndex, &result.UserContent, &result.AssistContent); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			results[result.TurnID] = result
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return results, nil
 }
 
 // HybridSearch combines vector search with BM25 text search.
@@ -661,6 +1165,9 @@ func (s *Store) HybridSearch(ctx context.Context, embedding []float32, queryTerm
 func (s *Store) FilteredSearch(ctx context.Context, embedding []float32, opts SearchOptions) ([]SearchResult, error) {
 	// Build WHERE clause for filters
 	conditions, args := buildSessionFilters(opts, "sess")
+	if results, ok, err := s.tqFilteredSearch(ctx, embedding, opts, conditions, args); ok || err != nil {
+		return results, err
+	}
 
 	whereClause := ""
 	if len(conditions) > 0 {
@@ -716,6 +1223,159 @@ func (s *Store) FilteredSearch(ctx context.Context, embedding []float32, opts Se
 	}
 
 	return results, rows.Err()
+}
+
+func (s *Store) tqFilteredSearch(ctx context.Context, embedding []float32, opts SearchOptions, conditions []string, args []interface{}) ([]SearchResult, bool, error) {
+	s.tqMu.RLock()
+	tq := s.tq
+	if tq == nil {
+		s.tqMu.RUnlock()
+		return nil, false, nil
+	}
+	s.tqMu.RUnlock()
+
+	whereClause := ""
+	if len(conditions) > 0 {
+		whereClause = "WHERE " + strings.Join(conditions, " AND ")
+	}
+	query := fmt.Sprintf(`
+		SELECT t.id
+		FROM conv_turns t
+		JOIN conv_sessions sess ON t.session_id = sess.id
+		%s
+	`, whereClause)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, true, err
+	}
+
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, true, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, true, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, true, err
+	}
+	if len(ids) == 0 {
+		return nil, true, nil
+	}
+
+	s.tqMu.RLock()
+	defer s.tqMu.RUnlock()
+	tq = s.tq
+	if tq == nil {
+		return nil, false, nil
+	}
+	distances, err := tq.ScoreByID(ctx, embedding, ids)
+	if err != nil {
+		return nil, true, err
+	}
+
+	type scoredID struct {
+		id    string
+		score float64
+	}
+	scored := make([]scoredID, 0, len(distances))
+	for id, distance := range distances {
+		similarity := clampSimilarity(1.0 - distance)
+		if similarity < opts.Threshold {
+			continue
+		}
+		scored = append(scored, scoredID{id: id, score: similarity})
+	}
+	sort.Slice(scored, func(i, j int) bool {
+		return scored[i].score > scored[j].score
+	})
+	if len(scored) > opts.Limit {
+		scored = scored[:opts.Limit]
+	}
+	if len(scored) == 0 {
+		return nil, true, nil
+	}
+
+	topIDs := make([]string, len(scored))
+	for i, item := range scored {
+		topIDs[i] = item.id
+	}
+	resultsByID, err := s.loadSearchResultsByTurnID(ctx, topIDs)
+	if err != nil {
+		return nil, true, err
+	}
+
+	results := make([]SearchResult, 0, len(scored))
+	for _, item := range scored {
+		result, ok := resultsByID[item.id]
+		if !ok {
+			continue
+		}
+		result.Score = item.score
+		result.MatchType = "semantic"
+		results = append(results, result)
+	}
+	return results, true, nil
+}
+
+// FilteredHybridSearch combines filtered dense and FTS results.
+func (s *Store) FilteredHybridSearch(ctx context.Context, embedding []float32, queryTerms string, opts SearchOptions) ([]SearchResult, error) {
+	if strings.TrimSpace(queryTerms) == "" {
+		return s.FilteredSearch(ctx, embedding, opts)
+	}
+
+	fetchOpts := opts
+	fetchOpts.Limit = opts.Limit * 2
+	if fetchOpts.Limit < 1 {
+		fetchOpts.Limit = opts.Limit
+	}
+
+	vecResults, err := s.FilteredSearch(ctx, embedding, fetchOpts)
+	if err != nil {
+		return nil, err
+	}
+	ftsResults, err := s.KeywordSearch(ctx, queryTerms, fetchOpts)
+	if err != nil {
+		return vecResults, nil
+	}
+
+	combined := make(map[string]*SearchResult)
+	rrfScores := make(map[string]float64)
+	const k = 60.0
+
+	for i, r := range vecResults {
+		result := r
+		combined[r.TurnID] = &result
+		rrfScores[r.TurnID] = opts.SemanticWeight / (k + float64(i+1))
+	}
+	for i, r := range ftsResults {
+		if _, ok := combined[r.TurnID]; !ok {
+			result := r
+			combined[r.TurnID] = &result
+		}
+		rrfScores[r.TurnID] += opts.BM25Weight / (k + float64(i+1))
+	}
+
+	results := make([]SearchResult, 0, len(combined))
+	for turnID, result := range combined {
+		result.Score = rrfScores[turnID]
+		result.MatchType = "hybrid"
+		results = append(results, *result)
+	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Score > results[j].Score
+	})
+	if len(results) > opts.Limit {
+		results = results[:opts.Limit]
+	}
+	return results, nil
 }
 
 // KeywordSearch performs FTS-only conversation search for exact keyword mode.
@@ -845,6 +1505,9 @@ func (s *Store) GetStats(ctx context.Context) (*IndexStats, error) {
 	// Get database size
 	if info, err := os.Stat(s.dbPath); err == nil {
 		stats.IndexSizeBytes = info.Size()
+	}
+	if info, err := os.Stat(s.tqPath); err == nil {
+		stats.IndexSizeBytes += info.Size()
 	}
 
 	return stats, nil
@@ -1015,7 +1678,10 @@ func cosineSimilarity(a, b []float32) float64 {
 	}
 
 	similarity := dot / (math.Sqrt(normA) * math.Sqrt(normB))
-	// Clamp to [0, 1] to handle floating point errors
+	return clampSimilarity(similarity)
+}
+
+func clampSimilarity(similarity float64) float64 {
 	if similarity < 0 {
 		return 0.0
 	}

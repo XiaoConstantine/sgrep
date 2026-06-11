@@ -46,9 +46,12 @@ func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions)
 			return nil, fmt.Errorf("failed to generate query embedding: %w", err)
 		}
 
-		if opts.UseHybrid {
+		hasFilters := opts.Agent != AgentAll || opts.Project != "" || !opts.Since.IsZero() || !opts.Before.IsZero()
+		if opts.UseHybrid && hasFilters {
+			results, err = s.store.FilteredHybridSearch(ctx, queryEmb, searchterms.ExtractHybridSearchTerms(query), opts)
+		} else if opts.UseHybrid {
 			results, err = s.store.HybridSearch(ctx, queryEmb, searchterms.ExtractHybridSearchTerms(query), opts.Limit*2, opts.Threshold, opts.SemanticWeight, opts.BM25Weight)
-		} else if opts.Agent != AgentAll || opts.Project != "" || !opts.Since.IsZero() || !opts.Before.IsZero() {
+		} else if hasFilters {
 			results, err = s.store.FilteredSearch(ctx, queryEmb, opts)
 		} else {
 			results, err = s.store.VectorSearch(ctx, queryEmb, opts.Limit*2, opts.Threshold)

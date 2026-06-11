@@ -205,6 +205,16 @@ func (s *tqExportTestStore) Checkpoint(context.Context) error {
 	return nil
 }
 
+type vectorClearTestStore struct {
+	tqExportTestStore
+	cleared bool
+}
+
+func (s *vectorClearTestStore) ClearVectorStorage(context.Context) error {
+	s.cleared = true
+	return nil
+}
+
 type pruneIndexTestStore struct {
 	tqExportTestStore
 	liveIDs   []string
@@ -430,6 +440,91 @@ func TestRebuildTQVectorStoreExportsFileVectors(t *testing.T) {
 	}
 	if len(hits) != 1 || hits[0].ID != "a.go" {
 		t.Fatalf("file hits = %+v, want a.go", hits)
+	}
+}
+
+func TestRefreshDerivedVectorArtifactsSkipsCompactExportAfterErrors(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	dims := 64
+	t.Setenv("SGREP_DIMS", fmt.Sprintf("%d", dims))
+
+	oldChunkVec := make([]float32, dims)
+	oldChunkVec[0] = 1
+	oldFileVec := make([]float32, dims)
+	oldFileVec[0] = 1
+	opts := store.TQVectorBuildOptions{
+		Dims: dims,
+		Bits: colbertTQMSEBits,
+		Seed: colbertTQMSESeed,
+	}
+	if _, err := store.BuildTQVectorStore(ctx, tmp, []string{"old.go:chunk_1"}, [][]float32{oldChunkVec}, opts); err != nil {
+		t.Fatalf("BuildTQVectorStore: %v", err)
+	}
+	if _, err := store.BuildTQFileVectorStore(ctx, tmp, []string{"old.go"}, [][]float32{oldFileVec}, opts); err != nil {
+		t.Fatalf("BuildTQFileVectorStore: %v", err)
+	}
+
+	partialVec := make([]float32, dims)
+	partialVec[1] = 1
+	collector, err := newCompactVectorCollector()
+	if err != nil {
+		t.Fatalf("newCompactVectorCollector: %v", err)
+	}
+	if err := collector.AddDocuments([]*store.Document{
+		{ID: "partial.go:chunk_1", FilePath: "partial.go", Embedding: partialVec, StartLine: 1, EndLine: 10},
+	}); err != nil {
+		t.Fatalf("AddDocuments: %v", err)
+	}
+
+	fake := &vectorClearTestStore{}
+	idx := &Indexer{repoDir: tmp, store: fake, compactTQ: collector}
+	if err := idx.refreshDerivedVectorArtifacts(ctx, util.NewTimingStats(util.DebugOff), true); err != nil {
+		t.Fatalf("refreshDerivedVectorArtifacts: %v", err)
+	}
+	if idx.tqBuilt {
+		t.Fatal("compact TQ export marked built after indexing errors")
+	}
+	if fake.cleared {
+		t.Fatal("SQL vectors were cleared after indexing errors")
+	}
+
+	chunkStore, err := store.OpenTQVectorStore(tmp)
+	if err != nil {
+		t.Fatalf("OpenTQVectorStore: %v", err)
+	}
+	defer func() { _ = chunkStore.Close() }()
+	if got := chunkStore.VectorCount(); got != 1 {
+		t.Fatalf("chunk vector count = %d, want old store count 1", got)
+	}
+	chunkScores, err := chunkStore.ScoreByID(ctx, oldChunkVec, []string{"old.go:chunk_1", "partial.go:chunk_1"})
+	if err != nil {
+		t.Fatalf("ScoreByID chunk store: %v", err)
+	}
+	if _, ok := chunkScores["old.go:chunk_1"]; !ok {
+		t.Fatalf("old chunk vector missing after skipped export: %v", chunkScores)
+	}
+	if _, ok := chunkScores["partial.go:chunk_1"]; ok {
+		t.Fatalf("partial chunk vector was exported after indexing errors: %v", chunkScores)
+	}
+
+	fileStore, err := store.OpenTQFileVectorStore(tmp)
+	if err != nil {
+		t.Fatalf("OpenTQFileVectorStore: %v", err)
+	}
+	defer func() { _ = fileStore.Close() }()
+	if got := fileStore.VectorCount(); got != 1 {
+		t.Fatalf("file vector count = %d, want old store count 1", got)
+	}
+	fileScores, err := fileStore.ScoreByID(ctx, oldFileVec, []string{"old.go", "partial.go"})
+	if err != nil {
+		t.Fatalf("ScoreByID file store: %v", err)
+	}
+	if _, ok := fileScores["old.go"]; !ok {
+		t.Fatalf("old file vector missing after skipped export: %v", fileScores)
+	}
+	if _, ok := fileScores["partial.go"]; ok {
+		t.Fatalf("partial file vector was exported after indexing errors: %v", fileScores)
 	}
 }
 
