@@ -561,6 +561,9 @@ func (s *TQVectorStore) Close() error {
 	return err
 }
 
+// Path returns the compact artifact path.
+func (s *TQVectorStore) Path() string { return s.path }
+
 // VectorCount returns the number of compressed vectors.
 func (s *TQVectorStore) VectorCount() int {
 	s.mu.RLock()

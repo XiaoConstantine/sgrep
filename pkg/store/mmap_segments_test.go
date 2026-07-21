@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/XiaoConstantine/sgrep/pkg/util"
 )
@@ -263,6 +264,43 @@ func TestMMapSegmentStore(t *testing.T) {
 	}
 
 	t.Logf("MMap store test passed with 3 chunks, 16 total segments")
+}
+
+func TestMMapSegmentStore_DeleteDoesNotDeadlock(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenMMapSegmentStore(t.TempDir(), 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.BeginWrite()
+	store.WriteSegments("keep", createTestSegments(t, 8, 2))
+	store.WriteSegments("delete", createTestSegments(t, 8, 1))
+	if err := store.CommitWrite(); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- store.DeleteColBERTSegments(ctx, "delete") }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("DeleteColBERTSegments: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("DeleteColBERTSegments deadlocked")
+	}
+
+	deleted, err := store.GetColBERTSegments(ctx, "delete")
+	if err != nil || len(deleted) != 0 {
+		t.Fatalf("deleted chunk still present: segments=%d err=%v", len(deleted), err)
+	}
+	kept, err := store.GetColBERTSegments(ctx, "keep")
+	if err != nil || len(kept) != 2 {
+		t.Fatalf("kept chunk missing: segments=%d err=%v", len(kept), err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestMMapSegmentStore_PQRoundTrip(t *testing.T) {

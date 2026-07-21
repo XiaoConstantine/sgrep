@@ -4,13 +4,22 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 )
 
-// TQSearchStore wraps a metadata/FTS SQL store with a compact dense-vector store.
+type denseSearchArtifact interface {
+	Search(context.Context, []float32, int, float64) ([]DenseSearchResult, error)
+	ScoreByID(context.Context, []float32, []string) (map[string]float64, error)
+	Close() error
+	Path() string
+}
+
+// TQSearchStore wraps a metadata/FTS SQL store with an mmap dense-vector artifact.
+// It prefers exact float32 scans for small corpora and TQ-MSE for larger ones.
 type TQSearchStore struct {
 	base            Storer
-	dense           *TQVectorStore
+	dense           denseSearchArtifact
 	fileDense       *TQVectorStore
 	loader          DocumentLoader
 	fileLoader      FileChunkLoader
@@ -39,7 +48,14 @@ func OpenTQSearchStoreIfAvailable(base Storer, repoDir string) (Storer, error) {
 		}
 		return base, nil
 	}
-	dense, err := OpenTQVectorStore(repoDir)
+	var dense denseSearchArtifact
+	var err error
+	if os.Getenv("SGREP_VECTOR_BACKEND") != "tqmse" && HasMMapVectorStore(repoDir) {
+		dense, err = OpenMMapVectorStore(repoDir, getDims())
+	}
+	if dense == nil || err != nil {
+		dense, err = OpenTQVectorStore(repoDir)
+	}
 	if err != nil {
 		if os.Getenv("SGREP_VECTOR_BACKEND") == "tqmse" {
 			_ = base.Close()
@@ -139,6 +155,14 @@ func (s *TQSearchStore) HybridSearch(ctx context.Context, embedding []float32, q
 				}
 			}
 		}
+		// ScoreByID returns a map. Re-establish the semantic ranking before RRF
+		// so lexical-only candidates are not assigned random map iteration ranks.
+		sort.Slice(hits, func(i, j int) bool {
+			if hits[i].Distance == hits[j].Distance {
+				return hits[i].ID < hits[j].ID
+			}
+			return hits[i].Distance < hits[j].Distance
+		})
 		return s.loadDenseHits(ctx, fuseHybridCandidates(hits, lexicalHits, limit, semanticWeight, bm25Weight))
 	}
 
@@ -170,8 +194,13 @@ func (s *TQSearchStore) Stats(ctx context.Context) (*Stats, error) {
 		return nil, err
 	}
 	if s.dense != nil {
-		if info, err := os.Stat(s.dense.path); err == nil {
+		if info, err := os.Stat(s.dense.Path()); err == nil {
 			stats.SizeBytes += info.Size()
+		}
+		if s.dense.Path() != TQVectorPath(filepath.Dir(s.dense.Path())) {
+			if info, err := os.Stat(TQVectorPath(filepath.Dir(s.dense.Path()))); err == nil {
+				stats.SizeBytes += info.Size()
+			}
 		}
 	}
 	if s.fileDense != nil {

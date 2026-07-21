@@ -1,9 +1,12 @@
 package store
 
 import (
+	"context"
 	"math/rand"
 	"os"
 	"testing"
+
+	"github.com/XiaoConstantine/sgrep/pkg/util"
 )
 
 func TestMMapVectorStore(t *testing.T) {
@@ -34,6 +37,7 @@ func TestMMapVectorStore(t *testing.T) {
 	store.BeginWrite()
 	for id, vec := range testVectors {
 		store.WriteVector(id, vec)
+		testVectors[id] = util.NormalizeVectorCopy(vec)
 	}
 	if err := store.CommitWrite(); err != nil {
 		t.Fatal(err)
@@ -85,8 +89,40 @@ func TestMMapVectorStore(t *testing.T) {
 	if vec == nil {
 		t.Error("GetVector(chunk_002) returned nil after reopen")
 	}
+	hits, err := store2.Search(context.Background(), testVectors["chunk_002"], 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) == 0 || hits[0].ID != "chunk_002" {
+		t.Fatalf("exact search hits = %+v, want chunk_002 first", hits)
+	}
+	scores, err := store2.ScoreByID(context.Background(), testVectors["chunk_002"], []string{"chunk_002"})
+	if err != nil || scores["chunk_002"] > 1e-5 {
+		t.Fatalf("ScoreByID = %v, %v", scores, err)
+	}
 
 	t.Logf("MMap vector store test passed with %d vectors", store2.VectorCount())
+}
+
+func TestMMapVectorStoreFailedCommitKeepsOldMapping(t *testing.T) {
+	store, err := OpenMMapVectorStore(t.TempDir(), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	store.BeginWrite()
+	store.WriteVector("old", []float32{1, 0, 0, 0})
+	if err := store.CommitWrite(); err != nil {
+		t.Fatal(err)
+	}
+	store.BeginWrite()
+	store.WriteVector("new", []float32{1, 0})
+	if err := store.CommitWrite(); err == nil {
+		t.Fatal("invalid replacement unexpectedly committed")
+	}
+	if got := store.GetVector("old"); len(got) != 4 || got[0] != 1 {
+		t.Fatalf("old mapping unavailable after failed commit: %v", got)
+	}
 }
 
 func randomVectorWithRng(rng *rand.Rand, dims int) []float32 {

@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
+	"math/bits"
 	"math/rand"
 	"testing"
 
@@ -187,6 +189,38 @@ func TestTQSearchStoreHydratesInDenseOrder(t *testing.T) {
 	}
 }
 
+func TestSearchWrapperPrefersExactArtifactWhenAvailable(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	dims := 64
+	query := make([]float32, dims)
+	query[0] = 1
+	if _, err := BuildTQVectorStore(ctx, tmp, []string{"doc"}, [][]float32{query}, TQVectorBuildOptions{Dims: dims}); err != nil {
+		t.Fatal(err)
+	}
+	exact, err := OpenMMapVectorStore(tmp, dims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exact.BeginWrite()
+	exact.WriteVector("doc", query)
+	if err := exact.CommitWrite(); err != nil {
+		t.Fatal(err)
+	}
+	_ = exact.Close()
+
+	base := &stubHydrationStore{docs: map[string]*Document{"doc": {ID: "doc", FilePath: "doc.go"}}}
+	wrapped, err := OpenTQSearchStoreIfAvailable(base, tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = wrapped.Close() }()
+	searchStore := wrapped.(*TQSearchStore)
+	if _, ok := searchStore.dense.(*MMapVectorStore); !ok {
+		t.Fatalf("dense artifact type = %T, want exact mmap", searchStore.dense)
+	}
+}
+
 func TestTQSearchStoreHybridFallsBackToSemanticOnBM25Error(t *testing.T) {
 	ctx := context.Background()
 	tmp := t.TempDir()
@@ -327,6 +361,90 @@ func (s *stubBM25SearchStore) BM25Search(_ context.Context, _ string, limit int)
 		results = results[:limit]
 	}
 	return results, nil
+}
+
+func BenchmarkVectorBackendScale(b *testing.B) {
+	for _, count := range []int{10_000, 100_000} {
+		b.Run(fmt.Sprintf("vectors=%d", count), func(b *testing.B) {
+			rng := rand.New(rand.NewSource(42))
+			vectors := make([][]float32, count)
+			binaryVectors := make([][]byte, count)
+			ids := make([]string, count)
+			for i := range vectors {
+				vectors[i] = util.NormalizeVector(randomTQVector(rng, 768))
+				binaryVectors[i] = QuantizeToBinary(vectors[i])
+				ids[i] = fmt.Sprintf("doc-%08d", i)
+			}
+			query := vectors[0]
+			queryBinary := binaryVectors[0]
+			distances := make([]float64, count)
+
+			b.Run("exact-float32-scan", func(b *testing.B) {
+				b.ReportAllocs()
+				b.SetBytes(int64(count * 768 * 4))
+				for i := 0; i < b.N; i++ {
+					util.DotProductDistanceBatch(query, vectors, distances)
+				}
+			})
+
+			b.Run("binary-coarse-scan", func(b *testing.B) {
+				b.ReportAllocs()
+				b.SetBytes(int64(count * len(queryBinary)))
+				for i := 0; i < b.N; i++ {
+					total := 0
+					for _, code := range binaryVectors {
+						for j, value := range code {
+							total += bits.OnesCount8(value ^ queryBinary[j])
+						}
+					}
+					if total < 0 {
+						b.Fatal(total)
+					}
+				}
+			})
+
+			dir := b.TempDir()
+			exactStore, err := OpenMMapVectorStore(dir, 768)
+			if err != nil {
+				b.Fatal(err)
+			}
+			exactStore.BeginWrite()
+			for i, id := range ids {
+				exactStore.WriteVector(id, vectors[i])
+			}
+			if err := exactStore.CommitWrite(); err != nil {
+				b.Fatal(err)
+			}
+			b.Run("exact-float32-top50", func(b *testing.B) {
+				b.ReportAllocs()
+				b.SetBytes(int64(count * 768 * 4))
+				for i := 0; i < b.N; i++ {
+					if _, err := exactStore.Search(context.Background(), query, 50, 2); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+			_ = exactStore.Close()
+
+			if _, err := BuildTQVectorStore(context.Background(), dir, ids, vectors, TQVectorBuildOptions{Dims: 768, Bits: 4, Seed: 42}); err != nil {
+				b.Fatal(err)
+			}
+			tq, err := OpenTQVectorStore(dir)
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer func() { _ = tq.Close() }()
+			b.Run("tqmse-top50", func(b *testing.B) {
+				b.ReportAllocs()
+				b.SetBytes(int64(count * tq.codeSize))
+				for i := 0; i < b.N; i++ {
+					if _, err := tq.Search(context.Background(), query, 50, 2); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		})
+	}
 }
 
 func randomTQVector(rng *rand.Rand, dims int) []float32 {

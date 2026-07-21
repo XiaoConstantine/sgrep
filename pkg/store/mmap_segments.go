@@ -294,7 +294,13 @@ func (s *MMapSegmentStore) Close() error {
 func (s *MMapSegmentStore) GetColBERTSegments(ctx context.Context, chunkID string) ([]ColBERTSegment, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.getColBERTSegmentsLocked(ctx, chunkID)
+}
 
+func (s *MMapSegmentStore) getColBERTSegmentsLocked(ctx context.Context, chunkID string) ([]ColBERTSegment, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	loc, ok := s.chunkIndex[chunkID]
 	if !ok {
 		return nil, nil // Not found
@@ -386,7 +392,10 @@ func (s *MMapSegmentStore) WriteSegments(chunkID string, segments []ColBERTSegme
 func (s *MMapSegmentStore) CommitWrite() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.commitWriteLocked()
+}
 
+func (s *MMapSegmentStore) commitWriteLocked() error {
 	if s.writeBuffer == nil {
 		return fmt.Errorf("no write transaction")
 	}
@@ -655,19 +664,21 @@ func (s *MMapSegmentStore) DeleteColBERTSegments(ctx context.Context, chunkID st
 		if id == chunkID {
 			continue
 		}
-		segs, err := s.GetColBERTSegments(ctx, id)
+		segs, err := s.getColBERTSegmentsLocked(ctx, id)
 		if err != nil {
 			return err
 		}
 		allSegments[id] = segs
 	}
 
-	// Rebuild the file
-	s.BeginWrite()
+	// Rebuild while retaining the write lock. Calling the public transaction
+	// methods here would recursively acquire s.mu and deadlock.
+	s.writeBuffer = &mmapWriteBuffer{chunks: make(map[string][]ColBERTSegment)}
 	for id, segs := range allSegments {
-		s.WriteSegments(id, segs)
+		s.writeBuffer.chunks[id] = segs
+		s.writeBuffer.totalSegs += len(segs)
 	}
-	return s.CommitWrite()
+	return s.commitWriteLocked()
 }
 
 // GetChunksForColBERT is not supported by MMapSegmentStore.

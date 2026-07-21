@@ -272,6 +272,19 @@ func TestWriteRepoMetadata(t *testing.T) {
 	if len(data) == 0 {
 		t.Error("empty metadata")
 	}
+	if err := ValidateRepoMetadata(dir); err != nil {
+		t.Fatalf("ValidateRepoMetadata: %v", err)
+	}
+}
+
+func TestValidateRepoMetadataRejectsLegacyIndex(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "metadata.json"), []byte(`{"path":"/legacy"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateRepoMetadata(dir); err == nil || !strings.Contains(err.Error(), "run 'sgrep index .'") {
+		t.Fatalf("ValidateRepoMetadata legacy error = %v", err)
+	}
 }
 
 func TestIsCodeFile(t *testing.T) {
@@ -576,6 +589,16 @@ func TestCompactVectorCollectorWritesChunkAndFileStores(t *testing.T) {
 	}
 	if len(chunkHits) != 1 || chunkHits[0].ID != "a.go:chunk_1" {
 		t.Fatalf("chunk hits = %+v, want a.go:chunk_1", chunkHits)
+	}
+
+	exactStore, err := store.OpenMMapVectorStore(tmp, dims)
+	if err != nil {
+		t.Fatalf("OpenMMapVectorStore: %v", err)
+	}
+	defer func() { _ = exactStore.Close() }()
+	exactHits, err := exactStore.Search(ctx, a1, 1, 2)
+	if err != nil || len(exactHits) != 1 || exactHits[0].ID != "a.go:chunk_1" {
+		t.Fatalf("exact hits = %+v, err=%v", exactHits, err)
 	}
 
 	fileStore, err := store.OpenTQFileVectorStore(tmp)
@@ -1262,55 +1285,6 @@ func perturbEmbedding(base []float32, noise float32) []float32 {
 		emb[i] += delta
 	}
 	return util.NormalizeVector(emb)
-}
-
-func TestTruncateAtBoundary(t *testing.T) {
-	tests := []struct {
-		name     string
-		text     string
-		maxChars int
-		want     string
-	}{
-		{
-			name:     "no truncation needed",
-			text:     "hello world",
-			maxChars: 20,
-			want:     "hello world",
-		},
-		{
-			name:     "truncate at line boundary",
-			text:     "line one\nline two\nline three",
-			maxChars: 20,
-			want:     "line one\nline two",
-		},
-		{
-			name:     "truncate at word boundary",
-			text:     "hello beautiful world today",
-			maxChars: 15,
-			want:     "hello beautiful",
-		},
-		{
-			name:     "hard truncate when no good boundary",
-			text:     "abcdefghijklmnop",
-			maxChars: 10,
-			want:     "abcdefghij",
-		},
-		{
-			name:     "empty string",
-			text:     "",
-			maxChars: 10,
-			want:     "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := truncateAtBoundary(tt.text, tt.maxChars)
-			if len(got) > tt.maxChars {
-				t.Errorf("truncateAtBoundary() returned string longer than maxChars: len=%d, max=%d", len(got), tt.maxChars)
-			}
-		})
-	}
 }
 
 func TestIgnoreRules_Patterns(t *testing.T) {

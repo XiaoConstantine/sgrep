@@ -80,6 +80,8 @@ func newEmbeddingTestServer(t *testing.T, embeddings map[string][]float32) *http
 
 		resp := make([]responseItem, len(req.Content))
 		for i, text := range req.Content {
+			text = strings.TrimPrefix(text, "search_query: ")
+			text = strings.TrimPrefix(text, "search_document: ")
 			emb, ok := embeddings[text]
 			if !ok {
 				t.Fatalf("unexpected embedding request for %q", text)

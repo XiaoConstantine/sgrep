@@ -21,6 +21,7 @@ import (
 
 	"github.com/XiaoConstantine/sgrep/pkg/chunk"
 	"github.com/XiaoConstantine/sgrep/pkg/embed"
+	"github.com/XiaoConstantine/sgrep/pkg/modelcfg"
 	searchpkg "github.com/XiaoConstantine/sgrep/pkg/search"
 	"github.com/XiaoConstantine/sgrep/pkg/store"
 	"github.com/XiaoConstantine/sgrep/pkg/util"
@@ -37,6 +38,7 @@ type IndexConfig struct {
 	CompactVectorStorage    bool                   // Store first-stage vectors in TQ-MSE sidecars instead of SQL blobs
 	AdaptiveColBERTSegments bool                   // Enable token-aware sqrt(M) ColBERT segment budgets
 	ColBERTCodec            store.ColBERTCodec     // Late interaction segment codec (tqmse, int8, pq6)
+	ExactVectorLimit        int                    // Keep exact float32 mmap vectors at or below this chunk count
 }
 
 // Large repo threshold - above this we enable smart skipping
@@ -95,6 +97,7 @@ func DefaultIndexConfig() *IndexConfig {
 		CompactVectorStorage:    true,
 		AdaptiveColBERTSegments: false,
 		ColBERTCodec:            store.ColBERTCodecUnspecified,
+		ExactVectorLimit:        20000,
 	}
 }
 
@@ -147,10 +150,9 @@ func NewWithConfig(path string, cfg *IndexConfig) (*Indexer, error) {
 		return nil, err
 	}
 
-	// Store repo metadata
-	if err := writeRepoMetadata(repoDir, absPath); err != nil {
-		return nil, err
-	}
+	// Repository metadata is marked incomplete by Index and only finalized after
+	// a successful first-stage rebuild, so failed reindexes cannot masquerade as
+	// compatible with a new embedding format.
 
 	// Open store with appropriate backend (sqlite-vec or libsql based on build tags)
 	dbPath := filepath.Join(repoDir, "index.db")
@@ -242,9 +244,16 @@ func hashPath(path string) string {
 
 // writeRepoMetadata stores metadata about the indexed repo.
 func writeRepoMetadata(repoDir, repoPath string) error {
+	return writeRepoMetadataState(repoDir, repoPath, true)
+}
+
+func writeRepoMetadataState(repoDir, repoPath string, complete bool) error {
 	metadata := map[string]interface{}{
-		"path":       repoPath,
-		"indexed_at": time.Now().Format(time.RFC3339),
+		"path":                     repoPath,
+		"indexed_at":               time.Now().Format(time.RFC3339),
+		"embedding_format_version": modelcfg.EmbeddingFormatVersion,
+		"context_tokens":           modelcfg.ContextTokens(),
+		"complete":                 complete,
 	}
 
 	data, err := json.Marshal(metadata)
@@ -253,6 +262,33 @@ func writeRepoMetadata(repoDir, repoPath string) error {
 	}
 
 	return os.WriteFile(filepath.Join(repoDir, "metadata.json"), data, 0644)
+}
+
+// ValidateRepoMetadata rejects indexes whose document embeddings are
+// incompatible with the current retrieval query format.
+func ValidateRepoMetadata(repoDir string) error {
+	data, err := os.ReadFile(filepath.Join(repoDir, "metadata.json"))
+	if err != nil {
+		return fmt.Errorf("read index metadata: %w", err)
+	}
+	var metadata struct {
+		EmbeddingFormatVersion int  `json:"embedding_format_version"`
+		ContextTokens          int  `json:"context_tokens"`
+		Complete               bool `json:"complete"`
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return fmt.Errorf("parse index metadata: %w", err)
+	}
+	if !metadata.Complete {
+		return fmt.Errorf("index rebuild is incomplete; run 'sgrep index .'")
+	}
+	if metadata.EmbeddingFormatVersion != modelcfg.EmbeddingFormatVersion {
+		return fmt.Errorf("index embedding format is version %d, need %d; run 'sgrep index .'", metadata.EmbeddingFormatVersion, modelcfg.EmbeddingFormatVersion)
+	}
+	if metadata.ContextTokens != modelcfg.ContextTokens() {
+		return fmt.Errorf("index uses %d context tokens, current configuration uses %d; run 'sgrep index .'", metadata.ContextTokens, modelcfg.ContextTokens())
+	}
+	return nil
 }
 
 // chunkItem holds a chunk pending embedding, along with metadata to reconstruct the document.
@@ -265,8 +301,12 @@ type chunkItem struct {
 }
 
 type compactVectorCollector struct {
-	chunks *store.TQVectorAccumulator
-	files  map[string]*compactFileVector
+	chunks       *store.TQVectorAccumulator
+	files        map[string]*compactFileVector
+	exactIDs     []string
+	exactVectors [][]float32
+	exactLimit   int
+	exactEnabled bool
 }
 
 type compactFileVector struct {
@@ -285,8 +325,10 @@ func newCompactVectorCollector() (*compactVectorCollector, error) {
 		return nil, err
 	}
 	return &compactVectorCollector{
-		chunks: chunks,
-		files:  make(map[string]*compactFileVector),
+		chunks:       chunks,
+		files:        make(map[string]*compactFileVector),
+		exactLimit:   20000,
+		exactEnabled: true,
 	}, nil
 }
 
@@ -296,6 +338,16 @@ func (c *compactVectorCollector) AddDocuments(docs []*store.Document) error {
 			return err
 		}
 		norm := util.NormalizeVectorCopy(doc.Embedding)
+		if c.exactEnabled {
+			if c.exactLimit > 0 && len(c.exactIDs) < c.exactLimit {
+				c.exactIDs = append(c.exactIDs, doc.ID)
+				c.exactVectors = append(c.exactVectors, norm)
+			} else {
+				c.exactEnabled = false
+				c.exactIDs = nil
+				c.exactVectors = nil
+			}
+		}
 		file := c.files[doc.FilePath]
 		if file == nil {
 			file = &compactFileVector{sum: make([]float32, len(norm))}
@@ -343,12 +395,34 @@ func (c *compactVectorCollector) Write(ctx context.Context, repoDir string) (int
 	if err != nil {
 		return 0, 0, err
 	}
+	if c.exactEnabled && len(c.exactIDs) == chunkCount {
+		mmapStore, err := store.OpenMMapVectorStore(repoDir, colbertEmbeddingDims())
+		if err != nil {
+			return 0, 0, fmt.Errorf("open exact vector artifact: %w", err)
+		}
+		mmapStore.BeginWrite()
+		for i, id := range c.exactIDs {
+			mmapStore.WriteVector(id, c.exactVectors[i])
+		}
+		if err := mmapStore.CommitWrite(); err != nil {
+			_ = mmapStore.Close()
+			return 0, 0, fmt.Errorf("write exact vector artifact: %w", err)
+		}
+		if err := mmapStore.Close(); err != nil {
+			return 0, 0, err
+		}
+	} else if err := os.Remove(store.MMapVectorPath(repoDir)); err != nil && !os.IsNotExist(err) {
+		return 0, 0, err
+	}
 	return chunkCount, fileCount, nil
 }
 
 // Index indexes all files in the root path.
 func (idx *Indexer) Index(ctx context.Context) error {
 	startTime := time.Now()
+	if err := writeRepoMetadataState(idx.repoDir, idx.rootPath, false); err != nil {
+		return fmt.Errorf("mark index rebuild incomplete: %w", err)
+	}
 	debugLevel := util.GetDebugLevel()
 	stats := util.NewTimingStats(debugLevel)
 	idx.processed = 0
@@ -357,11 +431,26 @@ func (idx *Indexer) Index(ctx context.Context) error {
 	idx.tqFiles = 0
 	idx.tqBuilt = false
 	idx.compactTQ = nil
+	if !idx.indexCfg.CompactVectorStorage {
+		// SQL-vector and watch modes must not leave an older exact artifact that
+		// OpenForSearch would prefer over subsequently updated SQL/TQ vectors.
+		for _, artifact := range []string{
+			store.MMapVectorPath(idx.repoDir),
+			store.TQVectorPath(idx.repoDir),
+			store.TQFileVectorPath(idx.repoDir),
+		} {
+			if err := os.Remove(artifact); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("invalidate stale vector artifact %s: %w", artifact, err)
+			}
+		}
+	}
 	if idx.indexCfg.CompactVectorStorage {
 		collector, err := newCompactVectorCollector()
 		if err != nil {
 			return fmt.Errorf("initialize compact TQ-MSE collector: %w", err)
 		}
+		collector.exactLimit = idx.indexCfg.ExactVectorLimit
+		collector.exactEnabled = collector.exactLimit > 0
 		idx.compactTQ = collector
 	}
 
@@ -514,6 +603,7 @@ func (idx *Indexer) Index(ctx context.Context) error {
 						IsTest:    item.isTest,
 						Metadata: map[string]string{
 							"description": item.chunk.Description,
+							"lexical":     buildLexicalText(item.filePath, item.chunk.Description, item.chunk.Content),
 						},
 					}
 				}
@@ -550,6 +640,7 @@ func (idx *Indexer) Index(ctx context.Context) error {
 						IsTest:    item.isTest,
 						Metadata: map[string]string{
 							"description": item.chunk.Description,
+							"lexical":     buildLexicalText(item.filePath, item.chunk.Description, item.chunk.Content),
 						},
 					}
 				}
@@ -634,6 +725,9 @@ func (idx *Indexer) Index(ctx context.Context) error {
 	if err := idx.refreshDerivedVectorArtifacts(ctx, stats, hadErrors); err != nil {
 		return err
 	}
+	if hadErrors {
+		return fmt.Errorf("index rebuild incomplete: %d files or chunks failed; previous compatible index remains unavailable", atomic.LoadInt64(&idx.errors))
+	}
 
 	elapsed := time.Since(startTime)
 	fmt.Printf("\rIndexed %d files in %v (%d errors)\n",
@@ -642,6 +736,9 @@ func (idx *Indexer) Index(ctx context.Context) error {
 	// Print debug summary
 	if debugLevel >= util.DebugSummary {
 		stats.PrintSummary()
+	}
+	if err := writeRepoMetadata(idx.repoDir, idx.rootPath); err != nil {
+		return fmt.Errorf("finalize index metadata: %w", err)
 	}
 
 	return nil
@@ -803,9 +900,8 @@ func (idx *Indexer) readAndChunkFile(path string) ([]chunkItem, error) {
 	return items, nil
 }
 
-// maxEmbedTokens is the safe limit for embedding input.
-// Server context per slot is 2048, use 1500 to leave large buffer for token estimation variance.
-const maxEmbedTokens = 1500
+// maxEmbedTokens is shared with the chunker and llama.cpp per-slot context.
+func maxEmbedTokens() int { return modelcfg.DocumentTokenBudget() }
 
 // prepareFile reads, chunks, and embeds a file, returning documents ready for storage.
 // This does NOT write to the database - that's handled by the single writer goroutine.
@@ -866,6 +962,7 @@ func (idx *Indexer) prepareFile(ctx context.Context, path string) ([]*store.Docu
 			IsTest:    isTest,
 			Metadata: map[string]string{
 				"description": c.Description,
+				"lexical":     buildLexicalText(relPath, c.Description, c.Content),
 			},
 		}
 		docs = append(docs, doc)
@@ -1052,7 +1149,7 @@ func (idx *Indexer) validateAndRechunk(chunks []chunk.Chunk) []chunk.Chunk {
 		totalText := util.CombineDescriptionContent(c.Content, c.Description)
 		tokens := chunk.EstimateTokens(totalText)
 
-		if tokens <= maxEmbedTokens {
+		if tokens <= maxEmbedTokens() {
 			result = append(result, c)
 			continue
 		}
@@ -1060,7 +1157,7 @@ func (idx *Indexer) validateAndRechunk(chunks []chunk.Chunk) []chunk.Chunk {
 		// Re-chunk this oversized chunk with a smaller limit
 		// Use a conservative limit that accounts for description
 		smallerCfg := &chunk.Config{
-			MaxTokens:    maxEmbedTokens - chunk.EstimateTokens(c.Description) - 20,
+			MaxTokens:    maxEmbedTokens() - chunk.EstimateTokens(c.Description) - 20,
 			ContextLines: idx.chunkCfg.ContextLines,
 			Overlap:      idx.chunkCfg.Overlap,
 		}
@@ -1071,7 +1168,8 @@ func (idx *Indexer) validateAndRechunk(chunks []chunk.Chunk) []chunk.Chunk {
 		// Re-chunk the content
 		subChunks, err := chunk.ChunkFile(c.FilePath, c.Content, smallerCfg)
 		if err != nil || len(subChunks) == 0 {
-			// Fallback: just use original (will be truncated by retry logic)
+			// Preserve the original so embedding fails loudly rather than silently
+			// dropping or truncating source content.
 			result = append(result, c)
 			continue
 		}
@@ -1088,17 +1186,16 @@ func (idx *Indexer) validateAndRechunk(chunks []chunk.Chunk) []chunk.Chunk {
 	return result
 }
 
-// embedBatchWithRetry embeds multiple texts concurrently with retry logic.
-// It first tries batch embedding, then falls back to individual retry on failures.
+// embedBatchWithRetry first tries one batch, then isolates individual failures.
+// The legacy name is retained for compatibility; inputs are never truncated.
 func (idx *Indexer) embedBatchWithRetry(ctx context.Context, texts []string, maxRetries int) ([][]float32, error) {
 	// First try batch embedding (concurrent with semaphore)
-	embeddings, err := idx.embedder.EmbedBatch(ctx, texts)
+	embeddings, err := idx.embedder.EmbedDocuments(ctx, texts)
 	if err == nil {
 		return embeddings, nil
 	}
 
-	// If batch failed, fall back to individual embedding with retry
-	// This handles cases where only some texts are problematic
+	// If the batch failed, isolate the offending input without changing content.
 	results := make([][]float32, len(texts))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -1138,62 +1235,13 @@ func (idx *Indexer) embedBatchWithRetry(ctx context.Context, texts []string, max
 	return results, nil
 }
 
-// embedWithRetry attempts to embed text, retrying with truncation on overflow errors.
 func (idx *Indexer) embedWithRetry(ctx context.Context, text string, maxRetries int) ([]float32, error) {
-	var lastErr error
-
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		embedding, err := idx.embedder.Embed(ctx, text)
-		if err == nil {
-			return embedding, nil
-		}
-
-		lastErr = err
-
-		// Check if error is due to input size (llama.cpp returns 500 for oversized input)
-		errStr := err.Error()
-		if !strings.Contains(errStr, "too large") && !strings.Contains(errStr, "500") {
-			return nil, err // Non-recoverable error
-		}
-
-		if attempt == maxRetries {
-			break
-		}
-
-		// Truncate by 25% each retry
-		truncateRatio := 0.75 - (float64(attempt) * 0.1)
-		if truncateRatio < 0.3 {
-			truncateRatio = 0.3
-		}
-		maxChars := int(float64(len(text)) * truncateRatio)
-		text = truncateAtBoundary(text, maxChars)
-
-		// Log the retry (to stderr so it doesn't mess up progress output)
-		fmt.Fprintf(os.Stderr, "Retry %d: truncated input to %d chars\n", attempt+1, len(text))
+	_ = maxRetries
+	embedding, err := idx.embedder.EmbedDocument(ctx, text)
+	if err != nil {
+		return nil, fmt.Errorf("embed document without truncation: %w", err)
 	}
-
-	return nil, fmt.Errorf("failed after %d retries: %w", maxRetries, lastErr)
-}
-
-// truncateAtBoundary truncates text to maxChars, trying to break at line boundaries.
-func truncateAtBoundary(text string, maxChars int) string {
-	if len(text) <= maxChars {
-		return text
-	}
-
-	truncated := text[:maxChars]
-
-	// Try to break at line boundary (prefer 75% of way through)
-	if idx := strings.LastIndex(truncated, "\n"); idx > maxChars*3/4 {
-		return truncated[:idx]
-	}
-
-	// Try to break at word boundary (prefer 50% of way through)
-	if idx := strings.LastIndex(truncated, " "); idx > maxChars/2 {
-		return truncated[:idx]
-	}
-
-	return truncated
+	return embedding, nil
 }
 
 // Watch watches for file changes and re-indexes.
@@ -1237,6 +1285,13 @@ func (idx *Indexer) Watch(ctx context.Context) error {
 	pendingFiles := make(map[string]bool)
 	var mu sync.Mutex
 	var processMu sync.Mutex
+	fatalWatchErr := make(chan error, 1)
+	reportFatal := func(err error) {
+		select {
+		case fatalWatchErr <- err:
+		default:
+		}
+	}
 
 	processFiles := func() {
 		processMu.Lock()
@@ -1289,6 +1344,10 @@ func (idx *Indexer) Watch(ctx context.Context) error {
 			if ok {
 				if err := idx.refreshColBERTMMap(ctx, segmentStore); err != nil {
 					fmt.Fprintf(os.Stderr, "Error refreshing ColBERT mmap: %v\n", err)
+					if removeErr := os.Remove(filepath.Join(idx.repoDir, "colbert_segments.mmap")); removeErr != nil && !os.IsNotExist(removeErr) {
+						reportFatal(fmt.Errorf("invalidate stale ColBERT mmap: %w", removeErr))
+						return
+					}
 				}
 			}
 		}
@@ -1297,6 +1356,12 @@ func (idx *Indexer) Watch(ctx context.Context) error {
 			vecCount, err := idx.RebuildTQVectorStore(ctx)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error refreshing compact TQ-MSE vector stores: %v\n", err)
+				for _, artifact := range []string{store.TQVectorPath(idx.repoDir), store.TQFileVectorPath(idx.repoDir)} {
+					if removeErr := os.Remove(artifact); removeErr != nil && !os.IsNotExist(removeErr) {
+						reportFatal(fmt.Errorf("invalidate stale vector artifact %s: %w", artifact, removeErr))
+						return
+					}
+				}
 			} else {
 				fmt.Printf("Refreshed compact TQ-MSE vector stores (%d chunk vectors)\n", vecCount)
 			}
@@ -1307,6 +1372,8 @@ func (idx *Indexer) Watch(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
+		case err := <-fatalWatchErr:
+			return err
 		case event, ok := <-watcher.Events:
 			if !ok {
 				return nil
@@ -1924,22 +1991,16 @@ func (idx *Indexer) computeColBERTSegmentsPass(ctx context.Context, segmentStore
 
 		chunkSegments, err := idx.buildColBERTChunkSegments(ctx, chunks)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to build segments: %v\n", err)
-			offset += len(chunks)
-			continue
+			return processed, fmt.Errorf("build ColBERT segments at offset %d: %w", offset, err)
 		}
 
-		if len(chunkSegments) == 0 {
-			offset += len(chunks)
-			processed += len(chunks)
-			continue
+		if len(chunkSegments) != len(chunks) {
+			return processed, fmt.Errorf("ColBERT preindex coverage mismatch at offset %d: built %d of %d chunks", offset, len(chunkSegments), len(chunks))
 		}
 
 		// Store batch in SQLite
 		if err := segmentStore.StoreColBERTSegmentsBatch(ctx, chunkSegments); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to store segments: %v\n", err)
-			offset += len(chunks)
-			continue
+			return processed, fmt.Errorf("store ColBERT segments at offset %d: %w", offset, err)
 		}
 
 		offset += len(chunks)
@@ -1947,6 +2008,9 @@ func (idx *Indexer) computeColBERTSegmentsPass(ctx context.Context, segmentStore
 		fmt.Printf("Processed %d/%d chunks...\n", processed, totalChunks)
 	}
 
+	if processed != totalChunks {
+		return processed, fmt.Errorf("ColBERT preindex coverage mismatch: processed %d of %d chunks", processed, totalChunks)
+	}
 	return processed, nil
 }
 
@@ -2258,6 +2322,7 @@ func (idx *Indexer) ExportColBERTToMMap(ctx context.Context, outputDir string) (
 
 	mmapStore.BeginWrite()
 	totalSegments := 0
+	exportedChunks := 0
 
 	// Use paginated chunk retrieval to avoid zero-vector search issues with large repos
 	const fetchBatchSize = 1000
@@ -2301,7 +2366,11 @@ func (idx *Indexer) ExportColBERTToMMap(ctx context.Context, outputDir string) (
 				if err != nil {
 					return 0, fmt.Errorf("failed to encode chunk %s for MMap export: %w", chunkID, err)
 				}
+				if len(encodedSegments) == 0 {
+					return 0, fmt.Errorf("chunk %s has no ColBERT segments during MMap export", chunkID)
+				}
 				mmapStore.WriteSegments(chunkID, encodedSegments)
+				exportedChunks++
 				totalSegments += len(encodedSegments)
 			}
 		}
@@ -2309,6 +2378,13 @@ func (idx *Indexer) ExportColBERTToMMap(ctx context.Context, outputDir string) (
 		offset += len(chunks)
 	}
 
+	stats, err := idx.store.Stats(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("load expected ColBERT export coverage: %w", err)
+	}
+	if exportedChunks != int(stats.Chunks) {
+		return 0, fmt.Errorf("ColBERT MMap coverage mismatch: exported %d of %d chunks", exportedChunks, stats.Chunks)
+	}
 	if err := mmapStore.CommitWrite(); err != nil {
 		return 0, fmt.Errorf("failed to commit MMap: %w", err)
 	}

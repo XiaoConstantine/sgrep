@@ -133,13 +133,13 @@ func (c *ColBERTScorer) Score(ctx context.Context, query string, docContent stri
 	}
 
 	// Get embeddings for query terms
-	queryEmbeddings, err := c.embedTexts(ctx, queryTerms)
+	queryEmbeddings, err := c.embedTexts(ctx, queryTerms, true)
 	if err != nil {
 		return 0, err
 	}
 
 	// Get embeddings for document segments
-	docEmbeddings, err := c.embedTexts(ctx, docSegments)
+	docEmbeddings, err := c.embedTexts(ctx, docSegments, false)
 	if err != nil {
 		return 0, err
 	}
@@ -175,7 +175,7 @@ func (c *ColBERTScorer) ScoreBatch(ctx context.Context, query string, documents 
 	}
 
 	// Get query term embeddings (computed once, normalized via cache)
-	queryEmbeddings, err := c.embedTexts(ctx, queryTerms)
+	queryEmbeddings, err := c.embedTexts(ctx, queryTerms, true)
 	if err != nil {
 		return nil, err
 	}
@@ -214,7 +214,7 @@ func (c *ColBERTScorer) ScoreBatch(ctx context.Context, query string, documents 
 				return
 			}
 
-			docEmbeddings, err := c.embedTexts(ctx, docSegments)
+			docEmbeddings, err := c.embedTexts(ctx, docSegments, false)
 			if err != nil {
 				mu.Lock()
 				if firstErr == nil {
@@ -263,7 +263,7 @@ func (c *ColBERTScorer) ScoreBatchWithChunkIDs(ctx context.Context, query string
 	}
 
 	// Get query term embeddings (computed once, normalized via cache)
-	queryEmbeddings, err := c.embedTexts(ctx, queryTerms)
+	queryEmbeddings, err := c.embedTexts(ctx, queryTerms, true)
 	if err != nil {
 		return nil, err
 	}
@@ -302,7 +302,7 @@ func (c *ColBERTScorer) ScoreBatchWithChunkIDs(ctx context.Context, query string
 			if len(docSegments) == 0 {
 				continue
 			}
-			docEmbeddings, err := c.embedTexts(ctx, docSegments)
+			docEmbeddings, err := c.embedTexts(ctx, docSegments, false)
 			if err != nil {
 				continue
 			}
@@ -391,7 +391,7 @@ func (c *ColBERTScorer) exactRescoreTopPQDocs(ctx context.Context, queryEmbeddin
 
 	cacheHits, cacheMisses := c.segmentCacheStats(allSegments)
 	embedStart := time.Now()
-	docEmbeddings, err := c.embedTexts(ctx, allSegments)
+	docEmbeddings, err := c.embedTexts(ctx, allSegments, false)
 	embedDuration := time.Since(embedStart)
 	if err != nil {
 		return err
@@ -471,7 +471,7 @@ func (c *ColBERTScorer) segmentCacheStats(texts []string) (hits int, misses int)
 		return 0, len(texts)
 	}
 	for _, text := range texts {
-		if c.cache.get(text) != nil {
+		if c.cache.get("d\x00"+text) != nil {
 			hits++
 		} else {
 			misses++
@@ -480,31 +480,46 @@ func (c *ColBERTScorer) segmentCacheStats(texts []string) (hits int, misses int)
 	return hits, len(texts) - hits
 }
 
-// embedTexts embeds multiple texts, using cache where possible.
-func (c *ColBERTScorer) embedTexts(ctx context.Context, texts []string) ([][]float32, error) {
+// embedTexts embeds retrieval texts in distinct query/document cache
+// namespaces because task prefixes intentionally produce different vectors for
+// identical raw text.
+func (c *ColBERTScorer) embedTexts(ctx context.Context, texts []string, query bool) ([][]float32, error) {
 	embeddings := make([][]float32, len(texts))
-	var uncached []string
-	var uncachedIdx []int
+	uncached := make([]string, 0, len(texts))
+	uncachedKeys := make([]string, 0, len(texts))
+	uncachedIdx := make([]int, 0, len(texts))
+	prefix := "d\x00"
+	if query {
+		prefix = "q\x00"
+	}
 
-	// Check cache first
 	for i, text := range texts {
-		if cached := c.cache.get(text); cached != nil {
+		key := prefix + text
+		if cached := c.cache.get(key); cached != nil {
 			embeddings[i] = cached
 		} else {
 			uncached = append(uncached, text)
+			uncachedKeys = append(uncachedKeys, key)
 			uncachedIdx = append(uncachedIdx, i)
 		}
 	}
 
-	// Embed uncached texts
 	if len(uncached) > 0 {
-		newEmbs, err := c.embedder.EmbedBatch(ctx, uncached)
+		var (
+			newEmbs [][]float32
+			err     error
+		)
+		if query {
+			newEmbs, err = c.embedder.EmbedQueryBatch(ctx, uncached)
+		} else {
+			newEmbs, err = c.embedder.EmbedDocuments(ctx, uncached)
+		}
 		if err != nil {
 			return nil, err
 		}
 		for i, idx := range uncachedIdx {
 			embeddings[idx] = newEmbs[i]
-			c.cache.set(uncached[i], newEmbs[i])
+			c.cache.set(uncachedKeys[i], newEmbs[i])
 		}
 	}
 
