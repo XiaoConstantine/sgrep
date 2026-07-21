@@ -647,6 +647,84 @@ func TestLibSQLStore_GetChunksForColBERT_LoadsDescriptionViaJSONExtract(t *testi
 	}
 }
 
+func TestLibSQLStore_FTSIndexesEnrichedLexicalMetadata(t *testing.T) {
+	s, err := OpenLibSQL(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	doc := &Document{
+		ID: "auth.go:chunk_1", FilePath: "auth.go", Content: "func run() {}", StartLine: 1, EndLine: 1,
+		Embedding: makeTestEmbedding(768, 0.1), Metadata: map[string]string{"lexical": "jwt validator refresh token"},
+	}
+	if err := s.Store(context.Background(), doc); err != nil {
+		t.Fatal(err)
+	}
+	hits, err := s.BM25Search(context.Background(), "jwt", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0].ID != doc.ID {
+		t.Fatalf("BM25Search enriched metadata = %+v", hits)
+	}
+}
+
+func TestLibSQLStore_FTSUpdateRemovesOldTerms(t *testing.T) {
+	s, err := OpenLibSQL(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	ctx := context.Background()
+	doc := &Document{ID: "same", FilePath: "old.go", Content: "obsoleteTerm", StartLine: 1, EndLine: 1, Embedding: makeTestEmbedding(768, 0.1)}
+	if err := s.Store(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	doc.FilePath = "new.go"
+	doc.Content = "replacementTerm"
+	if err := s.Store(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	oldHits, err := s.BM25Search(ctx, "obsoleteTerm", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newHits, err := s.BM25Search(ctx, "replacementTerm", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(oldHits) != 0 || len(newHits) != 1 || newHits[0].ID != doc.ID {
+		t.Fatalf("updated FTS old=%+v new=%+v", oldHits, newHits)
+	}
+}
+
+func TestLibSQLStore_GetChunksForColBERT_IncludesCompactMetadataRows(t *testing.T) {
+	dir := t.TempDir()
+	s, err := OpenLibSQL(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	ctx := context.Background()
+	doc := &Document{
+		ID: "compact.go:chunk_1", FilePath: "compact.go", Content: "func compact() {}",
+		StartLine: 1, EndLine: 1, Metadata: map[string]string{"description": "compact helper"},
+	}
+	if err := s.StoreMetadataBatch(ctx, []*Document{doc}); err != nil {
+		t.Fatal(err)
+	}
+
+	chunks, err := s.GetChunksForColBERT(ctx, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 1 || chunks[0].ID != doc.ID {
+		t.Fatalf("compact metadata chunks = %+v, want %s", chunks, doc.ID)
+	}
+}
+
 func TestLibSQLStore_ColBERTPQMetadataAndSegments(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")

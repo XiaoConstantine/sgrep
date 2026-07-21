@@ -197,6 +197,10 @@ func (s *LibSQLStore) init() error {
 		)`, s.dims),
 		`CREATE INDEX IF NOT EXISTS idx_documents_filepath ON documents(filepath)`,
 		`CREATE INDEX IF NOT EXISTS idx_documents_is_test ON documents(is_test)`,
+		`CREATE TABLE IF NOT EXISTS metadata (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		)`,
 
 		// File-level embeddings for document-level search (meta-queries like "what does this repo do")
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS file_embeddings (
@@ -312,46 +316,12 @@ func (s *LibSQLStore) createSingleVectorIndex(indexName, tableName, indexOpts st
 }
 
 func (s *LibSQLStore) initFTS5() error {
-	_, err := s.db.Exec(`
-		CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
-			content,
-			filepath,
-			content='documents',
-			content_rowid='rowid'
-		)
-	`)
-	if err != nil {
+	if err := initDocumentFTS(s.db); err != nil {
 		if strings.Contains(err.Error(), "no such module: fts5") {
 			return nil
 		}
-		return fmt.Errorf("create FTS5 table: %w", err)
+		return err
 	}
-
-	triggers := []string{
-		`CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
-			INSERT INTO documents_fts(rowid, content, filepath)
-			VALUES (NEW.rowid, NEW.content, NEW.filepath);
-		END`,
-		`CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
-			INSERT INTO documents_fts(documents_fts, rowid, content, filepath)
-			VALUES ('delete', OLD.rowid, OLD.content, OLD.filepath);
-		END`,
-		`CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
-			INSERT INTO documents_fts(documents_fts, rowid, content, filepath)
-			VALUES ('delete', OLD.rowid, OLD.content, OLD.filepath);
-			INSERT INTO documents_fts(rowid, content, filepath)
-			VALUES (NEW.rowid, NEW.content, NEW.filepath);
-		END`,
-	}
-
-	for _, t := range triggers {
-		if _, err := s.db.Exec(t); err != nil {
-			if !strings.Contains(err.Error(), "already exists") {
-				return fmt.Errorf("create trigger: %w", err)
-			}
-		}
-	}
-
 	return nil
 }
 
@@ -608,8 +578,7 @@ func (s *LibSQLStore) Store(ctx context.Context, doc *Document) error {
 	vecStr := formatVectorString(normalizedEmb)
 
 	_, err := s.db.ExecContext(ctx,
-		`INSERT OR REPLACE INTO documents (id, filepath, content, start_line, end_line, metadata, is_test, embedding)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, vector(?))`,
+		documentEmbeddingUpsertSQL,
 		doc.ID, doc.FilePath, doc.Content, doc.StartLine, doc.EndLine, string(metadata), isTest, vecStr)
 	if err != nil {
 		return err
@@ -641,9 +610,7 @@ func (s *LibSQLStore) StoreBatch(ctx context.Context, docs []*Document) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	stmt, err := tx.PrepareContext(ctx,
-		`INSERT OR REPLACE INTO documents (id, filepath, content, start_line, end_line, metadata, is_test, embedding)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, vector(?))`)
+	stmt, err := tx.PrepareContext(ctx, documentEmbeddingUpsertSQL)
 	if err != nil {
 		return err
 	}
@@ -690,9 +657,7 @@ func (s *LibSQLStore) StoreMetadataBatch(ctx context.Context, docs []*Document) 
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	stmt, err := tx.PrepareContext(ctx,
-		`INSERT OR REPLACE INTO documents (id, filepath, content, start_line, end_line, metadata, is_test)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`)
+	stmt, err := tx.PrepareContext(ctx, documentMetadataUpsertSQL)
 	if err != nil {
 		return err
 	}
@@ -1109,13 +1074,12 @@ func (s *LibSQLStore) bm25Search(ctx context.Context, queryTerms string, limit i
 	return results, rows.Err()
 }
 
-// HybridSearch combines vector search with FTS5 BM25.
+// HybridSearch unions semantic and lexical candidates and combines their
+// independent rankings with weighted reciprocal-rank fusion.
 func (s *LibSQLStore) HybridSearch(ctx context.Context, embedding []float32, queryTerms string, limit int, threshold float64, semanticWeight, bm25Weight float64) ([]*Document, []float64, error) {
 	if queryTerms == "" {
 		return s.Search(ctx, embedding, limit, threshold)
 	}
-
-	// Get semantic candidates (5× for better recall before hybrid reranking)
 	fetchLimit := limit * 5
 	if fetchLimit < 50 {
 		fetchLimit = 50
@@ -1125,44 +1089,34 @@ func (s *LibSQLStore) HybridSearch(ctx context.Context, embedding []float32, que
 	if err != nil {
 		return nil, nil, err
 	}
-
-	if len(semanticDocs) == 0 {
-		return nil, nil, nil
+	dense := make([]DenseSearchResult, 0, len(semanticDocs))
+	for i, doc := range semanticDocs {
+		dense = append(dense, DenseSearchResult{ID: doc.ID, Distance: semanticDists[i]})
 	}
-
-	// Get BM25 scores
-	bm25Scores, err := s.BM25Scores(ctx, queryTerms)
+	lexical, err := s.BM25Search(ctx, queryTerms, fetchLimit)
 	if err != nil {
 		return s.Search(ctx, embedding, limit, threshold)
 	}
-
-	// Compute hybrid scores
-	type hybridResult struct {
-		doc   *Document
-		score float64
+	fused := fuseHybridCandidates(dense, lexical, limit, semanticWeight, bm25Weight)
+	if len(fused) == 0 {
+		return nil, nil, nil
 	}
-	var hybridResults []hybridResult
-	for i, doc := range semanticDocs {
-		bm25 := bm25Scores[doc.ID]
-		hybrid := (semanticWeight * semanticDists[i]) + (bm25Weight * bm25)
-		hybridResults = append(hybridResults, hybridResult{doc, hybrid})
+	ids := make([]string, len(fused))
+	for i := range fused {
+		ids[i] = fused[i].ID
 	}
-
-	sort.Slice(hybridResults, func(i, j int) bool {
-		return hybridResults[i].score < hybridResults[j].score
-	})
-
-	if len(hybridResults) > limit {
-		hybridResults = hybridResults[:limit]
+	docsByID, err := s.LoadDocumentsByID(ctx, ids)
+	if err != nil {
+		return nil, nil, err
 	}
-
-	docs := make([]*Document, len(hybridResults))
-	scores := make([]float64, len(hybridResults))
-	for i, hr := range hybridResults {
-		docs[i] = hr.doc
-		scores[i] = hr.score
+	docs := make([]*Document, 0, len(fused))
+	scores := make([]float64, 0, len(fused))
+	for _, hit := range fused {
+		if doc, ok := docsByID[hit.ID]; ok {
+			docs = append(docs, doc)
+			scores = append(scores, hit.Distance)
+		}
 	}
-
 	return docs, scores, nil
 }
 
@@ -1241,29 +1195,7 @@ func (s *LibSQLStore) Stats(ctx context.Context) (*Stats, error) {
 
 // EnsureFTS5 populates FTS5 from existing documents if needed.
 func (s *LibSQLStore) EnsureFTS5() error {
-	var ftsCount int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM documents_fts`).Scan(&ftsCount)
-	if err != nil {
-		return err
-	}
-
-	var docCount int
-	err = s.db.QueryRow(`SELECT COUNT(*) FROM documents`).Scan(&docCount)
-	if err != nil {
-		return err
-	}
-
-	if docCount > 0 && ftsCount == 0 {
-		_, err = s.db.Exec(`
-			INSERT INTO documents_fts(rowid, content, filepath)
-			SELECT rowid, content, filepath FROM documents
-		`)
-		if err != nil {
-			return fmt.Errorf("populate FTS5: %w", err)
-		}
-	}
-
-	return nil
+	return ensureDocumentFTS(s.db)
 }
 
 // VectorCount returns the number of vectors in the store.
@@ -1869,7 +1801,6 @@ func (s *LibSQLStore) HasColBERTSegments(ctx context.Context) (bool, error) {
 func (s *LibSQLStore) GetChunksForColBERT(ctx context.Context, batchSize int, offset int) ([]ChunkInfo, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, content, COALESCE(json_extract(metadata, '$.description'), '') FROM documents
-		WHERE embedding IS NOT NULL
 		ORDER BY rowid
 		LIMIT ? OFFSET ?
 	`, batchSize, offset)

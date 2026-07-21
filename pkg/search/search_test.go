@@ -3,10 +3,13 @@ package search
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/XiaoConstantine/sgrep/pkg/embed"
 	"github.com/XiaoConstantine/sgrep/pkg/store"
 	"github.com/XiaoConstantine/sgrep/pkg/util"
 )
@@ -234,13 +237,35 @@ func TestNewWithConfig_RespectsPQExactRescoreEnvOverride(t *testing.T) {
 	}
 }
 
+func newUnitSearcher(t *testing.T, ms *mockStore) *Searcher {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"embedding":[` + zeroEmbeddingJSON(768) + `]}`))
+	}))
+	t.Cleanup(srv.Close)
+	e := embed.NewWithConfig(embed.Config{Endpoint: srv.URL, AutoStart: false})
+	return NewWithConfig(Config{Store: ms, Embedder: e})
+}
+
+func zeroEmbeddingJSON(dims int) string {
+	if dims <= 0 {
+		return ""
+	}
+	result := "0"
+	for i := 1; i < dims; i++ {
+		result += ",0"
+	}
+	return result
+}
+
 func TestSearcher_Search_EmptyStore(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test that requires embedding server")
 	}
 
 	ms := &mockStore{}
-	s := New(ms)
+	s := newUnitSearcher(t, ms)
 
 	results, err := s.Search(context.Background(), "test query", 10, 2.0)
 	if err != nil {
@@ -264,7 +289,7 @@ func TestSearcher_Search_WithResults(t *testing.T) {
 		},
 		distances: []float64{0.5, 1.2},
 	}
-	s := New(ms)
+	s := newUnitSearcher(t, ms)
 
 	results, err := s.Search(context.Background(), "main function", 10, 2.0)
 	if err != nil {
@@ -308,7 +333,7 @@ func TestSearcher_Search_Caching(t *testing.T) {
 		},
 	}
 
-	s := New(ms)
+	s := newUnitSearcher(t, ms)
 
 	_, _ = s.Search(context.Background(), "test query", 10, 2.0)
 	_, _ = s.Search(context.Background(), "test query", 10, 2.0)
@@ -455,7 +480,7 @@ func TestSearcher_ConcurrentSearch(t *testing.T) {
 			{ID: "doc1", FilePath: "/test.go", Content: "content"},
 		},
 	}
-	s := New(ms)
+	s := newUnitSearcher(t, ms)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
@@ -544,7 +569,7 @@ func TestSearcher_SearchWithOptions_IncludeTests(t *testing.T) {
 		},
 		distances: []float64{0.5, 0.6},
 	}
-	s := New(ms)
+	s := newUnitSearcher(t, ms)
 
 	// Without tests
 	opts := DefaultSearchOptions()
@@ -576,7 +601,7 @@ func TestSearcher_SearchWithOptions_Deduplicate(t *testing.T) {
 		},
 		distances: []float64{0.3, 0.5, 0.6, 0.4},
 	}
-	s := New(ms)
+	s := newUnitSearcher(t, ms)
 
 	// With deduplication
 	opts := DefaultSearchOptions()
@@ -614,7 +639,7 @@ func TestSearcher_SearchWithOptions_NoBoost(t *testing.T) {
 		},
 		distances: []float64{1.0},
 	}
-	s := New(ms)
+	s := newUnitSearcher(t, ms)
 
 	// With boost disabled (BoostImpl = 1.0 means no boost)
 	opts := DefaultSearchOptions()
@@ -630,24 +655,28 @@ func TestSearcher_SearchWithOptions_NoBoost(t *testing.T) {
 }
 
 func TestSearcher_cacheKeyWithOpts(t *testing.T) {
-	ms := &mockStore{}
-	s := New(ms)
+	s := New(&mockStore{})
+	base := DefaultSearchOptions()
+	baseKey := s.cacheKeyWithOpts("query", base)
 
-	opts1 := DefaultSearchOptions()
-	opts2 := DefaultSearchOptions()
-	opts2.IncludeTests = true
-
-	key1 := s.cacheKeyWithOpts("query", opts1)
-	key2 := s.cacheKeyWithOpts("query", opts2)
-
-	if key1 == key2 {
-		t.Error("different options should produce different cache keys")
+	cases := map[string]func(*SearchOptions){
+		"include tests":   func(o *SearchOptions) { o.IncludeTests = true },
+		"use colbert":     func(o *SearchOptions) { o.UseColBERT = true },
+		"colbert weight":  func(o *SearchOptions) { o.ColBERTWeight = 0.9 },
+		"reranker weight": func(o *SearchOptions) { o.RerankWeight = 0.9 },
+		"exact threshold": func(o *SearchOptions) { o.Threshold += 0.00001 },
 	}
-
-	// Same options should produce same key
-	key3 := s.cacheKeyWithOpts("query", opts1)
-	if key1 != key3 {
-		t.Error("same options should produce same cache key")
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			opts := base
+			mutate(&opts)
+			if got := s.cacheKeyWithOpts("query", opts); got == baseKey {
+				t.Fatalf("cache key did not include changed options: %+v", opts)
+			}
+		})
+	}
+	if got := s.cacheKeyWithOpts("query", base); got != baseKey {
+		t.Fatal("same options should produce the same cache key")
 	}
 }
 

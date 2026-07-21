@@ -2,6 +2,7 @@ package search
 
 import (
 	"strings"
+	"unicode"
 )
 
 // Common stopwords to filter out from search queries
@@ -43,7 +44,10 @@ func ExtractHybridSearchTerms(query string) string {
 	if len(terms) == 1 {
 		return terms[0]
 	}
-	return strings.Join(groupedCompoundTerms(terms), " AND ")
+	// Candidate generation should favor recall. Each term group retains exact
+	// compound identifier alternatives, while groups are unioned and later
+	// fused with dense retrieval using weighted RRF.
+	return strings.Join(groupedCompoundTerms(terms), " OR ")
 }
 
 // ExtractSearchTermsAND converts a natural language query to FTS5 MATCH syntax.
@@ -139,13 +143,14 @@ func compoundTermsByInputIndex(terms []string) map[int][]string {
 
 // escapeFTS5 escapes special characters for FTS5 queries.
 func escapeFTS5(term string) string {
-	// FTS5 special characters: ^ * " ( ) : -
-	// We wrap terms with special chars in double quotes
-	needsQuoting := false
+	// FTS5 barewords permit letters, numbers, underscore, and non-ASCII
+	// letters. Quote everything else (not just operators) so paths and file
+	// extensions cannot turn into invalid MATCH syntax.
+	needsQuoting := term == ""
 	for _, c := range term {
-		switch c {
-		case '^', '*', '"', '(', ')', ':', '-':
+		if c != '_' && !unicode.IsLetter(c) && !unicode.IsNumber(c) {
 			needsQuoting = true
+			break
 		}
 	}
 

@@ -247,8 +247,7 @@ func (s *InMemStore) Store(ctx context.Context, doc *Document) error {
 	}
 
 	_, err = tx.ExecContext(ctx,
-		`INSERT OR REPLACE INTO documents (id, filepath, content, start_line, end_line, metadata, is_test)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		documentMetadataUpsertSQL,
 		doc.ID, doc.FilePath, doc.Content, doc.StartLine, doc.EndLine, string(metadata), isTest)
 	if err != nil {
 		return fmt.Errorf("failed to insert document: %w", err)
@@ -318,9 +317,7 @@ func (s *InMemStore) StoreBatch(ctx context.Context, docs []*Document) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	docStmt, err := tx.PrepareContext(ctx,
-		`INSERT OR REPLACE INTO documents (id, filepath, content, start_line, end_line, metadata, is_test)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`)
+	docStmt, err := tx.PrepareContext(ctx, documentMetadataUpsertSQL)
 	if err != nil {
 		return err
 	}

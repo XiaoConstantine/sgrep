@@ -3,6 +3,7 @@ package search
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"math"
@@ -300,7 +301,7 @@ func (s *Searcher) SearchWithOptions(ctx context.Context, query string, opts Sea
 
 	// Generate query embedding (L1 cache in embedder)
 	embedTimer := util.NewTimer("query_embedding")
-	queryEmb, err := s.embedder.Embed(ctx, query)
+	queryEmb, err := s.embedder.EmbedQuery(ctx, query)
 	embedDuration := embedTimer.Stop()
 	stats.RecordStage("query_embedding", embedDuration, 1)
 	if err != nil {
@@ -597,17 +598,44 @@ func isWorktreePath(path string) bool {
 // cacheKey generates a unique key for query + parameters.
 func (s *Searcher) cacheKey(query string, limit int, threshold float64) string {
 	h := sha256.New()
-	_, _ = fmt.Fprintf(h, "%s:%d:%.4f", query, limit, threshold)
+	writeCacheString(h, query)
+	writeCacheUint64(h, uint64(limit))
+	writeCacheUint64(h, math.Float64bits(threshold))
 	return hex.EncodeToString(h.Sum(nil)[:8])
 }
 
 // cacheKeyWithOpts generates a unique key for query + all options.
 func (s *Searcher) cacheKeyWithOpts(query string, opts SearchOptions) string {
 	h := sha256.New()
-	_, _ = fmt.Fprintf(h, "%s:%d:%.4f:%v:%v:%.4f:%v:%.4f:%.4f:%v:%d",
-		query, opts.Limit, opts.Threshold, opts.IncludeTests, opts.Deduplicate, opts.BoostImpl,
-		opts.UseHybrid, opts.SemanticWeight, opts.BM25Weight, opts.UseRerank, opts.RerankTopK)
+	writeCacheString(h, query)
+	for _, value := range []uint64{
+		uint64(opts.Limit), math.Float64bits(opts.Threshold), boolBits(opts.IncludeTests),
+		boolBits(opts.Deduplicate), math.Float64bits(opts.BoostImpl), boolBits(opts.UseHybrid),
+		math.Float64bits(opts.SemanticWeight), math.Float64bits(opts.BM25Weight), boolBits(opts.UseRerank),
+		uint64(opts.RerankTopK), math.Float64bits(opts.RerankWeight), boolBits(opts.UseColBERT),
+		math.Float64bits(opts.ColBERTWeight),
+	} {
+		writeCacheUint64(h, value)
+	}
 	return hex.EncodeToString(h.Sum(nil)[:8])
+}
+
+func writeCacheString(h interface{ Write([]byte) (int, error) }, value string) {
+	writeCacheUint64(h, uint64(len(value)))
+	_, _ = h.Write([]byte(value))
+}
+
+func writeCacheUint64(h interface{ Write([]byte) (int, error) }, value uint64) {
+	var encoded [8]byte
+	binary.LittleEndian.PutUint64(encoded[:], value)
+	_, _ = h.Write(encoded[:])
+}
+
+func boolBits(value bool) uint64 {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 // ClearCache clears the query result cache.

@@ -2,104 +2,76 @@ package store
 
 import "sort"
 
+// fuseHybridCandidates combines independently ranked dense and lexical lists
+// with weighted reciprocal-rank fusion. RRF avoids treating backend-specific
+// cosine distances and BM25 magnitudes as directly comparable.
 func fuseHybridCandidates(dense []DenseSearchResult, lexical []BM25SearchResult, limit int, semanticWeight, bm25Weight float64) []DenseSearchResult {
 	if limit <= 0 {
 		return nil
 	}
 	totalWeight := semanticWeight + bm25Weight
 	if totalWeight <= 0 {
-		semanticWeight = 0.6
-		bm25Weight = 0.4
-		totalWeight = 1
+		semanticWeight, bm25Weight, totalWeight = 0.6, 0.4, 1
 	}
 	semanticWeight /= totalWeight
 	bm25Weight /= totalWeight
 
 	type candidate struct {
-		id            string
-		denseDistance float64
-		hasDense      bool
-		bm25Score     float64
-		hasBM25       bool
+		id    string
+		score float64
 	}
 	candidates := make(map[string]*candidate, len(dense)+len(lexical))
+	get := func(id string) *candidate {
+		c := candidates[id]
+		if c == nil {
+			c = &candidate{id: id}
+			candidates[id] = c
+		}
+		return c
+	}
 
-	for _, hit := range dense {
+	const rrfK = 60.0
+	seenDense := make(map[string]struct{}, len(dense))
+	for rank, hit := range dense {
 		if hit.ID == "" {
 			continue
 		}
-		c := candidates[hit.ID]
-		if c == nil {
-			c = &candidate{id: hit.ID, denseDistance: hit.Distance, hasDense: true}
-			candidates[hit.ID] = c
-		} else if !c.hasDense || hit.Distance < c.denseDistance {
-			c.denseDistance = hit.Distance
-			c.hasDense = true
+		if _, ok := seenDense[hit.ID]; ok {
+			continue
 		}
+		seenDense[hit.ID] = struct{}{}
+		get(hit.ID).score += semanticWeight / (rrfK + float64(rank+1))
 	}
-	bestBM25 := 0.0
-	worstBM25 := 0.0
-	haveBM25 := false
-	for _, hit := range lexical {
+	seenLexical := make(map[string]struct{}, len(lexical))
+	for rank, hit := range lexical {
 		if hit.ID == "" {
 			continue
 		}
-		c := candidates[hit.ID]
-		if c == nil {
-			c = &candidate{id: hit.ID}
-			candidates[hit.ID] = c
+		if _, ok := seenLexical[hit.ID]; ok {
+			continue
 		}
-		if !c.hasBM25 || hit.Score < c.bm25Score {
-			c.bm25Score = hit.Score
-			c.hasBM25 = true
-		}
-		if !haveBM25 {
-			bestBM25 = hit.Score
-			worstBM25 = hit.Score
-			haveBM25 = true
-		} else {
-			if hit.Score < bestBM25 {
-				bestBM25 = hit.Score
-			}
-			if hit.Score > worstBM25 {
-				worstBM25 = hit.Score
-			}
-		}
+		seenLexical[hit.ID] = struct{}{}
+		get(hit.ID).score += bm25Weight / (rrfK + float64(rank+1))
 	}
 
-	results := make([]DenseSearchResult, 0, len(candidates))
+	ranked := make([]candidate, 0, len(candidates))
 	for _, c := range candidates {
-		denseScore := 0.0
-		if c.hasDense {
-			denseScore = 1 - c.denseDistance
-			if denseScore < 0 {
-				denseScore = 0
-			} else if denseScore > 1 {
-				denseScore = 1
-			}
-		}
-		lexicalScore := 0.0
-		if c.hasBM25 {
-			if bestBM25 == worstBM25 {
-				lexicalScore = 1
-			} else {
-				lexicalScore = (worstBM25 - c.bm25Score) / (worstBM25 - bestBM25)
-			}
-		}
-		score := semanticWeight*denseScore + bm25Weight*lexicalScore
-		results = append(results, DenseSearchResult{
-			ID:       c.id,
-			Distance: 1 - score,
-		})
+		ranked = append(ranked, *c)
 	}
-	sort.Slice(results, func(i, j int) bool {
-		if results[i].Distance != results[j].Distance {
-			return results[i].Distance < results[j].Distance
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].score != ranked[j].score {
+			return ranked[i].score > ranked[j].score
 		}
-		return results[i].ID < results[j].ID
+		return ranked[i].id < ranked[j].id
 	})
-	if len(results) > limit {
-		results = results[:limit]
+	if len(ranked) > limit {
+		ranked = ranked[:limit]
+	}
+
+	results := make([]DenseSearchResult, len(ranked))
+	for i, item := range ranked {
+		// Preserve the Storer convention that lower scores rank first.
+		results[i] = DenseSearchResult{ID: item.id, Distance: -item.score}
 	}
 	return results
 }

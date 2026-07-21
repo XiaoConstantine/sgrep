@@ -162,93 +162,13 @@ func (s *Store) init() error {
 
 // initFTS5 creates the FTS5 virtual table and sync triggers for BM25 search.
 func (s *Store) initFTS5() error {
-	// Create FTS5 virtual table
-	_, err := s.db.Exec(`
-		CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
-			content,
-			filepath,
-			content='documents',
-			content_rowid='rowid'
-		)
-	`)
-	if err != nil {
-		return fmt.Errorf("create FTS5 table: %w", err)
-	}
-
-	// Create triggers to keep FTS5 in sync with documents table
-	triggers := []string{
-		// After insert trigger
-		`CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
-			INSERT INTO documents_fts(rowid, content, filepath)
-			VALUES (NEW.rowid, NEW.content, NEW.filepath);
-		END`,
-		// After delete trigger
-		`CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
-			INSERT INTO documents_fts(documents_fts, rowid, content, filepath)
-			VALUES ('delete', OLD.rowid, OLD.content, OLD.filepath);
-		END`,
-		// After update trigger
-		`CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
-			INSERT INTO documents_fts(documents_fts, rowid, content, filepath)
-			VALUES ('delete', OLD.rowid, OLD.content, OLD.filepath);
-			INSERT INTO documents_fts(rowid, content, filepath)
-			VALUES (NEW.rowid, NEW.content, NEW.filepath);
-		END`,
-	}
-
-	for _, t := range triggers {
-		if _, err := s.db.Exec(t); err != nil {
-			// Ignore "already exists" errors for triggers
-			if !strings.Contains(err.Error(), "already exists") {
-				return fmt.Errorf("create trigger: %w", err)
-			}
-		}
-	}
-
-	return nil
+	return initDocumentFTS(s.db)
 }
 
 // EnsureFTS5 checks if FTS5 table exists and populates it from existing documents.
 // Call this on store open to handle migration of existing indexes.
 func (s *Store) EnsureFTS5() error {
-	var count int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='documents_fts'`).Scan(&count)
-	if err != nil {
-		return err
-	}
-
-	if count == 0 {
-		// FTS5 table doesn't exist, init it
-		if err := s.initFTS5(); err != nil {
-			return err
-		}
-	}
-
-	// Check if FTS5 has data
-	var ftsCount int
-	err = s.db.QueryRow(`SELECT COUNT(*) FROM documents_fts`).Scan(&ftsCount)
-	if err != nil {
-		return err
-	}
-
-	var docCount int
-	err = s.db.QueryRow(`SELECT COUNT(*) FROM documents`).Scan(&docCount)
-	if err != nil {
-		return err
-	}
-
-	// If documents exist but FTS5 is empty, populate it
-	if docCount > 0 && ftsCount == 0 {
-		_, err = s.db.Exec(`
-			INSERT INTO documents_fts(rowid, content, filepath)
-			SELECT rowid, content, filepath FROM documents
-		`)
-		if err != nil {
-			return fmt.Errorf("populate FTS5: %w", err)
-		}
-	}
-
-	return nil
+	return ensureDocumentFTS(s.db)
 }
 
 // Store saves a document with its embedding.
@@ -267,8 +187,7 @@ func (s *Store) Store(ctx context.Context, doc *Document) error {
 
 	// Insert document
 	_, err = tx.ExecContext(ctx,
-		`INSERT OR REPLACE INTO documents (id, filepath, content, start_line, end_line, metadata, is_test)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		documentMetadataUpsertSQL,
 		doc.ID, doc.FilePath, doc.Content, doc.StartLine, doc.EndLine, string(metadata), isTest)
 	if err != nil {
 		return fmt.Errorf("failed to insert document: %w", err)
@@ -301,9 +220,7 @@ func (s *Store) StoreBatch(ctx context.Context, docs []*Document) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	docStmt, err := tx.PrepareContext(ctx,
-		`INSERT OR REPLACE INTO documents (id, filepath, content, start_line, end_line, metadata, is_test)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`)
+	docStmt, err := tx.PrepareContext(ctx, documentMetadataUpsertSQL)
 	if err != nil {
 		return err
 	}
@@ -355,9 +272,7 @@ func (s *Store) StoreMetadataBatch(ctx context.Context, docs []*Document) error 
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	docStmt, err := tx.PrepareContext(ctx,
-		`INSERT OR REPLACE INTO documents (id, filepath, content, start_line, end_line, metadata, is_test)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`)
+	docStmt, err := tx.PrepareContext(ctx, documentMetadataUpsertSQL)
 	if err != nil {
 		return err
 	}

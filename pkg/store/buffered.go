@@ -186,48 +186,12 @@ func (s *BufferedStore) init() error {
 }
 
 func (s *BufferedStore) initFTS5() error {
-	_, err := s.db.Exec(`
-		CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
-			content,
-			filepath,
-			content='documents',
-			content_rowid='rowid'
-		)
-	`)
-	if err != nil {
-		// FTS5 might not be available in some SQLite builds (e.g., tests)
-		// This is optional functionality for hybrid search
+	if err := initDocumentFTS(s.db); err != nil {
 		if strings.Contains(err.Error(), "no such module: fts5") {
-			return nil // Gracefully skip FTS5
+			return nil
 		}
-		return fmt.Errorf("create FTS5 table: %w", err)
+		return err
 	}
-
-	triggers := []string{
-		`CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
-			INSERT INTO documents_fts(rowid, content, filepath)
-			VALUES (NEW.rowid, NEW.content, NEW.filepath);
-		END`,
-		`CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
-			INSERT INTO documents_fts(documents_fts, rowid, content, filepath)
-			VALUES ('delete', OLD.rowid, OLD.content, OLD.filepath);
-		END`,
-		`CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
-			INSERT INTO documents_fts(documents_fts, rowid, content, filepath)
-			VALUES ('delete', OLD.rowid, OLD.content, OLD.filepath);
-			INSERT INTO documents_fts(rowid, content, filepath)
-			VALUES (NEW.rowid, NEW.content, NEW.filepath);
-		END`,
-	}
-
-	for _, t := range triggers {
-		if _, err := s.db.Exec(t); err != nil {
-			if !strings.Contains(err.Error(), "already exists") {
-				return fmt.Errorf("create trigger: %w", err)
-			}
-		}
-	}
-
 	return nil
 }
 
@@ -323,8 +287,7 @@ func (s *BufferedStore) Store(ctx context.Context, doc *Document) error {
 	}
 
 	_, err := s.db.ExecContext(ctx,
-		`INSERT OR REPLACE INTO documents (id, filepath, content, start_line, end_line, metadata, is_test)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		documentMetadataUpsertSQL,
 		doc.ID, doc.FilePath, doc.Content, doc.StartLine, doc.EndLine, string(metadata), isTest)
 	if err != nil {
 		return fmt.Errorf("failed to insert document: %w", err)
@@ -364,9 +327,7 @@ func (s *BufferedStore) StoreBatch(ctx context.Context, docs []*Document) error 
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	docStmt, err := tx.PrepareContext(ctx,
-		`INSERT OR REPLACE INTO documents (id, filepath, content, start_line, end_line, metadata, is_test)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`)
+	docStmt, err := tx.PrepareContext(ctx, documentMetadataUpsertSQL)
 	if err != nil {
 		return err
 	}
@@ -425,9 +386,7 @@ func (s *BufferedStore) StoreMetadataBatch(ctx context.Context, docs []*Document
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	docStmt, err := tx.PrepareContext(ctx,
-		`INSERT OR REPLACE INTO documents (id, filepath, content, start_line, end_line, metadata, is_test)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`)
+	docStmt, err := tx.PrepareContext(ctx, documentMetadataUpsertSQL)
 	if err != nil {
 		return err
 	}
@@ -1128,29 +1087,7 @@ func (s *BufferedStore) Stats(ctx context.Context) (*Stats, error) {
 
 // EnsureFTS5 populates FTS5 from existing documents if needed.
 func (s *BufferedStore) EnsureFTS5() error {
-	var ftsCount int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM documents_fts`).Scan(&ftsCount)
-	if err != nil {
-		return err
-	}
-
-	var docCount int
-	err = s.db.QueryRow(`SELECT COUNT(*) FROM documents`).Scan(&docCount)
-	if err != nil {
-		return err
-	}
-
-	if docCount > 0 && ftsCount == 0 {
-		_, err = s.db.Exec(`
-			INSERT INTO documents_fts(rowid, content, filepath)
-			SELECT rowid, content, filepath FROM documents
-		`)
-		if err != nil {
-			return fmt.Errorf("populate FTS5: %w", err)
-		}
-	}
-
-	return nil
+	return ensureDocumentFTS(s.db)
 }
 
 // VectorCount returns the number of vectors in the store.
