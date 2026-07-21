@@ -37,6 +37,8 @@ var (
 	enableColBERT           bool
 	colbertAdaptiveSegments bool
 	rerankTopK              int
+	searchProfile           string
+	disableColBERT          bool
 
 	// Index flags
 	indexWorkers                 int
@@ -45,6 +47,7 @@ var (
 	indexColBERTPreindex         bool
 	indexColBERTAdaptiveSegments bool
 	indexColBERTCodec            string
+	indexExactVectorLimit        int
 
 	// Debug flags
 	debugLevel   int    // 0=off, 1=summary, 2=detailed (set via -d count)
@@ -128,6 +131,8 @@ func init() {
 	rootCmd.Flags().BoolVar(&enableColBERT, "colbert", false, "Enable ColBERT late interaction scoring (no extra model needed)")
 	rootCmd.Flags().BoolVar(&colbertAdaptiveSegments, "colbert-adaptive-segments", false, "Use adaptive sqrt(M) segment budgets for ColBERT scoring (experimental)")
 	rootCmd.Flags().IntVar(&rerankTopK, "rerank-topk", 50, "Number of candidates to fetch for reranking")
+	rootCmd.Flags().StringVar(&searchProfile, "profile", "balanced", "Search profile: fast, balanced, or quality")
+	rootCmd.Flags().BoolVar(&disableColBERT, "no-colbert", false, "Disable late interaction even when selected by a profile")
 
 	// Add subcommands
 	rootCmd.AddCommand(indexCmd)
@@ -155,6 +160,10 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no index found. Run 'sgrep index .' first")
 	}
 
+	if err := index.ValidateRepoMetadata(filepath.Dir(indexPath)); err != nil {
+		return err
+	}
+
 	// Open store with adaptive search mode
 	s, err := store.OpenForSearch(indexPath)
 	if err != nil {
@@ -162,8 +171,12 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 	defer func() { _ = s.Close() }()
 
-	// Ensure FTS5 index exists for hybrid search
-	if hybridSearch {
+	// Ensure FTS5 exists when the selected profile uses lexical retrieval.
+	profileUsesHybrid := searchProfile == "balanced" || searchProfile == "quality"
+	if cmd.Flags().Changed("hybrid") {
+		profileUsesHybrid = hybridSearch
+	}
+	if profileUsesHybrid {
 		if err := store.EnsureFTS5IfNeeded(s); err != nil {
 			return fmt.Errorf("failed to initialize FTS5 for hybrid search: %w", err)
 		}
@@ -175,7 +188,28 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	opts.Threshold = threshold
 	opts.IncludeTests = includeTests
 	opts.Deduplicate = !allChunks
-	opts.UseHybrid = hybridSearch
+	switch searchProfile {
+	case "fast":
+		opts.UseHybrid = false
+		opts.UseColBERT = false
+	case "balanced":
+		opts.UseHybrid = true
+		opts.UseColBERT = false
+	case "quality":
+		opts.UseHybrid = true
+		opts.UseColBERT = true
+	default:
+		return fmt.Errorf("unknown search profile %q: use fast, balanced, or quality", searchProfile)
+	}
+	if cmd.Flags().Changed("hybrid") {
+		opts.UseHybrid = hybridSearch
+	}
+	if cmd.Flags().Changed("colbert") {
+		opts.UseColBERT = enableColBERT
+	}
+	if disableColBERT {
+		opts.UseColBERT = false
+	}
 	opts.SemanticWeight = semanticWeight
 	opts.BM25Weight = bm25Weight
 	opts.UseRerank = enableRerank
@@ -187,24 +221,24 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		AdaptiveSegments: colbertAdaptiveSegments,
 	}
 
-	// Auto-enable ColBERT if MMap segment store exists (fast pre-computed segments)
-	// Can be explicitly enabled via --colbert or automatically with --rerank
+	// Open precomputed late-interaction segments when present. Merely finding an
+	// artifact must not mutate the selected profile; benchmark modes remain
+	// explicit and reproducible.
 	indexDir := filepath.Dir(indexPath)
 	mmapPath := filepath.Join(indexDir, "colbert_segments.mmap")
-	if _, err := os.Stat(mmapPath); err == nil {
-		mmapStore, err := store.OpenMMapSegmentStore(indexDir, 768) // 768 dims for nomic-embed
-		if err == nil {
-			searchCfg.SegmentStore = mmapStore
-			defer func() { _ = mmapStore.Close() }()
-			// Auto-enable ColBERT when MMap is available (fast pre-computed segments)
-			if !enableColBERT {
-				enableColBERT = true
-				util.Debugf(util.DebugSummary, "Auto-enabled ColBERT (MMap segments available)")
+	if opts.UseColBERT {
+		if _, err := os.Stat(mmapPath); err == nil {
+			mmapStore, err := store.OpenMMapSegmentStore(indexDir, 768) // 768 dims for nomic-embed
+			if err == nil {
+				searchCfg.SegmentStore = mmapStore
+				defer func() { _ = mmapStore.Close() }()
+				util.Debugf(util.DebugSummary, "Using MMap segment store for late interaction")
 			}
-			util.Debugf(util.DebugSummary, "Using MMap segment store for ColBERT")
 		}
 	}
-	opts.UseColBERT = enableColBERT || enableRerank
+	if opts.UseColBERT && searchCfg.SegmentStore == nil {
+		return fmt.Errorf("quality profile requires precomputed ColBERT segments; run 'sgrep index .'")
+	}
 
 	// Set up reranker if enabled
 	if enableRerank {
@@ -392,6 +426,7 @@ var indexCmd = &cobra.Command{
 		cfg.CompactVectorStorage = !indexSQLVectors
 		cfg.AdaptiveColBERTSegments = indexColBERTAdaptiveSegments
 		cfg.ColBERTCodec = store.ParseColBERTCodec(indexColBERTCodec)
+		cfg.ExactVectorLimit = indexExactVectorLimit
 
 		ctx := context.Background()
 		indexer, err := index.NewWithConfig(path, cfg)
@@ -412,17 +447,16 @@ var indexCmd = &cobra.Command{
 			fmt.Println("\nExporting vectors to compact TQ-MSE stores...")
 			vecCount, err := indexer.RebuildTQVectorStore(ctx)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to export vectors to compact TQ-MSE stores: %v\n", err)
-			} else {
-				fmt.Printf("Exported %d chunk vectors to compact TQ-MSE stores\n", vecCount)
+				return fmt.Errorf("export vectors to compact TQ-MSE stores: %w", err)
 			}
+			fmt.Printf("Exported %d chunk vectors to compact TQ-MSE stores\n", vecCount)
 		}
-		if err := os.Remove(filepath.Join(indexer.RepoDir(), "vectors.mmap")); err != nil && !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "Warning: failed to remove legacy vectors.mmap: %v\n", err)
-		}
-
 		// Pre-compute ColBERT segments if requested
 		if indexColBERTPreindex {
+			mmapPath := filepath.Join(indexer.RepoDir(), "colbert_segments.mmap")
+			if err := os.Remove(mmapPath); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("invalidate stale ColBERT artifact: %w", err)
+			}
 			fmt.Println("\nPre-computing ColBERT segments for fast query-time scoring...")
 			processed, err := indexer.ComputeColBERTSegments(ctx)
 			if err != nil {
@@ -434,16 +468,15 @@ var indexCmd = &cobra.Command{
 			fmt.Println("Exporting segments to MMap store...")
 			segCount, err := indexer.ExportColBERTToMMap(ctx, indexer.RepoDir())
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to export to MMap: %v\n", err)
-			} else {
-				fmt.Printf("Exported %d segments to MMap store\n", segCount)
+				return fmt.Errorf("export ColBERT segments to mmap: %w", err)
 			}
+			fmt.Printf("Exported %d segments to MMap store\n", segCount)
 		} else if err := os.Remove(filepath.Join(indexer.RepoDir(), "colbert_segments.mmap")); err != nil && !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "Warning: failed to remove stale colbert_segments.mmap: %v\n", err)
+			return fmt.Errorf("remove disabled ColBERT artifact: %w", err)
 		}
 
 		if err := indexer.Checkpoint(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to checkpoint index: %v\n", err)
+			return fmt.Errorf("checkpoint index: %w", err)
 		}
 
 		return nil
@@ -458,6 +491,7 @@ func init() {
 	indexCmd.Flags().BoolVar(&indexColBERTPreindex, "colbert-preindex", true, "Pre-compute ColBERT segment embeddings for fast query-time scoring (default: true)")
 	indexCmd.Flags().BoolVar(&indexColBERTAdaptiveSegments, "colbert-adaptive-segments", false, "Use adaptive sqrt(M) segment budgets during ColBERT preindexing (experimental)")
 	indexCmd.Flags().StringVar(&indexColBERTCodec, "colbert-codec", "", "ColBERT segment codec: tqmse, int8, or pq6 (default: reuse existing repo codec, otherwise tqmse)")
+	indexCmd.Flags().IntVar(&indexExactVectorLimit, "exact-vector-limit", 20000, "Keep an exact float32 mmap search artifact up to this many chunks (0 disables)")
 }
 
 // Watch command
