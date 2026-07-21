@@ -16,12 +16,15 @@ Usage:
   uv run run_dspy_bench.py --tool all                # Test all tools
 """
 
+import hashlib
 import json
 import subprocess
 import sys
 import time
 import os
 import re
+import shutil
+import statistics
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
@@ -48,6 +51,12 @@ def estimate_cost(tokens: int) -> float:
 CORPUS = "/Users/xiao/development/github.com/XiaoConstantine/dspy-go"
 DATASET_PATH = Path(__file__).parent / "dspy-go-dataset.json"
 TOPK = 10
+CONCURRENCY = 1
+SEMANTIC_WEIGHT = 0.6
+BM25_WEIGHT = 0.4
+EVAL_SPLIT = "all"
+EVAL_FOLD = 0
+EVAL_FOLDS = 4
 
 
 @lru_cache(maxsize=1024)
@@ -74,14 +83,15 @@ def run_sgrep(query: str, sgrep_bin: str, rerank: bool = False, hybrid: bool = T
         tokens: Token count of results
         timing_breakdown: Dict with pipeline stage timings
     """
-    # Use -d flag to get timing info from sgrep
-    cmd = [sgrep_bin, "-n", str(TOPK), "-d"]
-    if hybrid:
-        cmd.append("--hybrid")
+    # Force a profile so local artifacts cannot silently contaminate modes.
+    profile = "quality" if colbert else ("balanced" if hybrid else "fast")
+    cmd = [
+        sgrep_bin, "-n", str(TOPK), "-d", "--profile", profile,
+        "--semantic-weight", str(SEMANTIC_WEIGHT),
+        "--bm25-weight", str(BM25_WEIGHT),
+    ]
     if rerank:
         cmd.extend(["--rerank", "--rerank-topk", "100"])
-    if colbert:
-        cmd.append("--colbert")
     cmd.append(query)
 
     start = time.time()
@@ -95,13 +105,13 @@ def run_sgrep(query: str, sgrep_bin: str, rerank: bool = False, hybrid: bool = T
         )
         output = result.stdout
         stderr = result.stderr
-    except subprocess.TimeoutExpired:
-        output = ""
-        stderr = ""
-    except Exception as e:
-        print(f"  Error: {e}")
-        output = ""
-        stderr = ""
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"sgrep exited {result.returncode} for query {query!r}: "
+                f"{stderr.strip() or output.strip()}"
+            )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"sgrep timed out for query {query!r}") from exc
 
     total_latency_ms = (time.time() - start) * 1000
 
@@ -148,9 +158,9 @@ def run_sgrep(query: str, sgrep_bin: str, rerank: bool = False, hybrid: bool = T
         else:
             path_part = line
 
-        filename = os.path.basename(path_part)
-        if filename and filename not in files:
-            files.append(filename)
+        relative_path = os.path.normpath(path_part).removeprefix("./")
+        if relative_path and relative_path not in files:
+            files.append(relative_path)
 
     tokens = count_tokens(total_content) if total_content else 0
 
@@ -161,9 +171,11 @@ def warmup_sgrep(sgrep_bin: str, corpus: str):
     """Run a warmup query to initialize llama-server connection."""
     cmd = [sgrep_bin, "warmup query", "--hybrid", "-n", "1"]
     try:
-        subprocess.run(cmd, cwd=corpus, capture_output=True, timeout=30)
-    except:
-        pass
+        result = subprocess.run(cmd, cwd=corpus, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("sgrep warmup timed out") from exc
+    if result.returncode != 0:
+        raise RuntimeError(f"sgrep warmup failed: {result.stderr.strip() or result.stdout.strip()}")
 
 
 def run_osgrep(query: str) -> tuple[list[str], float, int]:
@@ -181,11 +193,10 @@ def run_osgrep(query: str) -> tuple[list[str], float, int]:
             timeout=120
         )
         output = result.stdout + result.stderr  # osgrep may output to either
-    except subprocess.TimeoutExpired:
-        output = ""
-    except Exception as e:
-        print(f"  Error: {e}")
-        output = ""
+        if result.returncode != 0:
+            raise RuntimeError(f"osgrep exited {result.returncode}: {output.strip()}")
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"osgrep timed out for query {query!r}") from exc
 
     latency_ms = (time.time() - start) * 1000
 
@@ -206,9 +217,9 @@ def run_osgrep(query: str) -> tuple[list[str], float, int]:
         # Skip non-file lines
         if not path_part or path_part.startswith(' ') or '/' not in path_part and '.' not in path_part:
             continue
-        filename = os.path.basename(path_part)
-        if filename and filename.endswith('.go') and filename not in files:
-            files.append(filename)
+        relative_path = os.path.normpath(path_part).removeprefix("./")
+        if relative_path.endswith('.go') and relative_path not in files:
+            files.append(relative_path)
 
     return files, latency_ms, tokens
 
@@ -230,11 +241,13 @@ def run_mgrep(query: str, rerank: bool = True) -> tuple[list[str], float, int]:
             timeout=120
         )
         output = result.stdout
-    except subprocess.TimeoutExpired:
-        output = ""
-    except Exception as e:
-        print(f"  Error: {e}")
-        output = ""
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"mgrep exited {result.returncode} for query {query!r}: "
+                f"{result.stderr.strip() or output.strip()}"
+            )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"mgrep timed out for query {query!r}") from exc
 
     latency_ms = (time.time() - start) * 1000
 
@@ -258,9 +271,9 @@ def run_mgrep(query: str, rerank: bool = True) -> tuple[list[str], float, int]:
         # Remove leading ./
         if path_part.startswith('./'):
             path_part = path_part[2:]
-        filename = os.path.basename(path_part)
-        if filename and filename not in files:
-            files.append(filename)
+        relative_path = os.path.normpath(path_part).removeprefix("./")
+        if relative_path and relative_path not in files:
+            files.append(relative_path)
 
     return files, latency_ms, tokens
 
@@ -289,11 +302,23 @@ def compute_recall_at_k(results: list[str], expected: list[str], k: int) -> floa
     return hits / len(expected)
 
 
+@lru_cache(maxsize=512)
+def resolve_corpus_path(judged_path: str) -> str:
+    """Resolve legacy basename qrels to an unambiguous corpus-relative path."""
+    normalized = os.path.normpath(judged_path).removeprefix("./")
+    if "/" in normalized:
+        return normalized
+    matches = [p.relative_to(CORPUS).as_posix() for p in Path(CORPUS).rglob(normalized)]
+    if len(matches) != 1:
+        raise ValueError(f"qrel {judged_path!r} resolves to {len(matches)} files; use a full relative path")
+    return matches[0]
+
+
 def _run_single_query(args):
-    """Helper function to run a single query. Used for parallel execution."""
+    """Helper function to run one query."""
     i, q, tool, sgrep_bin, rerank, hybrid, colbert = args
     query_text = q["query"]
-    expected_files = [j["file"] for j in q.get("judgments", [])]
+    expected_files = [resolve_corpus_path(j["file"]) for j in q.get("judgments", [])]
 
     if not expected_files:
         return None  # Skip queries without ground truth
@@ -339,6 +364,18 @@ def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False, hyb
         dataset = json.load(f)
 
     queries = dataset["queries"]
+    if EVAL_SPLIT != "all":
+        # Rank hashes before assigning folds so every fold has five examples on
+        # the current 20-query qrel set instead of an accidental two-query test.
+        ranked = sorted(
+            queries,
+            key=lambda query: hashlib.sha256(query["query"].encode()).hexdigest(),
+        )
+        test_queries = {query["query"] for rank, query in enumerate(ranked) if rank % EVAL_FOLDS == EVAL_FOLD}
+        queries = [
+            query for query in queries
+            if (query["query"] in test_queries) == (EVAL_SPLIT == "test")
+        ]
 
     tool_label = tool
     if tool == "sgrep":
@@ -387,9 +424,12 @@ def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False, hyb
         for i, q in enumerate(queries)
     ]
 
-    # Run queries in parallel (6 workers)
-    with ThreadPoolExecutor(max_workers=6) as executor:
+    # Sequential execution measures user-visible latency. Set --concurrency only
+    # for a separate throughput/contention run.
+    batch_started = time.time()
+    with ThreadPoolExecutor(max_workers=CONCURRENCY) as executor:
         results = list(tqdm(executor.map(_run_single_query, query_args), total=len(query_args), desc="Running queries"))
+    batch_elapsed = time.time() - batch_started
 
     # Process results and print (sequential to maintain output order)
     for result in tqdm(results, desc="Processing results", disable=len([r for r in results if r is not None]) == 0):
@@ -459,7 +499,25 @@ def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False, hyb
         "mean_r5": sum(r5_vals)/n,
         "mean_r10": sum(r10_vals)/n,
         "mean_search_latency_ms": sum(search_latency_vals)/n,
+        "median_search_latency_ms": statistics.median(search_latency_vals),
+        "p95_search_latency_ms": sorted(search_latency_vals)[max(0, int(0.95 * n + 0.999999) - 1)],
         "mean_total_latency_ms": sum(total_latency_vals)/n,
+        "concurrency": CONCURRENCY,
+        "throughput_queries_per_second": n / batch_elapsed if batch_elapsed > 0 else 0,
+        "corpus_commit": subprocess.check_output(["git", "-C", CORPUS, "rev-parse", "HEAD"], text=True).strip(),
+        "benchmark_metadata": {
+            "top_k": TOPK,
+            "embedding_model": "nomic-embed-text-v1.5.Q8_0.gguf",
+            "context_tokens": int(os.environ.get("SGREP_CONTEXT_TOKENS", "512")),
+            "sgrep_binary_sha256": hashlib.sha256(Path(sgrep_bin).read_bytes()).hexdigest() if tool == "sgrep" else None,
+            "profile": "quality" if colbert else ("balanced" if hybrid else "fast"),
+            "rerank": rerank,
+            "semantic_weight": SEMANTIC_WEIGHT,
+            "bm25_weight": BM25_WEIGHT,
+            "eval_split": EVAL_SPLIT,
+            "eval_fold": EVAL_FOLD if EVAL_SPLIT != "all" else None,
+            "eval_folds": EVAL_FOLDS,
+        },
         "timing_breakdown": timing_avg,
         "total_tokens": total_tokens,
         "mean_tokens": total_tokens / n,
@@ -474,7 +532,8 @@ def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False, hyb
     print(f"Mean P@10:         {summary['mean_p10']:.3f}")
     print(f"Mean R@5:          {summary['mean_r5']:.3f}")
     print(f"Mean R@10:         {summary['mean_r10']:.3f}")
-    print(f"Mean Search Time:  {summary['mean_search_latency_ms']:.1f}ms  (actual search)")
+    print(f"Mean Search Time:  {summary['mean_search_latency_ms']:.1f}ms")
+    print(f"Median / P95:      {summary['median_search_latency_ms']:.1f}ms / {summary['p95_search_latency_ms']:.1f}ms")
     print(f"Mean Total Time:   {summary['mean_total_latency_ms']:.1f}ms  (includes process startup)")
     if timing_avg:
         print(f"  Pipeline breakdown:")
@@ -493,7 +552,7 @@ def run_benchmark(tool: str, sgrep_bin: str = "sgrep", rerank: bool = False, hyb
 
 
 def main():
-    global CORPUS
+    global CORPUS, CONCURRENCY, SEMANTIC_WEIGHT, BM25_WEIGHT, EVAL_SPLIT, EVAL_FOLD
     tool = "sgrep"
     sgrep_bin = "sgrep"
     mode = "all"  # default: test all sgrep modes
@@ -511,10 +570,36 @@ def main():
             mode = sys.argv[i + 1]
         if arg == "--repo" and i + 1 < len(sys.argv):
             CORPUS = sys.argv[i + 1]
+        if arg == "--concurrency" and i + 1 < len(sys.argv):
+            CONCURRENCY = max(1, int(sys.argv[i + 1]))
+        if arg == "--semantic-weight" and i + 1 < len(sys.argv):
+            SEMANTIC_WEIGHT = float(sys.argv[i + 1])
+        if arg == "--bm25-weight" and i + 1 < len(sys.argv):
+            BM25_WEIGHT = float(sys.argv[i + 1])
+        if arg == "--split" and i + 1 < len(sys.argv):
+            EVAL_SPLIT = sys.argv[i + 1]
+            if EVAL_SPLIT not in {"all", "train", "test"}:
+                raise SystemExit("--split must be all, train, or test")
+        if arg == "--fold" and i + 1 < len(sys.argv):
+            EVAL_FOLD = int(sys.argv[i + 1])
+            if not 0 <= EVAL_FOLD < EVAL_FOLDS:
+                raise SystemExit(f"--fold must be between 0 and {EVAL_FOLDS - 1}")
 
-    # Convert sgrep_bin to absolute path
+    with open(DATASET_PATH) as f:
+        pinned = json.load(f).get("corpus_hash", "")
+    actual_commit = subprocess.check_output(["git", "-C", CORPUS, "rev-parse", "HEAD"], text=True).strip()
+    if pinned and pinned != actual_commit:
+        raise SystemExit(f"corpus commit mismatch: dataset={pinned}, checkout={actual_commit}")
+
+    # Resolve command names through PATH; only path-like values are relative to cwd.
     if not os.path.isabs(sgrep_bin):
-        sgrep_bin = os.path.abspath(sgrep_bin)
+        if os.sep not in sgrep_bin:
+            resolved = shutil.which(sgrep_bin)
+            if not resolved:
+                raise SystemExit(f"sgrep binary not found in PATH: {sgrep_bin}")
+            sgrep_bin = resolved
+        else:
+            sgrep_bin = os.path.abspath(sgrep_bin)
 
     summaries = []
 

@@ -1,0 +1,169 @@
+
+============================================================
+Benchmarking: sgrep (hybrid)
+Corpus: /Users/xiao/development/github.com/XiaoConstantine/dspy-go
+Top-K: 10
+============================================================
+
+Warming up sgrep (initializing llama-server connection)...
+Running queries:   0%|          | 0/20 [00:00<?, ?it/s]Running queries:  15%|█▌        | 3/20 [00:00<00:00, 20.75it/s]Running queries:  30%|███       | 6/20 [00:00<00:00, 19.32it/s]Running queries:  45%|████▌     | 9/20 [00:00<00:00, 20.35it/s]Running queries:  60%|██████    | 12/20 [00:00<00:00, 21.00it/s]Running queries:  75%|███████▌  | 15/20 [00:00<00:00, 21.12it/s]Running queries:  90%|█████████ | 18/20 [00:00<00:00, 20.94it/s]Running queries: 100%|██████████| 20/20 [00:00<00:00, 20.88it/s]
+Processing results:   0%|          | 0/20 [00:00<?, ?it/s]Processing results: 100%|██████████| 20/20 [00:00<00:00, 210240.80it/s]
+Query 1/20: "how does chain of thought prompting work"
+  Expected: ['pkg/modules/chain_of_thought.go', 'pkg/modules/predict.go', 'pkg/core/decorators.go']
+  Results: ['pkg/modules/chain_of_thought.go']
+  MRR: 1.000 | P@5: 0.200 | R@5: 0.333 | Search: 36ms | Total: 47ms [emb:29ms vec:7ms rerank:0ms]
+
+Query 2/20: "ReAct agent reasoning and action loop"
+  Expected: ['pkg/modules/react.go', 'pkg/agents/react/react_agent.go', 'pkg/agents/agent.go']
+  Results: ['pkg/agents/README.md', 'pkg/agents/react/README.md', 'pkg/agents/react/react_agent.go', 'pkg/modules/react.go']
+  MRR: 0.333 | P@5: 0.400 | R@5: 0.667 | Search: 37ms | Total: 48ms [emb:25ms vec:12ms rerank:0ms]
+
+Query 3/20: "optimize prompts using bayesian methods"
+  Expected: ['pkg/optimizers/mipro.go', 'pkg/tools/bayesian_selector.go', 'pkg/optimizers/tpe_optimizer.go']...
+  Results: ['pkg/optimizers/copro.go', 'docs/content/docs/_index.md', 'cmd/dspy-cli/internal/structured/analyzer.go', 'doc.go', 'pkg/tools/bayesian_selector.go']
+  MRR: 0.200 | P@5: 0.200 | R@5: 0.250 | Search: 35ms | Total: 45ms [emb:25ms vec:10ms rerank:0ms]
+
+Query 4/20: "register and discover tools for LLM agents"
+  Expected: ['pkg/tools/registry.go', 'pkg/tools/smart_registry.go', 'pkg/config/discovery.go']...
+  Results: ['pkg/tools/mcp_discovery.go', 'docs/content/docs/guides/agents.md', 'pkg/tools/smart_registry.go', 'pkg/llms/factory.go', 'examples/ace_react/main.go']...
+  MRR: 0.333 | P@5: 0.200 | R@5: 0.250 | Search: 44ms | Total: 55ms [emb:24ms vec:20ms rerank:0ms]
+
+Query 5/20: "signature fields for module input and output"
+  Expected: ['pkg/core/signature.go', 'pkg/core/typed_signature.go']
+  Results: ['pkg/core/signature.go', 'examples/multi_chain_comparison/README.md', 'pkg/core/module.go', 'pkg/core/typed_signature.go', 'pkg/interceptors/structured_output.go']...
+  MRR: 1.000 | P@5: 0.400 | R@5: 1.000 | Search: 44ms | Total: 55ms [emb:28ms vec:16ms rerank:0ms]
+
+Query 6/20: "cache LLM responses to avoid redundant calls"
+  Expected: ['pkg/cache/cache.go', 'pkg/cache/provider_cache.go', 'pkg/cache/memory_cache.go']
+  Results: ['pkg/cache/integration.go', 'pkg/cache/cache.go', 'pkg/cache/middleware.go', 'pkg/modules/rlm/repl.go']
+  MRR: 0.500 | P@5: 0.200 | R@5: 0.333 | Search: 39ms | Total: 49ms [emb:22ms vec:16ms rerank:0ms]
+
+Query 7/20: "connect to openai api"
+  Expected: ['pkg/llms/openai.go', 'pkg/llms/openai_providers.go', 'pkg/core/llm.go']
+  Results: ['pkg/llms/openai.go', 'docs/content/docs/reference/_index.md', 'docs/content/docs/reference/configuration.md', 'pkg/llms/ollama.go', 'pkg/llms/openai/types.go']
+  MRR: 1.000 | P@5: 0.200 | R@5: 0.333 | Search: 29ms | Total: 39ms [emb:22ms vec:7ms rerank:0ms]
+
+Query 8/20: "run modules in parallel with concurrency control"
+  Expected: ['pkg/modules/parallel.go', 'pkg/tools/parallel_executor.go', 'pkg/agents/orchestrator.go']
+  Results: ['pkg/modules/parallel.go', 'examples/parallel/README.md']
+  MRR: 1.000 | P@5: 0.200 | R@5: 0.333 | Search: 36ms | Total: 47ms [emb:22ms vec:14ms rerank:0ms]
+
+Query 9/20: "bootstrap few shot examples from training data"
+  Expected: ['pkg/optimizers/bootstrap_fewshot.go', 'pkg/datasets/dataset.go', 'pkg/core/optimizer.go']
+  Results: ['compatibility_test/dspy_comparison.py', 'pkg/optimizers/bootstrap_fewshot.go', 'compatibility_test/compare_results.py', 'compatibility_test/README.md', 'docs/content/docs/guides/optimizers.md']
+  MRR: 0.500 | P@5: 0.200 | R@5: 0.333 | Search: 36ms | Total: 47ms [emb:22ms vec:15ms rerank:0ms]
+
+Query 10/20: "intercept and modify module execution"
+  Expected: ['pkg/core/interceptor.go', 'pkg/cache/middleware.go', 'pkg/core/decorators.go']
+  Results: ['docs/content/docs/guides/interceptors.md', 'pkg/core/interceptor.go', 'pkg/interceptors/README.md', 'examples/gsm8k/main.go', 'pkg/interceptors/performance.go']...
+  MRR: 0.500 | P@5: 0.200 | R@5: 0.333 | Search: 34ms | Total: 45ms [emb:23ms vec:11ms rerank:0ms]
+
+Query 11/20: "store conversation history for context"
+  Expected: ['pkg/agents/memory.go', 'pkg/agents/memory/buffered_memory.go', 'pkg/core/execution_context.go']
+  Results: ['pkg/agents/memory/buffered_memory.go', 'docs/content/docs/guides/agents.md', 'pkg/agents/skills/store.go', 'pkg/modules/rlm/config.go']
+  MRR: 1.000 | P@5: 0.200 | R@5: 0.333 | Search: 35ms | Total: 46ms [emb:20ms vec:15ms rerank:0ms]
+
+Query 12/20: "compare multiple reasoning chains and pick best"
+  Expected: ['pkg/modules/multi_chain_comparison.go', 'pkg/modules/chain_of_thought.go']
+  Results: ['pkg/modules/multi_chain_comparison.go', 'examples/multi_chain_comparison/README.md', 'pkg/config/config.go', 'cmd/dspy-cli/internal/structured/analyzer.go', 'cmd/dspy-cli/internal/interactive/models/help.go']...
+  MRR: 1.000 | P@5: 0.200 | R@5: 0.500 | Search: 31ms | Total: 41ms [emb:21ms vec:10ms rerank:0ms]
+
+Query 13/20: "self-refine answers through iteration"
+  Expected: ['pkg/modules/refine.go', 'pkg/modules/chain_of_thought.go']
+  Results: ['examples/refine/README.md', 'cmd/dspy-cli/internal/interactive/models/wizard.go', 'pkg/optimizers/gepa.go', 'pkg/agents/react/reflection.go', 'pkg/optimizers/copro.go']...
+  MRR: 0.000 | P@5: 0.000 | R@5: 0.000 | Search: 36ms | Total: 46ms [emb:29ms vec:6ms rerank:0ms]
+
+Query 14/20: "configure logging and debugging"
+  Expected: ['pkg/logging/logger.go', 'pkg/logging/log_entry.go', 'pkg/logging/flight_recorder.go']
+  Results: ['docs/content/docs/resources.md', 'pkg/logging/logger.go', 'pkg/config/manager.go', 'cmd/dspy-cli/internal/runner/optimizer_runner.go', 'examples/multimodal/README.md']...
+  MRR: 0.500 | P@5: 0.200 | R@5: 0.333 | Search: 29ms | Total: 40ms [emb:22ms vec:7ms rerank:0ms]
+
+Query 15/20: "use anthropic claude models"
+  Expected: ['pkg/llms/anthropic.go', 'pkg/core/llm.go']
+  Results: ['docs/content/docs/reference/providers.md', 'pkg/llms/anthropic.go', 'docs/hugo_stats.json']
+  MRR: 0.500 | P@5: 0.200 | R@5: 0.500 | Search: 39ms | Total: 50ms [emb:30ms vec:10ms rerank:0ms]
+
+Query 16/20: "LLM error handling and retry logic"
+  Expected: ['pkg/errors/errors.go', 'pkg/core/llm.go', 'pkg/core/interceptor.go']
+  Results: ['doc.go', 'pkg/interceptors/README.md', 'docs/content/docs/guides/getting-started.md', 'docs/content/docs/reference/providers.md', 'pkg/optimizers/copro.go']...
+  MRR: 0.000 | P@5: 0.000 | R@5: 0.000 | Search: 41ms | Total: 52ms [emb:20ms vec:21ms rerank:0ms]
+
+Query 17/20: "build pipelines of chained modules"
+  Expected: ['pkg/tools/pipeline.go', 'pkg/tools/pipeline_builder.go', 'pkg/agents/workflows/chain.go']
+  Results: ['pkg/modules/chain_of_thought.go', 'pkg/tools/pipeline_builder.go', 'docs/content/docs/guides/tools.md', 'pkg/modules/rlm/rlm.go', 'doc.go']...
+  MRR: 0.500 | P@5: 0.200 | R@5: 0.333 | Search: 32ms | Total: 42ms [emb:21ms vec:10ms rerank:0ms]
+
+Query 18/20: "evaluate model accuracy on datasets"
+  Expected: ['pkg/metrics/accuracy.go', 'pkg/datasets/dataset.go', 'pkg/core/optimizer.go']
+  Results: ['pkg/metrics/accuracy.go', 'examples/hotpotqa/main.go', 'compatibility_test/dspy_comparison.py', 'cmd/dspy-cli/internal/interactive/models/comparison_helpers.go', 'cmd/dspy-cli/internal/interactive/models/results.go']...
+  MRR: 1.000 | P@5: 0.200 | R@5: 0.333 | Search: 36ms | Total: 47ms [emb:26ms vec:10ms rerank:0ms]
+
+Query 19/20: "multimodal content handling for images and audio"
+  Expected: ['pkg/core/content_utils.go', 'pkg/core/signature.go']
+  Results: ['doc.go', 'docs/content/docs/guides/multimodal.md', 'examples/multimodal/README.md']
+  MRR: 0.000 | P@5: 0.000 | R@5: 0.000 | Search: 36ms | Total: 46ms [emb:24ms vec:12ms rerank:0ms]
+
+Query 20/20: "use local ollama models"
+  Expected: ['pkg/llms/ollama.go', 'pkg/core/llm.go']
+  Results: ['pkg/llms/ollama.go', 'docs/content/docs/reference/providers.md']
+  MRR: 1.000 | P@5: 0.200 | R@5: 0.500 | Search: 32ms | Total: 43ms [emb:22ms vec:10ms rerank:0ms]
+
+============================================================
+SUMMARY: sgrep (hybrid)
+============================================================
+Mean MRR:          0.593
+Mean P@5:          0.190
+Mean P@10:         0.095
+Mean R@5:          0.350
+Mean R@10:         0.350
+Mean Search Time:  35.9ms
+Median / P95:      36.0ms / 44.0ms
+Mean Total Time:   46.5ms  (includes process startup)
+  Pipeline breakdown:
+    - Query embedding: 23.9ms
+    - Vector search:   11.9ms
+Total Tokens:      29,644
+Mean Tokens:       1482
+Total Cost:        $0.0889
+Queries: 20
+
+
+JSON Summaries:
+[
+  {
+    "tool": "sgrep (hybrid)",
+    "queries": 20,
+    "mean_mrr": 0.5933333333333334,
+    "mean_p5": 0.19,
+    "mean_p10": 0.095,
+    "mean_r5": 0.35,
+    "mean_r10": 0.35,
+    "mean_search_latency_ms": 35.85,
+    "median_search_latency_ms": 36.0,
+    "p95_search_latency_ms": 44.0,
+    "mean_total_latency_ms": 46.54456377029419,
+    "concurrency": 1,
+    "throughput_queries_per_second": 20.76433348053126,
+    "corpus_commit": "87cb50fa0611ef8a3905494c8b16fb0aab7666d3",
+    "benchmark_metadata": {
+      "top_k": 10,
+      "embedding_model": "nomic-embed-text-v1.5.Q8_0.gguf",
+      "context_tokens": 512,
+      "sgrep_binary_sha256": "48a441dae46d4f0b253a6a78edf9884de75c4191ff27d0987640e4186bb30de5",
+      "profile": "balanced",
+      "rerank": false,
+      "semantic_weight": 0.6,
+      "bm25_weight": 0.4,
+      "eval_split": "all",
+      "eval_fold": null,
+      "eval_folds": 4
+    },
+    "timing_breakdown": {
+      "query_embedding": 23.85,
+      "vector_search": 11.95
+    },
+    "total_tokens": 29644,
+    "mean_tokens": 1482.2,
+    "total_cost_usd": 0.088932
+  }
+]

@@ -26,24 +26,17 @@ Compare sgrep against other semantic search tools on the dspy-go codebase (20 qu
 uv run bench/quality/run_dspy_bench.py --tool all --mode all
 ```
 
-### Latest Results
+### Result policy
 
-| Tool | MRR | P@5 | R@5 | Latency | Tokens | Cost |
-|------|-----|-----|-----|---------|--------|------|
-| **sgrep (hybrid+colbert)** | **0.698** | 0.230 | 0.425 | 9461ms | 2757 | $0.17 |
-| sgrep (hybrid) | 0.615 | 0.200 | 0.358 | 6246ms | 4016 | $0.24 |
-| sgrep (semantic) | 0.610 | 0.200 | 0.358 | 5823ms | 2473 | $0.15 |
-| sgrep (cascade) | 0.596 | 0.220 | 0.408 | 10564ms | 3121 | $0.19 |
-| mgrep (cloud) | 0.262 | 0.050 | 0.100 | 939ms | 4646 | $0.28 |
-| osgrep | 0.050 | 0.010 | 0.017 | 916ms | 332 | $0.02 |
+Historical latency numbers were retired because retrieval modes could be silently contaminated by an existing ColBERT artifact and six subprocesses contended for one embedding server. New runs:
 
-**Key findings:**
-- **sgrep (hybrid+colbert)** achieves best MRR (0.698) - 2.7x better than mgrep, 14x better than osgrep
-- ColBERT late interaction scoring significantly improves accuracy over plain hybrid (+13%)
-- Cascade (hybrid+colbert+cross-encoder) hurts performance - cross-encoder demotes code-relevant results
-- Cross-encoders like jina-reranker-v2 and mxbai-rerank are trained on general text, not code
-- Token count measures actual code content returned (for LLM context estimation)
-- Cost estimated at $3/1M tokens (Claude pricing)
+- force `fast`, `balanced`, and `quality` profiles;
+- execute sequentially by default and report median/p95 latency;
+- use `--concurrency N` only for separate throughput tests;
+- preserve corpus-relative paths, require unambiguous judgments, and verify the pinned corpus commit;
+- record concurrency and corpus metadata in JSON summaries.
+
+Cross-encoder reranking remains experimental and off by default because general-text rerankers have historically demoted code-relevant results.
 
 ### Supported Tools
 
@@ -59,8 +52,19 @@ uv run bench/quality/run_dspy_bench.py --tool all --mode all
 # Test all sgrep configurations
 uv run bench/quality/run_dspy_bench.py --tool sgrep --mode all
 
-# Compare specific configuration
-uv run bench/quality/run_dspy_bench.py --tool sgrep --hybrid --colbert
+# Quality profile only
+uv run bench/quality/run_dspy_bench.py --tool sgrep --mode hybrid+colbert
+
+# Tune weighted RRF on one deterministic four-fold training split
+uv run bench/quality/run_dspy_bench.py --tool sgrep --mode hybrid --split train --fold 0 --semantic-weight 0.6 --bm25-weight 0.4
+
+# Confirm the selected weights on that five-query held-out fold
+uv run bench/quality/run_dspy_bench.py --tool sgrep --mode hybrid --split test --fold 0 --semantic-weight 0.6 --bm25-weight 0.4
+
+# Repeat with --fold 1, 2, and 3 to aggregate all held-out queries.
+
+# Separate six-client throughput/contention run
+uv run bench/quality/run_dspy_bench.py --tool sgrep --mode all --concurrency 6
 
 # Test all tools
 uv run bench/quality/run_dspy_bench.py --tool all --mode all
