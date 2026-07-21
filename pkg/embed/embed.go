@@ -14,14 +14,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/XiaoConstantine/sgrep/pkg/modelcfg"
 	"github.com/XiaoConstantine/sgrep/pkg/server"
 	"github.com/XiaoConstantine/sgrep/pkg/util"
 )
 
 const (
-	defaultEndpoint  = "http://localhost:8080"
-	defaultTimeout   = 30 * time.Second
-	maxContextTokens = 128 // Safe limit for 256 context per slot (speed config)
+	defaultEndpoint = "http://localhost:8080"
+	defaultTimeout  = 30 * time.Second
 )
 
 // Config holds embedder configuration (dependency injection).
@@ -36,12 +36,11 @@ type Config struct {
 
 // DefaultConfig returns sensible defaults.
 func DefaultConfig() Config {
-	endpoint := os.Getenv("SGREP_ENDPOINT")
-	if endpoint == "" {
-		endpoint = defaultEndpoint
-	}
+	// An empty endpoint means managed mode: NewWithConfig creates a server
+	// manager whose endpoint honors SGREP_PORT. SGREP_ENDPOINT explicitly opts
+	// into external-server mode and disables process lifecycle management.
 	return Config{
-		Endpoint:  endpoint,
+		Endpoint:  strings.TrimSpace(os.Getenv("SGREP_ENDPOINT")),
 		Timeout:   defaultTimeout,
 		CacheSize: 10000,
 		AutoStart: true,
@@ -133,9 +132,27 @@ func NewWithConfig(cfg Config) *Embedder {
 	}
 }
 
-// Embed generates an embedding for the given text.
+// Embed generates an unprefixed embedding for compatibility. Retrieval code
+// should use EmbedQuery or EmbedDocument so query and document task formatting
+// cannot be accidentally mixed.
 func (e *Embedder) Embed(ctx context.Context, text string) ([]float32, error) {
-	// Ensure server is running (once per embedder lifetime)
+	return e.embedText(ctx, text)
+}
+
+// EmbedQuery generates a retrieval query embedding.
+func (e *Embedder) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
+	return e.embedText(ctx, modelcfg.QueryText(text))
+}
+
+// EmbedDocument generates a retrieval document embedding.
+func (e *Embedder) EmbedDocument(ctx context.Context, text string) ([]float32, error) {
+	return e.embedText(ctx, modelcfg.DocumentText(text))
+}
+
+func (e *Embedder) embedText(ctx context.Context, text string) ([]float32, error) {
+	if err := modelcfg.ValidateInput(text); err != nil {
+		return nil, err
+	}
 	if err := e.ensureServer(); err != nil {
 		return nil, err
 	}
@@ -144,10 +161,6 @@ func (e *Embedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	e.totalRequests++
 	e.mu.Unlock()
 
-	// Truncate if too long to avoid context size errors
-	text = truncateToTokenLimit(text, maxContextTokens)
-
-	// Check cache
 	if cached := e.cache.Get(text); cached != nil {
 		e.mu.Lock()
 		e.cacheHits++
@@ -155,7 +168,6 @@ func (e *Embedder) Embed(ctx context.Context, text string) ([]float32, error) {
 		return cached, nil
 	}
 
-	// Call llama.cpp /embedding endpoint
 	embedding, err := e.callLlamaCpp(ctx, text)
 	if err != nil {
 		e.mu.Lock()
@@ -164,9 +176,7 @@ func (e *Embedder) Embed(ctx context.Context, text string) ([]float32, error) {
 		return nil, err
 	}
 
-	// Cache result
 	e.cache.Set(text, embedding)
-
 	return embedding, nil
 }
 
@@ -202,47 +212,47 @@ func (e *Embedder) ensureServer() error {
 	return e.startError
 }
 
-// truncateToTokenLimit truncates text to stay under the token limit.
-// Uses ~3 chars per token (conservative for code which has more special chars).
-func truncateToTokenLimit(text string, maxTokens int) string {
-	maxChars := maxTokens * 3
-	if len(text) <= maxChars {
-		return text
-	}
-	// Truncate at word/line boundary
-	truncated := text[:maxChars]
-	if idx := strings.LastIndex(truncated, "\n"); idx > maxChars*3/4 {
-		truncated = truncated[:idx]
-	} else if idx := strings.LastIndex(truncated, " "); idx > maxChars/2 {
-		truncated = truncated[:idx]
-	}
-	return truncated
+// EmbedBatch generates unprefixed embeddings for compatibility.
+func (e *Embedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	return e.embedBatch(ctx, texts)
 }
 
-// EmbedBatch generates embeddings for multiple texts using true batch API.
-// This sends all texts in a single HTTP request for maximum efficiency.
-func (e *Embedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+// EmbedQueryBatch generates retrieval query embeddings in one request.
+func (e *Embedder) EmbedQueryBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	prefixed := make([]string, len(texts))
+	for i, text := range texts {
+		prefixed[i] = modelcfg.QueryText(text)
+	}
+	return e.embedBatch(ctx, prefixed)
+}
+
+// EmbedDocuments generates retrieval document embeddings in one request.
+func (e *Embedder) EmbedDocuments(ctx context.Context, texts []string) ([][]float32, error) {
+	prefixed := make([]string, len(texts))
+	for i, text := range texts {
+		prefixed[i] = modelcfg.DocumentText(text)
+	}
+	return e.embedBatch(ctx, prefixed)
+}
+
+func (e *Embedder) embedBatch(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
-
-	// Ensure server is running
+	for _, text := range texts {
+		if err := modelcfg.ValidateInput(text); err != nil {
+			return nil, err
+		}
+	}
 	if err := e.ensureServer(); err != nil {
 		return nil, err
 	}
 
-	// Truncate all texts first
-	truncatedTexts := make([]string, len(texts))
-	for i, text := range texts {
-		truncatedTexts[i] = truncateToTokenLimit(text, maxContextTokens)
-	}
-
-	// Check cache for all texts first
 	results := make([][]float32, len(texts))
 	uncachedIndices := make([]int, 0, len(texts))
 	uncachedTexts := make([]string, 0, len(texts))
 
-	for i, text := range truncatedTexts {
+	for i, text := range texts {
 		if cached := e.cache.Get(text); cached != nil {
 			results[i] = cached
 			e.mu.Lock()
@@ -342,7 +352,7 @@ func (e *Embedder) embedBatchFallback(ctx context.Context, texts []string) ([][]
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			emb, err := e.Embed(ctx, text)
+			emb, err := e.embedText(ctx, text)
 			if err != nil {
 				mu.Lock()
 				if firstErr == nil {

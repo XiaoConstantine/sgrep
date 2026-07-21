@@ -10,14 +10,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/XiaoConstantine/sgrep/pkg/modelcfg"
 	"github.com/XiaoConstantine/sgrep/pkg/util"
 )
 
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
-	if cfg.Endpoint != defaultEndpoint {
-		t.Errorf("expected endpoint %s, got %s", defaultEndpoint, cfg.Endpoint)
+	if cfg.Endpoint != "" {
+		t.Errorf("expected managed mode with empty endpoint, got %s", cfg.Endpoint)
 	}
 	if cfg.Timeout != defaultTimeout {
 		t.Errorf("expected timeout %v, got %v", defaultTimeout, cfg.Timeout)
@@ -70,6 +71,19 @@ func TestNewWithConfig_Defaults(t *testing.T) {
 	}
 }
 
+func TestNew_DefaultManagedEndpointHonorsSGREPPort(t *testing.T) {
+	t.Setenv("SGREP_HOME", t.TempDir())
+	t.Setenv("SGREP_ENDPOINT", "")
+	t.Setenv("SGREP_PORT", "19090")
+	e := New()
+	if e.serverMgr == nil {
+		t.Fatal("expected managed server")
+	}
+	if e.endpoint != "http://localhost:19090" {
+		t.Fatalf("endpoint = %q, want managed SGREP_PORT endpoint", e.endpoint)
+	}
+}
+
 func TestNewWithConfig_CustomEndpointWithAutoStart(t *testing.T) {
 	cfg := Config{
 		Endpoint:  "http://localhost:8091",
@@ -87,6 +101,8 @@ func TestNewWithConfig_CustomEndpointWithAutoStart(t *testing.T) {
 }
 
 func TestNew(t *testing.T) {
+	t.Setenv("SGREP_HOME", t.TempDir())
+	t.Setenv("SGREP_ENDPOINT", "")
 	e := New()
 
 	if e == nil {
@@ -94,6 +110,9 @@ func TestNew(t *testing.T) {
 	}
 	if e.cache == nil {
 		t.Error("cache should be initialized")
+	}
+	if e.serverMgr == nil {
+		t.Error("default embedder should use managed server mode")
 	}
 }
 
@@ -334,46 +353,21 @@ func TestEmbedder_EventBox(t *testing.T) {
 	}
 }
 
-func TestTruncateToTokenLimit(t *testing.T) {
-	tests := []struct {
-		name      string
-		text      string
-		maxTokens int
-		checkLen  bool
-		maxLen    int
-	}{
-		{
-			name:      "short text unchanged",
-			text:      "hello world",
-			maxTokens: 1000,
-			checkLen:  true,
-			maxLen:    11,
-		},
-		{
-			name:      "long text truncated",
-			text:      strings.Repeat("word ", 1000),
-			maxTokens: 100,
-			checkLen:  true,
-			maxLen:    300,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := truncateToTokenLimit(tt.text, tt.maxTokens)
-			if tt.checkLen && len(result) > tt.maxLen {
-				t.Errorf("expected max length %d, got %d", tt.maxLen, len(result))
-			}
-		})
+func TestEmbedRejectsOversizedInputWithoutTruncation(t *testing.T) {
+	t.Setenv("SGREP_CONTEXT_TOKENS", "128")
+	e := NewWithConfig(Config{Endpoint: "http://127.0.0.1:1", AutoStart: false})
+	text := strings.Repeat("word ", 1000)
+	if _, err := e.Embed(context.Background(), text); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("Embed oversized input error = %v, want size error", err)
 	}
 }
 
-func TestTruncateToTokenLimit_PreferLineBreak(t *testing.T) {
-	text := strings.Repeat("line content\n", 200)
-	result := truncateToTokenLimit(text, 100)
-
-	if !strings.HasSuffix(result, "\n") && !strings.HasSuffix(result, "content") {
-		t.Log("truncation should prefer line boundaries when possible")
+func TestRetrievalTaskPrefixes(t *testing.T) {
+	if got := modelcfg.QueryText("needle"); got != "search_query: needle" {
+		t.Fatalf("QueryText = %q", got)
+	}
+	if got := modelcfg.DocumentText("haystack"); got != "search_document: haystack" {
+		t.Fatalf("DocumentText = %q", got)
 	}
 }
 
@@ -499,11 +493,10 @@ func BenchmarkCache_Get(b *testing.B) {
 	}
 }
 
-func BenchmarkTruncateToTokenLimit(b *testing.B) {
-	text := strings.Repeat("This is a test sentence. ", 100)
-
+func BenchmarkValidateEmbeddingInput(b *testing.B) {
+	text := strings.Repeat("This is a test sentence. ", 50)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		truncateToTokenLimit(text, 100)
+		_ = modelcfg.ValidateInput(text)
 	}
 }

@@ -9,10 +9,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/XiaoConstantine/sgrep/pkg/modelcfg"
 )
 
+var defaultMaxTokens = modelcfg.DocumentTokenBudget()
+
 const (
-	defaultMaxTokens    = 1200 // Conservative limit to stay under 2048 slot context
 	defaultContextLines = 10
 	defaultOverlap      = 3
 )
@@ -450,20 +453,9 @@ func formatType(expr ast.Expr) string {
 	}
 }
 
-// EstimateTokens estimates the number of tokens in text using word count * 1.3.
-// This is a conservative estimate for code with special characters.
+// EstimateTokens conservatively estimates model tokens for source code.
 func EstimateTokens(text string) int {
-	// For code, chars/4 is more accurate than word-based estimation
-	// because code has many symbols that tokenize separately (brackets, operators, etc.)
-	// Use the more conservative estimate
-	charBased := len(text) / 4
-	words := len(strings.Fields(text))
-	wordBased := int(float64(words) * 1.3)
-
-	if charBased > wordBased {
-		return charBased
-	}
-	return wordBased
+	return modelcfg.EstimateTokens(text)
 }
 
 // estimateTokens is an internal alias for EstimateTokens.

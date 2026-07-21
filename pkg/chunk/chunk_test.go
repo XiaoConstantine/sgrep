@@ -438,9 +438,9 @@ func TestEstimateTokens(t *testing.T) {
 		maxToken int
 	}{
 		{"", 0, 0},
-		{"hello", 1, 3},
-		{"hello world", 2, 5},
-		{"one two three four five", 5, 10},
+		{"hello", 2, 4},
+		{"hello world", 5, 7},
+		{"one two three four five", 10, 14},
 	}
 
 	for _, tt := range tests {
