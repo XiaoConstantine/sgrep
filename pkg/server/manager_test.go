@@ -39,12 +39,8 @@ func TestNewManager_InvalidPort(t *testing.T) {
 }
 
 func TestManager_IsRunning(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	mgr := &Manager{port: mustPort(srv.URL), host: "localhost"}
+	mgr, closeServer := runningTestManager(t, http.StatusOK)
+	defer closeServer()
 	if !mgr.IsRunning() {
 		t.Error("should be running")
 	}
@@ -58,11 +54,8 @@ func TestManager_IsRunning_False(t *testing.T) {
 }
 
 func TestManager_IsRunning_NonOK(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-	mgr := &Manager{port: mustPort(srv.URL), host: "localhost"}
+	mgr, closeServer := runningTestManager(t, http.StatusInternalServerError)
+	defer closeServer()
 	if mgr.IsRunning() {
 		t.Error("500 should not count as running")
 	}
@@ -93,7 +86,7 @@ func TestManager_Status(t *testing.T) {
 	mgr := &Manager{sgrepHome: dir, port: 59998, host: "localhost"}
 
 	running, pid, port := mgr.Status()
-	if running || pid != 12345 || port != 59998 {
+	if running || pid != 0 || port != 59998 {
 		t.Errorf("got running=%v pid=%d port=%d", running, pid, port)
 	}
 }
@@ -152,12 +145,8 @@ func TestManager_CleanStalePID(t *testing.T) {
 }
 
 func TestManager_Start_AlreadyRunning(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	mgr := &Manager{sgrepHome: t.TempDir(), port: mustPort(srv.URL), host: "localhost"}
+	mgr, closeServer := runningTestManager(t, http.StatusOK)
+	defer closeServer()
 	if err := mgr.Start(); err != nil {
 		t.Errorf("should succeed: %v", err)
 	}
@@ -187,6 +176,17 @@ func TestManager_Stop_DeadPID(t *testing.T) {
 	}
 }
 
+func TestManager_Stop_RefusesUnownedLivePID(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "server.pid"), []byte(strconv.Itoa(os.Getpid())), 0644); err != nil {
+		t.Fatal(err)
+	}
+	mgr := &Manager{sgrepHome: dir, port: 59994, host: "localhost", processCheck: func(int) bool { return false }}
+	if err := mgr.Stop(); err == nil {
+		t.Fatal("Stop accepted an unowned live PID")
+	}
+}
+
 func TestManager_Stop_RunningNoPID(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -200,24 +200,16 @@ func TestManager_Stop_RunningNoPID(t *testing.T) {
 }
 
 func TestManager_EnsureRunning_AlreadyUp(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	mgr := &Manager{sgrepHome: t.TempDir(), port: mustPort(srv.URL), host: "localhost"}
+	mgr, closeServer := runningTestManager(t, http.StatusOK)
+	defer closeServer()
 	if err := mgr.EnsureRunning(); err != nil {
 		t.Errorf("should succeed: %v", err)
 	}
 }
 
 func TestManager_WaitForReady_AlreadyUp(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	mgr := &Manager{port: mustPort(srv.URL), host: "localhost"}
+	mgr, closeServer := runningTestManager(t, http.StatusOK)
+	defer closeServer()
 	if err := mgr.waitForReady(); err != nil {
 		t.Errorf("should succeed: %v", err)
 	}
@@ -291,10 +283,6 @@ func TestManager_ModelExists(t *testing.T) {
 	}
 }
 
-
-
-
-
 func TestGetSgrepHome(t *testing.T) {
 	t.Setenv("SGREP_HOME", "/custom")
 	h, _ := getSgrepHome()
@@ -310,6 +298,29 @@ func TestGetSgrepHome(t *testing.T) {
 	}
 }
 
+func runningTestManager(t *testing.T, embeddingStatus int) (*Manager, func()) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/embedding" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(embeddingStatus)
+	}))
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "server.pid"), []byte(strconv.Itoa(os.Getpid())), 0644); err != nil {
+		srv.Close()
+		t.Fatal(err)
+	}
+	return &Manager{
+		sgrepHome: dir,
+		port:      mustPort(srv.URL),
+		host:      "localhost",
+		processCheck: func(pid int) bool {
+			return pid == os.Getpid()
+		},
+	}, srv.Close
+}
 
 func mustPort(url string) int {
 	for i := len(url) - 1; i >= 0; i-- {

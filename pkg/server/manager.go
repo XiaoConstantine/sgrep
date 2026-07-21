@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/XiaoConstantine/sgrep/pkg/modelcfg"
 )
 
 const (
@@ -23,9 +26,10 @@ const (
 
 // Manager handles llama.cpp server lifecycle.
 type Manager struct {
-	sgrepHome string
-	port      int
-	host      string
+	sgrepHome    string
+	port         int
+	host         string
+	processCheck func(pid int) bool // test hook; nil uses OS process inspection
 }
 
 type launchConfig struct {
@@ -54,29 +58,93 @@ func NewManager() (*Manager, error) {
 	}, nil
 }
 
-// IsRunning checks if the embedding server is responding.
+// IsRunning reports whether the PID owned by this manager is alive and serves
+// the llama.cpp embedding endpoint. A generic HTTP 200 from another service is
+// deliberately insufficient.
 func (m *Manager) IsRunning() bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	pid, err := m.readPID()
+	if err != nil || !processAlive(pid) || !m.ownsProcess(pid) {
+		return false
+	}
+	return m.embeddingReady()
+}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", m.healthURL(), nil)
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
 	if err != nil {
 		return false
 	}
+	return proc.Signal(syscall.Signal(0)) == nil
+}
 
+func (m *Manager) ownsProcess(pid int) bool {
+	if m.processCheck != nil {
+		return m.processCheck(pid)
+	}
+	expectedStart, err := m.readProcessStartIdentity()
+	if err != nil || expectedStart == "" || processStartIdentity(pid) != expectedStart {
+		return false
+	}
+	output, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	if err != nil {
+		return false
+	}
+	command := strings.TrimSpace(string(output))
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return false
+	}
+	executable := filepath.Base(fields[0])
+	if executable != "llama-server" && executable != "llama-server-metal" {
+		return false
+	}
+	return strings.Contains(command, "--port "+strconv.Itoa(m.port)) ||
+		strings.Contains(command, "--port="+strconv.Itoa(m.port))
+}
+
+func (m *Manager) embeddingReady() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.Endpoint()+"/embedding", bytes.NewBufferString(`{"content":"sgrep health check"}`))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return false
 	}
 	defer func() { _ = resp.Body.Close() }()
-
 	return resp.StatusCode == http.StatusOK
+}
+
+func (m *Manager) portResponding() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.healthURL(), nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = resp.Body.Close() }()
+	return true
 }
 
 // Start starts the llama.cpp server if not already running.
 func (m *Manager) Start() error {
+	m.cleanStalePID()
 	if m.IsRunning() {
 		return nil
+	}
+	if m.portResponding() {
+		return fmt.Errorf("port %d is occupied by a process that is not the managed embedding server; set SGREP_PORT or SGREP_ENDPOINT", m.port)
 	}
 
 	// Check if llama-server binary exists
@@ -91,9 +159,6 @@ func (m *Manager) Start() error {
 		return fmt.Errorf("model not found at %s. Run 'sgrep setup' first", modelPath)
 	}
 
-	// Clean up stale PID file
-	m.cleanStalePID()
-
 	// Calculate optimal settings based on CPU
 	// Reference: https://github.com/ggml-org/llama.cpp/discussions/4130
 	numCPU := runtime.NumCPU()
@@ -104,17 +169,14 @@ func (m *Manager) Start() error {
 		threads = 16
 	}
 
-	// Parallel slots: more slots = more parallelism but each gets less context
-	// Formula: n_slot_ctx = n_ctx / parallel (each slot gets portion of context)
-	// Tested: 32 slots optimal for Apple Silicon, smaller context = faster attention
-	parallelSlots := 32
+	// Keep enough per-slot context for the same document budget used by the
+	// chunker and embedder. Sixteen slots retain indexing throughput without
+	// truncating medium-sized functions.
+	parallelSlots := 16
 	if numCPU < 8 {
-		parallelSlots = 16
+		parallelSlots = 8
 	}
-
-	// Context size: 256 tokens per slot - speed optimized
-	// Benchmarks show identical quality (NDCG@10=0.6218) with 2.5x faster indexing
-	contextSize := parallelSlots * 256
+	contextSize := parallelSlots * modelcfg.ContextTokens()
 
 	var startErrs []string
 	for _, cfg := range m.launchConfigs() {
@@ -150,14 +212,25 @@ func (m *Manager) startWithConfig(llamaPath, modelPath string, threads, parallel
 		return fmt.Errorf("failed to start llama-server: %w", err)
 	}
 
-	// Write PID file
-	pidPath := m.pidPath()
-	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(cmd.Process.Pid)), 0644); err != nil {
-		// Non-fatal, just log
-		fmt.Fprintf(os.Stderr, "warning: failed to write PID file: %v\n", err)
+	startIdentity := processStartIdentity(cmd.Process.Pid)
+	if startIdentity == "" {
+		_ = cmd.Process.Signal(syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
+		return fmt.Errorf("identify managed server process")
+	}
+	pidState := fmt.Sprintf("%d\n%s\n", cmd.Process.Pid, startIdentity)
+	if err := os.WriteFile(m.pidPath(), []byte(pidState), 0644); err != nil {
+		_ = cmd.Process.Signal(syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
+		return fmt.Errorf("persist managed server PID: %w", err)
 	}
 
 	if err := m.waitForReady(); err != nil {
+		// Use the direct child handle: ownership probes may be unavailable or
+		// truncated on this platform during failed startup.
+		_ = cmd.Process.Signal(syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
+		m.removePIDFile()
 		return fmt.Errorf("device=%q gpu_layers=%s: %w", cfg.device, cfg.gpuLayers, err)
 	}
 
@@ -171,7 +244,7 @@ func (m *Manager) buildArgs(modelPath string, threads, parallelSlots, contextSiz
 		"--port", strconv.Itoa(m.port),
 		"--host", m.host,
 		"-c", strconv.Itoa(contextSize),
-		"-b", "2048",  // batch size (match typical input)
+		"-b", "2048", // batch size (match typical input)
 		"-ub", "2048", // microbatch (equal to -b for embeddings)
 		"--threads", strconv.Itoa(threads),
 		"-ngl", cfg.gpuLayers,
@@ -223,11 +296,18 @@ func serverGPULayers(device string) string {
 func (m *Manager) Stop() error {
 	pid, err := m.readPID()
 	if err != nil {
-		// No PID file, check if something is running on the port
-		if m.IsRunning() {
-			return fmt.Errorf("server running but no PID file found; kill manually on port %d", m.port)
+		if m.portResponding() {
+			return fmt.Errorf("port %d is occupied but is not owned by sgrep", m.port)
 		}
 		return nil
+	}
+
+	if !processAlive(pid) {
+		m.removePIDFile()
+		return nil
+	}
+	if !m.ownsProcess(pid) {
+		return fmt.Errorf("refusing to stop PID %d because it is not the managed llama-server on port %d", pid, m.port)
 	}
 
 	// Find the process
@@ -244,11 +324,11 @@ func (m *Manager) Stop() error {
 		return nil
 	}
 
-	// Wait briefly for graceful shutdown
+	// Wait briefly for graceful shutdown. Capability may disappear before the
+	// owned process exits, so termination checks process liveness rather than
+	// the embedding endpoint.
 	time.Sleep(500 * time.Millisecond)
-
-	// Force kill if still running
-	if m.IsRunning() {
+	if processAlive(pid) && m.ownsProcess(pid) {
 		_ = proc.Signal(syscall.SIGKILL)
 	}
 
@@ -261,6 +341,9 @@ func (m *Manager) Status() (running bool, pid int, port int) {
 	port = m.port
 	running = m.IsRunning()
 	pid, _ = m.readPID()
+	if !running && (!processAlive(pid) || !m.ownsProcess(pid)) {
+		pid = 0
+	}
 	return
 }
 
@@ -300,7 +383,28 @@ func (m *Manager) readPID() (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return strconv.Atoi(string(data))
+	lines := strings.SplitN(strings.TrimSpace(string(data)), "\n", 2)
+	return strconv.Atoi(lines[0])
+}
+
+func (m *Manager) readProcessStartIdentity() (string, error) {
+	data, err := os.ReadFile(m.pidPath())
+	if err != nil {
+		return "", err
+	}
+	lines := strings.SplitN(strings.TrimSpace(string(data)), "\n", 2)
+	if len(lines) != 2 {
+		return "", fmt.Errorf("managed server PID state has no process identity")
+	}
+	return strings.TrimSpace(lines[1]), nil
+}
+
+func processStartIdentity(pid int) string {
+	output, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "lstart=").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
 }
 
 func (m *Manager) removePIDFile() {
@@ -338,8 +442,9 @@ func (m *Manager) waitForReady() error {
 }
 
 func (m *Manager) findLlamaServer() (string, error) {
-	// Check common names
-	names := []string{"llama-server", "llama-server-metal", "server"}
+	// Only accept unambiguous llama.cpp executable names. A generic "server"
+	// cannot be validated safely from a persisted PID after this process exits.
+	names := []string{"llama-server", "llama-server-metal"}
 
 	for _, name := range names {
 		if path, err := exec.LookPath(name); err == nil {
