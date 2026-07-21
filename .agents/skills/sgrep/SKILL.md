@@ -47,17 +47,16 @@ sgrep index . --sql-vectors
 # Watch mode keeps SQL vectors for incremental updates; rerun index to compact
 sgrep watch .
 
-# Semantic code search
+# Balanced semantic + lexical code search (default)
 sgrep "database connection pooling"
 sgrep "how are errors handled"
 
-# Hybrid search for specific terms + context
-sgrep --hybrid "JWT validation"
-sgrep --hybrid "authentication middleware"
+# Fast semantic-only search
+sgrep --profile fast "error handling"
 
 # Best code-search accuracy
-sgrep --hybrid --colbert "JWT validation"
-sgrep --hybrid --colbert "authentication middleware"
+sgrep --profile quality "JWT validation"
+sgrep --profile quality "authentication middleware"
 
 # With code context
 sgrep -c "authentication middleware"
@@ -101,17 +100,16 @@ sgrep conv status
 
 | Mode | Best For | Example |
 |------|----------|---------|
-| Semantic (default) | Conceptual queries | "how does auth work" |
-| `--hybrid` | Queries with specific terms | "JWT token validation" |
-| `--hybrid --colbert` | Highest code-search accuracy | "authentication middleware" |
+| `--profile fast` | Lowest-latency semantic exploration | "how does auth work" |
+| `--profile balanced` (default) | Semantic + exact-term recall | "JWT token validation" |
+| `--profile quality` | Highest code-search accuracy | "authentication middleware" |
 
-**Use `--hybrid`** when your query contains function names, API names, or technical terms that should match exactly.
-Use `--hybrid --colbert` when accuracy matters more than the fastest possible query.
+Use the default balanced profile for most agent searches and `--profile quality` when ranking quality matters more than minimum latency.
 
 ## Search Hierarchy
 
-1. **sgrep** → Find relevant files/functions by semantic intent
-2. **sgrep --hybrid** → Find code matching intent + specific terms
-3. **sgrep --hybrid --colbert** → Rerank candidates with late interaction for best code accuracy
+1. **sgrep** → Balanced semantic + lexical discovery
+2. **sgrep --profile fast** → Lowest-latency semantic discovery
+3. **sgrep --profile quality** → Rerank candidates with precomputed late interaction
 4. **ast-grep** → Match structural patterns in those files
 5. **ripgrep** → Exact text for specific symbols

@@ -86,15 +86,16 @@ sgrep index . --colbert-codec pq6
 # Optional: keep full SQL vectors for legacy vector search
 sgrep index . --sql-vectors
 
-# Semantic search (quick)
+# Balanced profile (default): semantic + lexical retrieval
 sgrep "error handling for database connections"
 
-# Hybrid + ColBERT (recommended - best accuracy)
-sgrep --hybrid --colbert "JWT token validation logic"
-sgrep --hybrid --colbert "how are API rate limits implemented"
+# Explicit speed and quality profiles
+sgrep --profile fast "quick semantic exploration"
+sgrep --profile quality "JWT token validation logic"
+sgrep --profile quality "how are API rate limits implemented"
 
-# Hybrid with custom weights
-sgrep --hybrid --colbert "authentication middleware" --semantic-weight 0.5 --bm25-weight 0.5
+# Quality profile with custom RRF signal weights
+sgrep --profile quality "authentication middleware" --semantic-weight 0.5 --bm25-weight 0.5
 
 # Watch mode (background indexing)
 sgrep watch .
@@ -170,11 +171,11 @@ Hybrid search combines **semantic understanding** with **lexical matching (BM25)
 - Semantic search alone misses exact keyword matches
 
 ```bash
-# Default: semantic-only search
+# Default balanced profile: semantic + BM25 fused with weighted RRF
 sgrep "authentication"
 
-# Hybrid: semantic (60%) + BM25 (40%) - default weights
-sgrep --hybrid "authentication"
+# Equivalent explicit profile
+sgrep --profile balanced "authentication"
 
 # Custom weights: more emphasis on exact matches
 sgrep --hybrid --semantic-weight 0.4 --bm25-weight 0.6 "parseAST"
@@ -226,24 +227,19 @@ Query: "authentication middleware"
 
 | Mode | Command | Best For | Notes |
 |------|---------|----------|-------|
-| Semantic only | `sgrep "query"` | Quick exploration | Lowest setup on the query side |
-| Hybrid | `sgrep --hybrid "query"` | Exact-term + semantic recall | Good default when queries include API names or symbols |
-| **Hybrid + ColBERT** | `sgrep --hybrid --colbert "query"` | **Best code accuracy** | Recommended for code search |
-| Cascade (all 3 stages) | `sgrep --hybrid --colbert --rerank "query"` | Experiments / non-code text | Cross-encoder reranking is not the recommended default for code |
+| Fast | `sgrep --profile fast "query"` | Lowest latency | Semantic retrieval only |
+| Balanced | `sgrep --profile balanced "query"` | Default agent search | Semantic + lexical weighted RRF |
+| **Quality** | `sgrep --profile quality "query"` | **Best code accuracy** | Adds precomputed late interaction |
+| Cascade | `sgrep --profile quality --rerank "query"` | Experiments / non-code text | Generic cross-encoder remains off by default |
 
-**Recommended for code**: Use `--hybrid --colbert`.
+**Recommended for code**: use the default balanced profile for exploration and `--profile quality` when ranking quality matters most.
 
-> **Note**: Query latency is highly corpus- and hardware-dependent. ColBERT is the best default quality path for code, while cross-encoder reranking remains more experimental for code search.
+Profiles are forced rather than inferred from artifacts, making quality and latency benchmarks reproducible.
 
 ```bash
-# Best accuracy (recommended)
-sgrep --hybrid --colbert "authentication middleware"
-
-# Quick search (semantic only)
-sgrep "error handling"
-
-# With custom weights
-sgrep --hybrid --colbert --semantic-weight 0.5 --bm25-weight 0.5 "JWT token"
+sgrep --profile quality "authentication middleware"
+sgrep --profile fast "error handling"
+sgrep --profile quality --semantic-weight 0.5 --bm25-weight 0.5 "JWT token"
 ```
 
 ### Setup
@@ -333,6 +329,7 @@ All data is stored in `~/.sgrep/`:
 │   ├── a1b2c3/              # Hash of /path/to/repo1
 │   │   ├── index.db              # libSQL metadata + source chunks + FTS
 │   │   ├── vectors.tqmse         # Compact TQ-MSE chunk vector artifact
+│   │   ├── vectors.mmap          # Exact float32 artifact for small/medium indexes
 │   │   ├── file_vectors.tqmse    # Compact TQ-MSE file/document vector artifact
 │   │   ├── colbert_segments.mmap # Precomputed ColBERT segments (when enabled)
 │   │   └── metadata.json         # Repo path, index time
@@ -349,10 +346,11 @@ Use `sgrep list` to see all indexed repositories.
 
 ## Storage Backends
 
-sgrep supports two SQL index backends. Full indexing writes compact
-`vectors.tqmse` and `file_vectors.tqmse` artifacts by default and uses them for
-chunk and document-level semantic retrieval. SQLite/libSQL remains the source
-of truth for chunk content, metadata, and FTS/BM25.
+sgrep supports two SQL metadata backends. Full indexing writes compact
+`vectors.tqmse` and `file_vectors.tqmse` artifacts. Indexes up to 20,000 chunks
+also receive a resident exact-float32 `vectors.mmap` artifact; larger indexes
+use the lower-memory TQ-MSE scan. SQLite/libSQL remains the source of truth for
+chunk content, metadata, and FTS/BM25.
 
 | Backend | Build Command | Storage Efficiency | Best For |
 |---------|--------------|-------------------|----------|
@@ -360,7 +358,8 @@ of truth for chunk content, metadata, and FTS/BM25.
 | sqlite-vec | `go build -tags=sqlite_vec ./cmd/sgrep` | Simpler fallback backend | Development, compatibility |
 
 **Default build advantages:**
-- Uses `vectors.tqmse` for compact chunk-level semantic retrieval
+- Prefers exact float32 scanning for indexes up to `--exact-vector-limit` (20,000 chunks by default)
+- Falls back to compact `vectors.tqmse` scanning above that limit
 - Uses `file_vectors.tqmse` for compact document/file-level semantic retrieval
 - Avoids full SQL vector blobs during normal full indexing
 - Keeps libSQL as the source of truth for chunks, metadata, and FTS/BM25
@@ -375,8 +374,10 @@ when you want to re-compact the index after a long watch session.
 
 | Command | Description |
 |---------|-------------|
-| `sgrep [query]` | Semantic search (default) |
+| `sgrep [query]` | Balanced semantic + lexical search (default) |
+| `sgrep --profile fast/balanced/quality [query]` | Force a reproducible retrieval profile |
 | `sgrep index [path]` | Index a directory |
+| `sgrep index [path] --exact-vector-limit N` | Set exact float32 cutoff; 0 disables |
 | `sgrep index [path] --colbert-codec tqmse/int8/pq6` | Select ColBERT segment codec |
 | `sgrep index [path] --sql-vectors` | Also store full SQL vectors for legacy search |
 | `sgrep watch [path]` | Watch and auto-index |
@@ -448,8 +449,9 @@ This creates:
 | `--threshold F` | Cosine distance threshold (default: 1.5, lower = stricter) |
 | `-t, --include-tests` | Include test files in results (excluded by default) |
 | `--all-chunks` | Show all matching chunks (disable deduplication) |
-| `--hybrid` | Enable hybrid search (semantic + BM25) |
-| `--colbert` | Enable ColBERT late interaction scoring (recommended with --hybrid) |
+| `--profile fast/balanced/quality` | Select an explicit retrieval pipeline (default: balanced) |
+| `--hybrid` | Override profile hybrid retrieval |
+| `--colbert` / `--no-colbert` | Override profile late interaction |
 | `--semantic-weight F` | Weight for semantic score in hybrid mode (default: 0.6) |
 | `--bm25-weight F` | Weight for BM25 score in hybrid mode (default: 0.4) |
 | `--rerank` | Enable cross-encoder reranking (requires `sgrep setup --with-rerank`) |
@@ -460,8 +462,9 @@ This creates:
 Environment variables:
 ```bash
 SGREP_HOME=~/.sgrep                    # Data storage location
-SGREP_ENDPOINT=http://localhost:8080   # Override embedding server URL
-SGREP_PORT=8080                        # Embedding server port
+SGREP_PORT=8080                        # Managed embedding server port
+SGREP_ENDPOINT=http://host:port        # External server mode (sgrep does not manage its process)
+SGREP_CONTEXT_TOKENS=512               # Per-slot context; changing it requires reindexing
 SGREP_DIMS=768                         # Vector dimensions
 SGREP_VECTOR_BACKEND=tqmse             # Force TQ-MSE search
 SGREP_VECTOR_BACKEND=libsql            # Force legacy SQL vector search (requires --sql-vectors index)
@@ -541,15 +544,21 @@ Query: "authentication middleware"
 
 ## Recent Benchmarks
 
-Recent `dspy-go` benchmark on Apple M3 Pro + Metal (532 files, 7,735 chunks, 35,618 ColBERT segments):
+Current `dspy-go` benchmark on Apple M3 Pro + Metal at corpus commit
+`87cb50fa0611ef8a3905494c8b16fb0aab7666d3` (543 files, 13,136 chunks,
+61,082 ColBERT segments; 20 judged queries, sequential execution):
 
-| Metric | Result |
-|--------|--------|
-| Full index with tuned `pq6` ColBERT codec | **4m49s** |
-| Chunk embedding wall time | 1m04s |
-| ColBERT scratch build | 3m03s |
-| PQ train | 27.9s |
-| Search quality | tuned pure `pq6` matched the current int8 benchmark at **MRR 0.725** |
+| Profile | MRR | Recall@5 | Mean latency | p95 latency |
+|---------|----:|---------:|-------------:|------------:|
+| `fast` | 0.470 | 0.300 | 30.2ms | 37ms |
+| `balanced` | 0.593 | 0.350 | 35.9ms | 44ms |
+| `quality` | **0.729** | **0.408** | 46.5ms | 56ms |
+
+The base index took 3m41s and the complete index with default ColBERT
+precomputation took 7m43s. Exact float32 top-50 scans measured about 0.63ms
+for 10k vectors and 6.8ms for 100k vectors; TQ-MSE measured about 4.9ms and
+49.3ms respectively. Full query logs are in
+`bench/results/current-implementation/`.
 
 Notes:
 - Chunk and document-level semantic retrieval use TQ-MSE artifacts by default
@@ -563,11 +572,12 @@ Notes:
 
 ## Chunk Size Limits
 
-The embedding model (nomic-embed-text) has a 2048 token context limit. sgrep handles this by:
+The chunker, indexer, embedder, and managed llama.cpp server share one per-slot context budget (512 tokens by default):
 
-1. Default chunk size: 1000 tokens (with AST-aware splitting)
-2. Safety truncation at 1500 tokens in embedder
-3. Large functions/types split into parts automatically
+1. Document chunks reserve 64 tokens for Nomic retrieval task prefixes and estimation variance.
+2. Large functions/types are split at AST and line boundaries before embedding.
+3. Oversized direct embedding requests return an error; source documents are never silently truncated.
+4. Queries use `search_query:` and indexed chunks use `search_document:`. Changing the context or embedding format requires reindexing.
 
 ## Library Usage
 
