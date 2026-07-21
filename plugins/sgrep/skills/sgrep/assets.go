@@ -2,7 +2,7 @@ package sgrepskill
 
 import _ "embed"
 
-// Content is the canonical Claude skill markdown shipped with the sgrep plugin.
+// Content is the embedded distribution copy of the canonical root SKILL.md.
 //
 //go:embed SKILL.md
 var Content string

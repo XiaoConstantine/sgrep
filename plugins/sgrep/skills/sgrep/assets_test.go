@@ -64,11 +64,19 @@ func TestRepoSkillCopiesMatchCanonical(t *testing.T) {
 	skillDir := filepath.Dir(file)
 	repoRoot := filepath.Clean(filepath.Join(skillDir, "..", "..", "..", ".."))
 
+	rootSkill, err := os.ReadFile(filepath.Join(repoRoot, "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read root skill: %v", err)
+	}
+	if string(rootSkill) != Content {
+		t.Fatal("embedded plugin skill drifted from canonical root skill")
+	}
+
 	agentsCopy, err := os.ReadFile(filepath.Join(repoRoot, ".agents", "skills", "sgrep", "SKILL.md"))
 	if err != nil {
 		t.Fatalf("read .agents skill: %v", err)
 	}
-	if string(agentsCopy) != Content {
-		t.Fatal(".agents skill drifted from canonical plugin skill")
+	if string(agentsCopy) != string(rootSkill) {
+		t.Fatal(".agents skill drifted from canonical root skill")
 	}
 }

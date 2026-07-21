@@ -397,7 +397,7 @@ when you want to re-compact the index after a long watch session.
 | `sgrep server stop` | Stop embedding server |
 | `sgrep server status` | Show server status |
 | `sgrep install-claude-code` | Install Claude Code plugin + Claude skill |
-| `sgrep install-skill` | Install the sgrep skill into shared agent skill locations |
+| `sgrep install-skill` | Install offline fallback copies for Claude and `.agents` clients |
 
 ## Claude Code Integration
 
@@ -420,22 +420,35 @@ After installation, restart Claude Code to activate. The plugin works automatica
 
 ## Shared Skill Installation
 
-Install just the reusable skill surfaces with:
+Install the reusable skill globally with the same cross-agent installer used by
+skills.sh packages. This installs the agent instructions; install the `sgrep`
+binary separately using the installation steps above.
+
+```bash
+npx skills add XiaoConstantine/sgrep --skill sgrep -g
+```
+
+For unattended installation, append `-y`. The installer discovers the root
+`SKILL.md` and links it into the supported global agent directories. To target
+one client, add an agent selector such as `--agent claude-code`.
+
+If Node.js is unavailable, the binary retains an offline fallback:
 
 ```bash
 sgrep install-skill
 ```
 
-This creates:
-- a user-level cross-client skill at `~/.agents/skills/sgrep/SKILL.md`
-- a user-level Claude skill at `~/.claude/skills/sgrep/SKILL.md`
+The fallback writes only `~/.agents/skills/sgrep/SKILL.md` and
+`~/.claude/skills/sgrep/SKILL.md`; the `npx skills` command is preferred for
+cross-client installation and updates.
 
 ## Agent Integration Standards
 
-- **Open Agent Skill**: the canonical skill lives at `plugins/sgrep/skills/sgrep/SKILL.md`.
+- **Open Agent Skill**: the canonical package entrypoint is the repository-root [`SKILL.md`](SKILL.md), matching skills.sh repository discovery.
+- **Distribution copies**: `.agents/skills/sgrep/SKILL.md` and `plugins/sgrep/skills/sgrep/SKILL.md` are kept byte-for-byte identical by tests.
 - **Codex / Amp**: use the repo's root [AGENTS.md](AGENTS.md) for shared workflow guidance.
-- **Cross-client skills**: use `.agents/skills/<name>/SKILL.md` in-repo and `~/.agents/skills/<name>/SKILL.md` user-global.
-- **Claude Code**: uses the same `SKILL.md` format and supports `~/.claude/skills/<name>/SKILL.md` user-global for compatibility.
+- **Cross-client skills**: `npx skills` installs the canonical skill into each selected agent's supported global location.
+- **Claude Code plugin**: `sgrep install-claude-code` additionally installs session hooks and a Claude-specific plugin copy.
 - **Claude slash commands**: `.claude/commands/<name>.md` are explicit commands and complement skills rather than replacing them.
 
 ## Flags

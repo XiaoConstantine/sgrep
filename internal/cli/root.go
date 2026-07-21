@@ -836,10 +836,13 @@ After installation, restart Claude Code to activate the plugin.`,
 
 var installSkillCmd = &cobra.Command{
 	Use:   "install-skill",
-	Short: "Install the sgrep skill for shared agent skill directories",
-	Long: `Installs the sgrep skill into the standard user-level skill locations.
+	Short: "Install offline fallback copies of the sgrep skill",
+	Long: `Installs fallback copies of the sgrep skill when Node.js is unavailable.
 
-This creates:
+For cross-client installation and updates, prefer:
+  npx skills add XiaoConstantine/sgrep --skill sgrep -g
+
+This fallback creates:
 - ~/.agents/skills/sgrep/SKILL.md for cross-client interoperability
 - ~/.claude/skills/sgrep/SKILL.md for Claude Code compatibility`,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -1025,6 +1028,8 @@ func installSharedSkills() error {
 	fmt.Printf("  Skill: %s\n", filepath.Join(homeDir, ".claude", "skills", "sgrep", "SKILL.md"))
 	fmt.Println()
 	fmt.Println("The skill is now available in the shared cross-client path and the Claude-compatible path.")
+	fmt.Println("For broader agent support and managed updates, use:")
+	fmt.Println("  npx skills add XiaoConstantine/sgrep --skill sgrep -g")
 
 	return nil
 }
