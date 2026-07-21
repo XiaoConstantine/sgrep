@@ -4,30 +4,31 @@ import (
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/XiaoConstantine/sgrep/pkg/modelcfg"
 )
 
 const (
-	// MaxTurnTokens is the maximum tokens per turn before splitting.
-	// Approximately 4 characters per token.
-	MaxTurnTokens = 1200
-
-	// MaxTurnChars is the character limit derived from token limit.
-	MaxTurnChars = MaxTurnTokens * 4
-
-	// OverlapChars is the overlap for context continuity when splitting.
-	OverlapChars = 200
+	// MaxTurnTokens documents the default 512-token slot budget after reserve.
+	// NewChunker reads the runtime SGREP_CONTEXT_TOKENS setting.
+	MaxTurnTokens = 448
+	MaxTurnChars  = MaxTurnTokens * 2
+	OverlapChars  = 100
 )
 
 // Chunker handles turn-based chunking of conversations.
 type Chunker struct {
-	maxChars    int
+	maxTokens    int
+	maxChars     int
 	overlapChars int
 }
 
 // NewChunker creates a new chunker with default settings.
 func NewChunker() *Chunker {
+	maxTokens := modelcfg.DocumentTokenBudget()
 	return &Chunker{
-		maxChars:    MaxTurnChars,
+		maxTokens:    maxTokens,
+		maxChars:     maxTokens * 2,
 		overlapChars: OverlapChars,
 	}
 }
@@ -40,7 +41,7 @@ type ChunkerConfig struct {
 
 // NewChunkerWithConfig creates a chunker with custom configuration.
 func NewChunkerWithConfig(cfg ChunkerConfig) *Chunker {
-	maxChars := cfg.MaxTokens * 4
+	maxChars := cfg.MaxTokens * 2
 	if maxChars == 0 {
 		maxChars = MaxTurnChars
 	}
@@ -49,19 +50,20 @@ func NewChunkerWithConfig(cfg ChunkerConfig) *Chunker {
 		overlapChars = OverlapChars
 	}
 	return &Chunker{
-		maxChars:    maxChars,
+		maxTokens:    maxChars / 2,
+		maxChars:     maxChars,
 		overlapChars: overlapChars,
 	}
 }
 
 // TurnChunk represents a chunk derived from a turn.
 type TurnChunk struct {
-	ID           string // session_id:turn_index[:chunk_index]
-	SessionID    string
-	TurnIndex    int
-	ChunkIndex   int    // 0 for single chunk, 1+ for split chunks
-	Content      string // Combined user + assistant content
-	UserContent  string // Original user content
+	ID            string // session_id:turn_index[:chunk_index]
+	SessionID     string
+	TurnIndex     int
+	ChunkIndex    int    // 0 for single chunk, 1+ for split chunks
+	Content       string // Combined user + assistant content
+	UserContent   string // Original user content
 	AssistContent string // Original assistant content (may be partial if split)
 }
 
@@ -71,8 +73,8 @@ func (c *Chunker) ChunkTurn(sessionID string, turn *Turn) []TurnChunk {
 	// Create combined content for embedding
 	combinedContent := c.formatTurnContent(turn)
 
-	// If it fits, return single chunk
-	if utf8.RuneCountInString(combinedContent) <= c.maxChars {
+	// maxChars is a conservative byte budget (two bytes per model token).
+	if modelcfg.EstimateTokens(combinedContent) <= c.maxTokens {
 		return []TurnChunk{{
 			ID:            fmt.Sprintf("%s:%d", sessionID, turn.Index),
 			SessionID:     sessionID,
@@ -108,39 +110,30 @@ func (c *Chunker) formatTurnContent(turn *Turn) string {
 	return sb.String()
 }
 
-// splitTurn splits a long turn into multiple chunks.
+// splitTurn splits the complete formatted turn. Splitting only the assistant
+// side fails when the user prompt itself consumes the model context budget.
 func (c *Chunker) splitTurn(sessionID string, turn *Turn) []TurnChunk {
-	var chunks []TurnChunk
-
-	// User content is usually short, keep it intact
-	userPart := "USER: " + strings.TrimSpace(turn.UserContent) + "\n\n"
-	userLen := utf8.RuneCountInString(userPart)
-
-	// Calculate available space for assistant content per chunk
-	availableChars := c.maxChars - userLen - len("ASSISTANT: ")
-
-	// Split assistant content at paragraph boundaries
-	assistParts := c.splitAtParagraphs(turn.AssistContent, availableChars)
-
-	for i, part := range assistParts {
-		chunkID := fmt.Sprintf("%s:%d:%d", sessionID, turn.Index, i)
-
-		var content strings.Builder
-		content.WriteString(userPart)
-		content.WriteString("ASSISTANT: ")
-		content.WriteString(strings.TrimSpace(part))
-
+	parts := c.splitAtParagraphs(c.formatTurnContent(turn), c.maxChars)
+	budgeted := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if modelcfg.EstimateTokens(part) > c.maxTokens {
+			budgeted = append(budgeted, c.hardSplitByTokens(part)...)
+		} else {
+			budgeted = append(budgeted, part)
+		}
+	}
+	chunks := make([]TurnChunk, 0, len(budgeted))
+	for i, part := range budgeted {
 		chunks = append(chunks, TurnChunk{
-			ID:            chunkID,
+			ID:            fmt.Sprintf("%s:%d:%d", sessionID, turn.Index, i),
 			SessionID:     sessionID,
 			TurnIndex:     turn.Index,
 			ChunkIndex:    i,
-			Content:       content.String(),
+			Content:       strings.TrimSpace(part),
 			UserContent:   turn.UserContent,
-			AssistContent: part,
+			AssistContent: turn.AssistContent,
 		})
 	}
-
 	return chunks
 }
 
@@ -151,7 +144,7 @@ func (c *Chunker) splitAtParagraphs(text string, maxChars int) []string {
 	}
 
 	text = strings.TrimSpace(text)
-	if utf8.RuneCountInString(text) <= maxChars {
+	if len(text) <= maxChars {
 		return []string{text}
 	}
 
@@ -165,11 +158,11 @@ func (c *Chunker) splitAtParagraphs(text string, maxChars int) []string {
 			continue
 		}
 
-		paraLen := utf8.RuneCountInString(para)
-		currentLen := utf8.RuneCountInString(current.String())
+		paraLen := len(para)
+		currentLen := current.Len()
 
 		// If adding this paragraph would exceed limit
-		if currentLen > 0 && currentLen + paraLen + 2 > maxChars {
+		if currentLen > 0 && currentLen+paraLen+2 > maxChars {
 			// Save current and start new
 			parts = append(parts, current.String())
 			current.Reset()
@@ -206,7 +199,7 @@ func (c *Chunker) splitAtParagraphs(text string, maxChars int) []string {
 	// Handle case where a single paragraph is too long
 	var finalParts []string
 	for _, part := range parts {
-		if utf8.RuneCountInString(part) > maxChars {
+		if len(part) > maxChars {
 			// Split by sentences or hard break
 			subParts := c.hardSplit(part, maxChars)
 			finalParts = append(finalParts, subParts...)
@@ -221,55 +214,80 @@ func (c *Chunker) splitAtParagraphs(text string, maxChars int) []string {
 // hardSplit splits text when no good boundaries exist.
 func (c *Chunker) hardSplit(text string, maxChars int) []string {
 	var parts []string
-	runes := []rune(text)
-
-	for len(runes) > 0 {
-		end := maxChars
-		if end > len(runes) {
-			end = len(runes)
+	remaining := text
+	for len(remaining) > 0 {
+		end := min(maxChars, len(remaining))
+		for end > 0 && end < len(remaining) && !utf8.RuneStart(remaining[end]) {
+			end--
 		}
-
-		// Try to find a sentence boundary
-		if end < len(runes) {
-			chunk := string(runes[:end])
-			// Look for sentence end (. ! ?)
-			for _, delim := range []string{". ", "! ", "? ", ".\n", "!\n", "?\n"} {
-				if idx := strings.LastIndex(chunk, delim); idx >= 0 {
-					idxRunes := utf8.RuneCountInString(chunk[:idx])
-					if idxRunes > end/2 {
-						end = idxRunes + utf8.RuneCountInString(delim)
-						break
-					}
+		if end == 0 {
+			_, size := utf8.DecodeRuneInString(remaining)
+			end = size
+		}
+		if end < len(remaining) {
+			candidate := remaining[:end]
+			boundary := -1
+			for _, delim := range []string{". ", "! ", "? ", ".\n", "!\n", "?\n", " "} {
+				if idx := strings.LastIndex(candidate, delim); idx > end/2 {
+					boundary = idx + len(delim)
+					break
 				}
 			}
-			// Fall back to word boundary
-			if end == maxChars {
-				if idx := strings.LastIndex(chunk, " "); idx >= 0 {
-					idxRunes := utf8.RuneCountInString(chunk[:idx])
-					if idxRunes > end/2 {
-						end = idxRunes
-					}
-				}
+			if boundary > 0 {
+				end = boundary
 			}
 		}
-
-		if end > len(runes) {
-			end = len(runes)
+		part := strings.TrimSpace(remaining[:end])
+		if part != "" {
+			parts = append(parts, part)
 		}
+		remaining = remaining[end:]
+		if len(remaining) > 0 && c.overlapChars > 0 && len(parts) > 0 {
+			overlapBytes := min(c.overlapChars, maxChars/4)
+			previous := parts[len(parts)-1]
+			start := max(0, len(previous)-overlapBytes)
+			for start < len(previous) && !utf8.RuneStart(previous[start]) {
+				start++
+			}
+			remaining = previous[start:] + remaining
+		}
+	}
+	return parts
+}
 
-		parts = append(parts, strings.TrimSpace(string(runes[:end])))
-		runes = runes[end:]
-
-		// Add overlap for continuity
-		if len(runes) > 0 && c.overlapChars > 0 && len(parts) > 0 {
-			prev := []rune(parts[len(parts)-1])
-			if len(prev) > c.overlapChars {
-				overlap := prev[len(prev)-c.overlapChars:]
-				runes = append(overlap, runes...)
+func (c *Chunker) hardSplitByTokens(text string) []string {
+	var parts []string
+	remaining := []rune(strings.TrimSpace(text))
+	for len(remaining) > 0 {
+		low, high := 1, len(remaining)
+		for low < high {
+			mid := (low + high + 1) / 2
+			if modelcfg.EstimateTokens(string(remaining[:mid])) <= c.maxTokens {
+				low = mid
+			} else {
+				high = mid - 1
+			}
+		}
+		end := low
+		if end < len(remaining) {
+			candidate := string(remaining[:end])
+			if boundary := strings.LastIndexAny(candidate, ".!?\n "); boundary > len(candidate)/2 {
+				end = utf8.RuneCountInString(candidate[:boundary+1])
+			}
+		}
+		part := strings.TrimSpace(string(remaining[:end]))
+		if part != "" {
+			parts = append(parts, part)
+		}
+		remaining = remaining[end:]
+		if len(remaining) > 0 && c.overlapChars > 0 && len(parts) > 0 {
+			previous := []rune(parts[len(parts)-1])
+			overlap := min(c.overlapChars, max(1, end/4))
+			if overlap < len(previous) {
+				remaining = append(append([]rune(nil), previous[len(previous)-overlap:]...), remaining...)
 			}
 		}
 	}
-
 	return parts
 }
 

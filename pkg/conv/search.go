@@ -41,7 +41,7 @@ func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions)
 		}
 
 		// Generate query embedding
-		queryEmb, embedErr := s.embedder.Embed(ctx, query)
+		queryEmb, embedErr := s.embedder.EmbedQuery(ctx, query)
 		if embedErr != nil {
 			return nil, fmt.Errorf("failed to generate query embedding: %w", embedErr)
 		}

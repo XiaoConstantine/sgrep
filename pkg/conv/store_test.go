@@ -375,6 +375,52 @@ func TestStore_FullTextSearch(t *testing.T) {
 	}
 }
 
+func TestConversationEmbeddingContextMismatchRequiresReindex(t *testing.T) {
+	t.Setenv("SGREP_CONTEXT_TOKENS", "256")
+	path := filepath.Join(t.TempDir(), "test.db")
+	store, err := NewStore(StoreConfig{DBPath: path, Dims: defaultDims})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SGREP_CONTEXT_TOKENS", "512")
+	if _, err := OpenStoreReadOnly(path); err == nil {
+		t.Fatal("conversation store accepted embeddings built for a different context budget")
+	}
+}
+
+func TestConversationFTSUpdateRemovesOldTerms(t *testing.T) {
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db"), Dims: defaultDims})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	ctx := context.Background()
+	session := &Session{ID: "session", Agent: AgentClaudeCode, StartedAt: time.Now(), Turns: []Turn{{Index: 0, UserContent: "obsoleteTerm", AssistContent: "old"}}}
+	if err := store.StoreSession(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	session.Turns[0].UserContent = "replacementTerm"
+	if err := store.StoreSession(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	opts := DefaultSearchOptions()
+	opts.Limit = 10
+	oldHits, err := store.KeywordSearch(ctx, "obsoleteTerm", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newHits, err := store.KeywordSearch(ctx, "replacementTerm", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(oldHits) != 0 || len(newHits) != 1 {
+		t.Fatalf("updated conversation FTS old=%+v new=%+v", oldHits, newHits)
+	}
+}
+
 func TestKeywordSearchAppliesFiltersAndLabelsResults(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")

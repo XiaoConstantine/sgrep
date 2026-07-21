@@ -3,6 +3,8 @@ package conv
 import (
 	"strings"
 	"testing"
+
+	"github.com/XiaoConstantine/sgrep/pkg/modelcfg"
 )
 
 func TestChunker_SingleChunk(t *testing.T) {
@@ -56,6 +58,25 @@ func TestChunker_LongTurnSplitting(t *testing.T) {
 	}
 }
 
+func TestChunker_EnforcesByteBudgetForMultibyteAndOversizedUser(t *testing.T) {
+	const maxTokens = 32
+	c := NewChunkerWithConfig(ChunkerConfig{MaxTokens: maxTokens, OverlapChars: 8})
+	turn := &Turn{
+		Index:         0,
+		UserContent:   strings.Repeat("認証", 100),
+		AssistContent: strings.Repeat("回答", 100),
+	}
+	chunks := c.ChunkTurn("session", turn)
+	if len(chunks) < 2 {
+		t.Fatalf("got %d chunks, want split", len(chunks))
+	}
+	for i, chunk := range chunks {
+		if got := modelcfg.EstimateTokens(chunk.Content); got > maxTokens {
+			t.Fatalf("chunk %d uses %d estimated tokens, budget %d", i, got, maxTokens)
+		}
+	}
+}
+
 func TestChunker_SessionChunking(t *testing.T) {
 	c := NewChunker()
 	session := &Session{
@@ -91,8 +112,8 @@ func TestEstimateTokens(t *testing.T) {
 		expected int
 	}{
 		{"", 0},
-		{"hello", 2},                     // 5 chars / 4 = 1.25 -> 2
-		{"hello world", 3},               // 11 chars / 4 = 2.75 -> 3
+		{"hello", 2},                      // 5 chars / 4 = 1.25 -> 2
+		{"hello world", 3},                // 11 chars / 4 = 2.75 -> 3
 		{"This is a longer sentence.", 7}, // 27 chars / 4 = 6.75 -> 7
 	}
 
@@ -107,7 +128,7 @@ func TestEstimateTokens(t *testing.T) {
 
 func TestEstimateTurnTokens(t *testing.T) {
 	turn := &Turn{
-		UserContent:   "How do I do X?",     // ~4 tokens
+		UserContent:   "How do I do X?",      // ~4 tokens
 		AssistContent: "You can do it by...", // ~5 tokens
 	}
 

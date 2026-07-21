@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/XiaoConstantine/sgrep/pkg/modelcfg"
 	storepkg "github.com/XiaoConstantine/sgrep/pkg/store"
 )
 
@@ -28,6 +29,8 @@ const (
 	convTQVectorGenerationKey        = "tq_vector_generation"
 	convTQVectorSidecarGenerationKey = "tq_vector_sidecar_generation"
 	convTQVectorSidecarCountKey      = "tq_vector_sidecar_count"
+	convEmbeddingFormatVersionKey    = "embedding_format_version"
+	convEmbeddingContextTokensKey    = "embedding_context_tokens"
 )
 
 // Store handles conversation storage and retrieval.
@@ -103,6 +106,10 @@ func OpenStore(dbPath string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := store.validateEmbeddingFormat(); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
 	if err := store.loadTQIfAvailable(context.Background()); err != nil {
 		_ = store.Close()
 		return nil, err
@@ -118,6 +125,10 @@ func OpenStoreReadOnly(dbPath string) (*Store, error) {
 		return nil, err
 	}
 	if err := store.applyReadPragmas(); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	if err := store.validateEmbeddingFormat(); err != nil {
 		_ = store.Close()
 		return nil, err
 	}
@@ -155,6 +166,53 @@ func openStore(dbPath string, dims int, existingOnly bool) (*Store, error) {
 		dims:   dims,
 		tqPath: filepath.Join(filepath.Dir(dbPath), convTQVectorFileName),
 	}, nil
+}
+
+func (s *Store) validateEmbeddingFormat() error {
+	var version int
+	if err := s.db.QueryRow(`SELECT CAST(value AS INTEGER) FROM conv_metadata WHERE key = ?`, convEmbeddingFormatVersionKey).Scan(&version); err != nil {
+		return fmt.Errorf("conversation embedding format is unknown; run 'sgrep conv index --force'")
+	}
+	if version != modelcfg.EmbeddingFormatVersion {
+		return fmt.Errorf("conversation embedding format is version %d, need %d; run 'sgrep conv index --force'", version, modelcfg.EmbeddingFormatVersion)
+	}
+	var contextTokens int
+	if err := s.db.QueryRow(`SELECT CAST(value AS INTEGER) FROM conv_metadata WHERE key = ?`, convEmbeddingContextTokensKey).Scan(&contextTokens); err != nil {
+		return fmt.Errorf("conversation embedding context is unknown; run 'sgrep conv index --force'")
+	}
+	if contextTokens != modelcfg.ContextTokens() {
+		return fmt.Errorf("conversation embedding context is %d tokens, need %d; run 'sgrep conv index --force'", contextTokens, modelcfg.ContextTokens())
+	}
+	return nil
+}
+
+func (s *Store) finalizeEmbeddingFormat(ctx context.Context) error {
+	var missing int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM conv_turns t
+		LEFT JOIN conv_turn_embeddings e ON e.turn_id = t.id
+		WHERE e.turn_id IS NULL OR e.embedding IS NULL
+	`).Scan(&missing); err != nil {
+		return fmt.Errorf("verify conversation embedding coverage: %w", err)
+	}
+	if missing != 0 {
+		return fmt.Errorf("conversation embedding rebuild incomplete: %d turns have no embedding", missing)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for key, value := range map[string]int{
+		convEmbeddingFormatVersionKey: modelcfg.EmbeddingFormatVersion,
+		convEmbeddingContextTokensKey: modelcfg.ContextTokens(),
+	} {
+		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO conv_metadata (key, value) VALUES (?, ?)`, key, value); err != nil {
+			return fmt.Errorf("finalize conversation embedding metadata: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 func appendDSNParam(dsn, key, value string) string {
@@ -487,6 +545,34 @@ func (s *Store) initSchema() error {
 		}
 	}
 
+	var embeddingVersion, embeddingContext int
+	_ = s.db.QueryRow(`SELECT CAST(value AS INTEGER) FROM conv_metadata WHERE key = ?`, convEmbeddingFormatVersionKey).Scan(&embeddingVersion)
+	_ = s.db.QueryRow(`SELECT CAST(value AS INTEGER) FROM conv_metadata WHERE key = ?`, convEmbeddingContextTokensKey).Scan(&embeddingContext)
+	if embeddingVersion != modelcfg.EmbeddingFormatVersion || embeddingContext != modelcfg.ContextTokens() {
+		if _, err := s.db.Exec(`DELETE FROM conv_turn_embeddings`); err != nil {
+			return fmt.Errorf("clear incompatible conversation embeddings: %w", err)
+		}
+		_ = os.Remove(s.tqPath)
+		var turnCount int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM conv_turns`).Scan(&turnCount); err != nil {
+			return fmt.Errorf("count conversation turns during embedding migration: %w", err)
+		}
+		version := 0 // Existing turns require a successful rebuild before search.
+		if turnCount == 0 {
+			version = modelcfg.EmbeddingFormatVersion
+		}
+		if _, err := s.db.Exec(`
+			INSERT OR REPLACE INTO conv_metadata (key, value) VALUES (?, ?)
+		`, convEmbeddingFormatVersionKey, version); err != nil {
+			return fmt.Errorf("store conversation embedding migration state: %w", err)
+		}
+		if _, err := s.db.Exec(`
+			INSERT OR REPLACE INTO conv_metadata (key, value) VALUES (?, ?)
+		`, convEmbeddingContextTokensKey, modelcfg.ContextTokens()); err != nil {
+			return fmt.Errorf("store conversation context migration state: %w", err)
+		}
+	}
+
 	// Set schema version
 	_, err = s.db.Exec(`
 		INSERT OR REPLACE INTO conv_metadata (key, value)
@@ -610,10 +696,16 @@ func (s *Store) StoreSession(ctx context.Context, session *Session) error {
 		}
 
 		_, err = tx.ExecContext(ctx, `
-			INSERT OR REPLACE INTO conv_turns (
+			INSERT INTO conv_turns (
 				id, session_id, turn_index, user_content, assistant_content, combined_content,
 				timestamp, has_code, code_langs, parent_uuid, is_sidechain
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(id) DO UPDATE SET
+				session_id=excluded.session_id, turn_index=excluded.turn_index,
+				user_content=excluded.user_content, assistant_content=excluded.assistant_content,
+				combined_content=excluded.combined_content, timestamp=excluded.timestamp,
+				has_code=excluded.has_code, code_langs=excluded.code_langs,
+				parent_uuid=excluded.parent_uuid, is_sidechain=excluded.is_sidechain
 		`,
 			turnID, session.ID, turn.Index, turn.UserContent, turn.AssistContent, combinedContent,
 			turn.Timestamp, turn.HasCode, codeLangsJSON, turn.ParentUUID, turn.IsSidechain,
@@ -821,6 +913,9 @@ func (s *Store) RebuildTQVectorStore(ctx context.Context) (int, error) {
 		if !clean {
 			return 0, fmt.Errorf("conversation embeddings changed while refreshing compact TQ-MSE vectors")
 		}
+		if err := s.finalizeEmbeddingFormat(ctx); err != nil {
+			return 0, err
+		}
 		return 0, nil
 	}
 
@@ -841,6 +936,9 @@ func (s *Store) RebuildTQVectorStore(ctx context.Context) (int, error) {
 		return count, fmt.Errorf("conversation embeddings changed while refreshing compact TQ-MSE vectors")
 	}
 	if err := s.loadTQIfAvailable(ctx); err != nil {
+		return 0, err
+	}
+	if err := s.finalizeEmbeddingFormat(ctx); err != nil {
 		return 0, err
 	}
 	return count, nil

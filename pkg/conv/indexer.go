@@ -142,7 +142,14 @@ func (idx *Indexer) indexSession(ctx context.Context, session *Session) error {
 		return nil
 	}
 
-	// Batch process embeddings
+	// Batch chunk embeddings, then mean-pool split chunks back to the canonical
+	// turn ID used by conv_turns. Storing chunk-suffixed IDs would make long-turn
+	// embeddings unreachable by the search joins.
+	type turnEmbedding struct {
+		sum   []float32
+		count int
+	}
+	pooled := make(map[string]*turnEmbedding)
 	batchSize := 10
 	for i := 0; i < len(chunks); i += batchSize {
 		end := i + batchSize
@@ -152,23 +159,44 @@ func (idx *Indexer) indexSession(ctx context.Context, session *Session) error {
 		batch := chunks[i:end]
 
 		contents := make([]string, len(batch))
-		turnIDs := make([]string, len(batch))
 		for j, chunk := range batch {
 			contents[j] = chunk.Content
-			turnIDs[j] = chunk.ID
 		}
 
 		// Generate embeddings
-		embeddings, err := idx.embedder.EmbedBatch(ctx, contents)
+		embeddings, err := idx.embedder.EmbedDocuments(ctx, contents)
 		if err != nil {
 			return fmt.Errorf("failed to generate embeddings: %w", err)
 		}
 
-		// Store embeddings
-		if err := idx.store.StoreTurnEmbeddingBatch(ctx, turnIDs, embeddings); err != nil {
-			return fmt.Errorf("failed to store embeddings: %w", err)
+		for j, embedding := range embeddings {
+			turnID := fmt.Sprintf("%s:%d", batch[j].SessionID, batch[j].TurnIndex)
+			entry := pooled[turnID]
+			if entry == nil {
+				entry = &turnEmbedding{sum: make([]float32, len(embedding))}
+				pooled[turnID] = entry
+			}
+			for dim, value := range embedding {
+				entry.sum[dim] += value
+			}
+			entry.count++
 		}
 	}
 
+	turnIDs := make([]string, 0, len(pooled))
+	embeddings := make([][]float32, 0, len(pooled))
+	for turnID, entry := range pooled {
+		if entry.count == 0 {
+			continue
+		}
+		for dim := range entry.sum {
+			entry.sum[dim] /= float32(entry.count)
+		}
+		turnIDs = append(turnIDs, turnID)
+		embeddings = append(embeddings, entry.sum)
+	}
+	if err := idx.store.StoreTurnEmbeddingBatch(ctx, turnIDs, embeddings); err != nil {
+		return fmt.Errorf("failed to store pooled turn embeddings: %w", err)
+	}
 	return nil
 }
