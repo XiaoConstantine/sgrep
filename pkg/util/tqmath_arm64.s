@@ -25,7 +25,7 @@ mul_done:
 	RET
 
 // func scaleFloat32NEON(values []float32, scale float32)
-TEXT ·scaleFloat32NEON(SB), NOSPLIT|NOFRAME, $0-32
+TEXT ·scaleFloat32NEON(SB), NOSPLIT|NOFRAME, $0-28
 	MOVD values_base+0(FP), R0
 	MOVD values_len+8(FP), R1
 	FMOVS scale+24(FP), F0
