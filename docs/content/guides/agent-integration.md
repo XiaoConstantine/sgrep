@@ -53,6 +53,6 @@ Restart Claude Code after installation. The project hook starts indexing when a 
 ## Integration files
 
 - The repository-root `SKILL.md` is the canonical skill package.
-- `.agents/skills/sgrep/SKILL.md` and `plugins/sgrep/skills/sgrep/SKILL.md` are distribution copies checked for parity by tests.
+- `plugins/sgrep/skills/sgrep/SKILL.md` is the embedded plugin distribution copy and is checked against the canonical root skill by tests.
 - `AGENTS.md` provides repository-level workflow guidance for Codex, Amp, and other compatible agents.
 - `.claude/commands/` contains explicit Claude slash commands; commands complement the skill rather than replacing it.

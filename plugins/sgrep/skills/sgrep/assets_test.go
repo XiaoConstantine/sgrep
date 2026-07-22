@@ -56,7 +56,7 @@ func TestContentHasValidSkillFrontmatter(t *testing.T) {
 	}
 }
 
-func TestRepoSkillCopiesMatchCanonical(t *testing.T) {
+func TestPluginSkillMatchesCanonical(t *testing.T) {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
@@ -70,13 +70,5 @@ func TestRepoSkillCopiesMatchCanonical(t *testing.T) {
 	}
 	if string(rootSkill) != Content {
 		t.Fatal("embedded plugin skill drifted from canonical root skill")
-	}
-
-	agentsCopy, err := os.ReadFile(filepath.Join(repoRoot, ".agents", "skills", "sgrep", "SKILL.md"))
-	if err != nil {
-		t.Fatalf("read .agents skill: %v", err)
-	}
-	if string(agentsCopy) != string(rootSkill) {
-		t.Fatal(".agents skill drifted from canonical root skill")
 	}
 }
