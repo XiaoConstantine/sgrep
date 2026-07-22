@@ -1,0 +1,34 @@
+baseURL = "https://xiaoconstantine.github.io/sgrep/"
+languageCode = "en-us"
+title = "sgrep documentation"
+disableKinds = ["taxonomy", "term"]
+enableRobotsTXT = true
+
+[params]
+description = "Local semantic and hybrid search for codebases and coding-agent history."
+github = "https://github.com/XiaoConstantine/sgrep"
+
+[markup]
+  [markup.goldmark]
+    [markup.goldmark.renderer]
+      unsafe = true
+  [markup.highlight]
+    noClasses = false
+
+[menu]
+  [[menu.main]]
+    name = "Guides"
+    pageRef = "/guides"
+    weight = 10
+  [[menu.main]]
+    name = "Reference"
+    pageRef = "/reference"
+    weight = 20
+  [[menu.main]]
+    name = "Architecture"
+    pageRef = "/architecture"
+    weight = 30
+  [[menu.main]]
+    name = "Benchmarks"
+    pageRef = "/benchmarks"
+    weight = 40

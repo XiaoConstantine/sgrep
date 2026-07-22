@@ -1,0 +1,15 @@
+{{ define "main" }}
+<main class="section-page">
+  <p class="eyebrow">Documentation</p>
+  <h1>{{ .Title }}</h1>
+  {{ with .Content }}<div class="lede">{{ . }}</div>{{ end }}
+  <div class="section-grid">
+    {{ range .RegularPages.ByWeight }}
+      <a class="feature" href="{{ .RelPermalink }}">
+        <h2>{{ .Title }}</h2>
+        <p>{{ .Description }}</p>
+      </a>
+    {{ end }}
+  </div>
+</main>
+{{ end }}

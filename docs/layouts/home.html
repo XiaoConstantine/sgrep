@@ -1,0 +1,39 @@
+{{ define "main" }}
+<main>
+  <section class="hero">
+    <p class="eyebrow">Local retrieval for coding agents</p>
+    <h1>Search the code.<br><span>Recover the context.</span></h1>
+    <p class="hero-copy">sgrep searches codebases by intent and retrieves decisions, fixes, and context from Claude Code, Codex, Cursor, OpenCode, and Pi sessions.</p>
+    <div class="hero-actions">
+      <a class="button primary" href="{{ (site.GetPage "/guides/getting-started").RelPermalink }}">Get started</a>
+      <a class="button" href="{{ .Site.Params.github }}">View on GitHub</a>
+    </div>
+    <pre class="install"><code>brew tap XiaoConstantine/tap
+brew install sgrep
+sgrep setup</code></pre>
+  </section>
+
+  <section class="home-grid" aria-label="Documentation sections">
+    <a class="feature" href="{{ (site.GetPage "/guides/code-search").RelPermalink }}">
+      <span>01</span>
+      <h2>Code search</h2>
+      <p>Semantic, hybrid, and ColBERT retrieval with explicit speed and quality profiles.</p>
+    </a>
+    <a class="feature" href="{{ (site.GetPage "/guides/conversation-search").RelPermalink }}">
+      <span>02</span>
+      <h2>Conversation search</h2>
+      <p>Search, inspect, export, and resume work across five coding-agent histories.</p>
+    </a>
+    <a class="feature" href="{{ (site.GetPage "/guides/agent-integration").RelPermalink }}">
+      <span>03</span>
+      <h2>Agent integration</h2>
+      <p>Install the shared skill and teach agents when to use semantic, structural, or exact search.</p>
+    </a>
+    <a class="feature" href="{{ (site.GetPage "/architecture").RelPermalink }}">
+      <span>04</span>
+      <h2>Local architecture</h2>
+      <p>Understand indexing, embeddings, adaptive vector storage, lexical fusion, and reranking.</p>
+    </a>
+  </section>
+</main>
+{{ end }}

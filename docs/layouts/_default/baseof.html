@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="{{ with .Description }}{{ . }}{{ else }}{{ .Site.Params.description }}{{ end }}">
+  <title>{{ if .IsHome }}{{ .Site.Title }}{{ else }}{{ .Title }} · sgrep{{ end }}</title>
+  <link rel="stylesheet" href="{{ "css/site.css" | relURL }}">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="{{ .Site.Home.RelPermalink }}" aria-label="sgrep documentation home">
+      <span class="brand-mark">s</span><span>sgrep</span>
+    </a>
+    <nav aria-label="Main navigation">
+      {{ range .Site.Menus.main }}
+        <a href="{{ .URL | relURL }}">{{ .Name }}</a>
+      {{ end }}
+      <a href="{{ .Site.Params.github }}">GitHub</a>
+    </nav>
+  </header>
+
+  {{ block "main" . }}{{ end }}
+
+  <footer class="site-footer">
+    <span>Local search for code and agent history.</span>
+    <span><a href="{{ .Site.Params.github }}">GitHub</a> · Apache-2.0</span>
+  </footer>
+</body>
+</html>

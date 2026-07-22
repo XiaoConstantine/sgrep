@@ -1,0 +1,26 @@
+{{ define "main" }}
+<main class="docs-shell">
+  <aside class="sidebar" aria-label="Documentation navigation">
+    <p class="sidebar-title">Documentation</p>
+    {{ range .Site.Sections.ByWeight }}
+      <div class="sidebar-group">
+        <a class="sidebar-section" href="{{ .RelPermalink }}">{{ .Title }}</a>
+        {{ range .RegularPages.ByWeight }}
+          <a class="sidebar-page{{ if eq $.RelPermalink .RelPermalink }} active{{ end }}" href="{{ .RelPermalink }}">{{ .Title }}</a>
+        {{ end }}
+      </div>
+    {{ end }}
+    <div class="sidebar-group">
+      {{ range where .Site.RegularPages "Section" "" }}
+        <a class="sidebar-page{{ if eq $.RelPermalink .RelPermalink }} active{{ end }}" href="{{ .RelPermalink }}">{{ .Title }}</a>
+      {{ end }}
+    </div>
+  </aside>
+  <article class="doc">
+    <p class="eyebrow">{{ with .Section }}{{ . }}{{ else }}sgrep{{ end }}</p>
+    <h1>{{ .Title }}</h1>
+    {{ with .Description }}<p class="lede">{{ . }}</p>{{ end }}
+    <div class="doc-content">{{ .Content }}</div>
+  </article>
+</main>
+{{ end }}
