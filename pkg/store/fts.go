@@ -13,13 +13,6 @@ ON CONFLICT(id) DO UPDATE SET
  filepath=excluded.filepath, content=excluded.content, start_line=excluded.start_line,
  end_line=excluded.end_line, metadata=excluded.metadata, is_test=excluded.is_test`
 
-const documentEmbeddingUpsertSQL = `INSERT INTO documents (id, filepath, content, start_line, end_line, metadata, is_test, embedding)
-VALUES (?, ?, ?, ?, ?, ?, ?, vector(?))
-ON CONFLICT(id) DO UPDATE SET
- filepath=excluded.filepath, content=excluded.content, start_line=excluded.start_line,
- end_line=excluded.end_line, metadata=excluded.metadata, is_test=excluded.is_test,
- embedding=excluded.embedding`
-
 const enrichedFTSContentSQL = `COALESCE(content, '') || ' ' || COALESCE(json_extract(metadata, '$.lexical'), '')`
 
 func initDocumentFTS(db *sql.DB) error {

@@ -20,6 +20,13 @@ import (
 	_ "github.com/tursodatabase/go-libsql"
 )
 
+const documentEmbeddingUpsertSQL = `INSERT INTO documents (id, filepath, content, start_line, end_line, metadata, is_test, embedding)
+VALUES (?, ?, ?, ?, ?, ?, ?, vector(?))
+ON CONFLICT(id) DO UPDATE SET
+ filepath=excluded.filepath, content=excluded.content, start_line=excluded.start_line,
+ end_line=excluded.end_line, metadata=excluded.metadata, is_test=excluded.is_test,
+ embedding=excluded.embedding`
+
 // LibSQLStore is a vector store using libSQL's native DiskANN-based vector search.
 // Unlike sqlite-vec which uses vec0 virtual tables, libSQL uses:
 // - F32_BLOB column type for vectors
