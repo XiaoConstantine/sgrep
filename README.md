@@ -43,14 +43,14 @@ sgrep index .
 
 sgrep "database connection error handling"              # balanced, the default
 sgrep --profile fast "request routing"                   # lowest latency
-sgrep --profile quality "JWT validation middleware"     # best ranking
+sgrep --profile quality "JWT validation middleware"     # optional ColBERT reranking
 ```
 
 | Profile | Pipeline | Use it for |
 |---------|----------|------------|
 | `fast` | Semantic | Quick exploration |
-| `balanced` | Semantic + BM25 | Everyday search; default |
-| `quality` | Semantic + BM25 + ColBERT | Harder ranking problems |
+| `balanced` | Semantic + BM25 | Recommended everyday profile; default |
+| `quality` | Semantic + BM25 + ColBERT | Optional reranking experiments |
 
 [Code-search guide →](https://xiaocui.me/sgrep/guides/code-search/)
 
@@ -103,20 +103,28 @@ indexes retain separate retrieval controls. The editable diagram source is at
 
 [Architecture details →](https://xiaocui.me/sgrep/architecture/)
 
-## Current Benchmark
+## Final Pooled Local Benchmark
 
-Sequential top-10 search over `dspy-go` at commit
-`87cb50fa0611ef8a3905494c8b16fb0aab7666d3`: 543 files, 13,136 chunks,
-61,082 ColBERT segments, and 20 judged queries on an Apple M3 Pro.
+In the final controlled local-only comparison, `sgrep balanced` is the
+strongest overall local quality-latency tradeoff and the strongest normalized
+implementation-code retriever by point estimate. It is not universally best,
+and the bootstrap confidence intervals overlap competing tools.
 
-| Profile | MRR | Recall@5 | Mean | p95 |
-|---------|----:|---------:|-----:|----:|
-| `fast` | 0.470 | 0.300 | 30.2ms | 37ms |
-| `balanced` | 0.593 | 0.350 | 35.9ms | 44ms |
-| `quality` | **0.729** | **0.408** | 46.5ms | 56ms |
+| Evaluation track | Point-estimate result |
+|------------------|-----------------------|
+| Normalized implementation code | `sgrep balanced`: MRR **0.792**, NDCG@10 **0.589**, R@10 **0.413** at **54.4ms** median |
+| Normalized all files | `osgrep` wins MRR (**0.867**); `sgrep balanced`/`quality` win NDCG@10 and R@10 (**0.607** / **0.340**) |
+| Native product output | `osgrep` wins MRR (**0.858**) and ChunkHound wins R@10 (**0.236**); `sgrep balanced`'s small NDCG@10 lead is pool-sensitive |
 
-These are small after-state smoke results, not a controlled pre/post study.
-See the [benchmark methodology and caveats](https://xiaocui.me/sgrep/benchmarks/).
+The benchmark used 20 queries, model-judged pooled qrels, sgrep source
+`19ebec1`, and the pinned `dspy-go` corpus at `87cb50f`. Query-bootstrap 95%
+confidence intervals overlap, so these are point-estimate verdicts rather than
+significance claims. `balanced` is recommended over `quality`: it was faster
+and matched or beat it on the final normalized metrics. Cloud-backed mgrep is
+kept in a separate, quota-interrupted exploratory track and is not part of the
+local comparison.
+
+See the [benchmark methodology and full tables](https://xiaocui.me/sgrep/benchmarks/).
 
 ## Documentation
 

@@ -1,6 +1,8 @@
 # sgrep Benchmarks
 
-This directory contains quality and performance benchmarks for sgrep.
+This directory contains sgrep's internal quality-smoke and performance
+benchmarks. It is not the harness that produced the final published cross-tool
+verdict.
 
 ## Directory Structure
 
@@ -18,9 +20,24 @@ bench/
 └── search_benchmark_test.go  # End-to-end search benchmarks
 ```
 
-## Comparison Benchmark (dspy-go corpus)
+## Benchmark boundaries
 
-Compare sgrep against other semantic search tools on the dspy-go codebase (20 queries):
+The final pooled cross-tool benchmark is maintained in a separate benchmark
+repository. It compares local sgrep, grepai, osgrep, and ChunkHound runs under a
+common harness; cloud-backed mgrep is kept in a separate, quota-interrupted
+exploratory track. On its normalized implementation-code track, `sgrep
+balanced` records MRR/NDCG@10/R@10 of 0.792/0.589/0.413 at 54.4ms median and is
+the strongest local point-estimate quality-latency tradeoff. It is not
+universally best, and bootstrap confidence intervals overlap.
+
+The scripts in this directory serve a different purpose: fast profile
+regression checks, local IR metric tests, and low-level performance
+measurements. Their shallow judgments and timing boundary must not be used as
+the final cross-tool ranking.
+
+## Internal smoke/regression harness (dspy-go corpus)
+
+Run the internal adapters on the dspy-go codebase (20 shallow smoke queries):
 
 ```bash
 uv run bench/quality/run_dspy_bench.py --tool all --mode all
@@ -28,7 +45,9 @@ uv run bench/quality/run_dspy_bench.py --tool all --mode all
 
 ### Result policy
 
-Historical latency numbers were retired because retrieval modes could be silently contaminated by an existing ColBERT artifact and six subprocesses contended for one embedding server. New runs:
+Historical internal latency numbers were retired because retrieval modes could
+be silently contaminated by an existing ColBERT artifact and six subprocesses
+contended for one embedding server. New smoke runs:
 
 - force `fast`, `balanced`, and `quality` profiles;
 - execute sequentially by default and report median/p95 latency;
@@ -38,13 +57,26 @@ Historical latency numbers were retired because retrieval modes could be silentl
 
 Cross-encoder reranking remains experimental and off by default because general-text rerankers have historically demoted code-relevant results.
 
-### Supported Tools
+### Tool coverage
+
+The final cross-tool harness includes:
+
+| Tool | Track | Description |
+|------|-------|-------------|
+| `sgrep` | Local | Semantic, hybrid, and optional ColBERT profiles |
+| `grepai` | Local | Ollama-backed semantic code search |
+| `osgrep` | Local | Local ONNX/LanceDB semantic search |
+| `ChunkHound` | Local | Ollama/DuckDB semantic code search |
+| `mgrep` | Cloud exploratory | Hosted Mixedbread search; kept out of local tables |
+
+This repository's older `run_dspy_bench.py` smoke runner has adapters only for
+the following tools; `grepai` and `ChunkHound` are not driven by this script:
 
 | Tool | Type | Description |
 |------|------|-------------|
-| `sgrep` | Local | This tool - semantic + BM25 hybrid search |
-| `osgrep` | Local | Open-source semantic search (requires `npm i -g osgrep`) |
-| `mgrep` | Cloud | Mixedbread cloud search (requires `npm i -g @mixedbread/mgrep && mgrep login`) |
+| `sgrep` | Local | This tool's semantic, BM25, and ColBERT smoke profiles |
+| `osgrep` | Local | Legacy local comparison adapter (requires `npm i -g osgrep`) |
+| `mgrep` | Cloud | Legacy exploratory adapter (requires `npm i -g @mixedbread/mgrep && mgrep login`) |
 
 ### Usage
 
@@ -66,7 +98,7 @@ uv run bench/quality/run_dspy_bench.py --tool sgrep --mode hybrid --split test -
 # Separate six-client throughput/contention run
 uv run bench/quality/run_dspy_bench.py --tool sgrep --mode all --concurrency 6
 
-# Test all tools
+# Test all adapters in this internal smoke runner
 uv run bench/quality/run_dspy_bench.py --tool all --mode all
 ```
 
@@ -95,9 +127,12 @@ go run ./cmd/sgrep-bench quality -codebase /path/to/repo -dataset bench/quality/
 go run ./cmd/sgrep-bench compare -codebase . -query "how does authentication work"
 ```
 
-### Ground Truth Dataset
+### Internal ground-truth dataset
 
-The dataset (`bench/quality/dataset.json`) contains:
+The dataset (`bench/quality/dataset.json`) contains shallow labels for internal
+regression testing. It is not the model-judged pooled qrel set used for the
+final cross-tool scores. It contains:
+
 - **Queries**: Natural language search intents
 - **Judgments**: Labeled relevant files with graded relevance (0/1/2)
 - **Categories**: conceptual, api, architecture, edge_case
