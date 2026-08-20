@@ -101,9 +101,7 @@ func (r *Reranker) ensureServer() error {
 	}
 
 	r.startOnce.Do(func() {
-		if !r.serverMgr.IsRunning() {
-			r.startError = r.serverMgr.Start()
-		}
+		r.startError = r.serverMgr.Start()
 	})
 
 	return r.startError
