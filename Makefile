@@ -1,5 +1,9 @@
-.PHONY: build build-hybrid test test-short test-hybrid clean install lint-skills \
+.PHONY: build build-hybrid test test-short test-hybrid clean install lint lint-skills \
 	bench bench-quick bench-baseline bench-compare bench-profile bench-quality build-bench
+
+# Keep this in sync with .github/workflows/ci.yml (golangci-lint-action version).
+GOLANGCI_LINT_VERSION ?= v2.13.1
+GOLANGCI_LINT ?= $(shell go env GOPATH)/bin/golangci-lint
 
 # Default build (semantic search only)
 build:
@@ -28,6 +32,21 @@ test-cover:
 # Run tests with coverage and FTS5 support
 test-cover-hybrid:
 	CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" go test -short -cover ./...
+
+# Install the pinned golangci-lint with the module's Go toolchain.
+# Homebrew bottles are often built with an older Go and refuse to lint this module.
+$(GOLANGCI_LINT):
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+
+# Match CI: same binary version, timeout, and sqlite_vec build tag.
+lint: $(GOLANGCI_LINT)
+	@current="$$($(GOLANGCI_LINT) version --short 2>/dev/null || true)"; \
+	want="$(GOLANGCI_LINT_VERSION:v%=%)"; \
+	if [ "$$current" != "$$want" ]; then \
+		echo "Installing golangci-lint $(GOLANGCI_LINT_VERSION) with $$(go version)"; \
+		go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION); \
+	fi
+	$(GOLANGCI_LINT) run --timeout=5m --build-tags=sqlite_vec ./...
 
 # Validate the canonical open agent skill
 lint-skills:

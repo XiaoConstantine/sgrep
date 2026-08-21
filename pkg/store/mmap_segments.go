@@ -705,12 +705,6 @@ func (s *MMapSegmentStore) GetChunksForColBERT(ctx context.Context, batchSize in
 var _ ColBERTSegmentStorer = (*MMapSegmentStore)(nil)
 
 // Helper functions
-func float32tobytes(f float32) []byte {
-	buf := make([]byte, 4)
-	binary.LittleEndian.PutUint32(buf, *(*uint32)(unsafe.Pointer(&f)))
-	return buf
-}
-
 func float32frombytes(b []byte) float32 {
 	bits := binary.LittleEndian.Uint32(b)
 	return *(*float32)(unsafe.Pointer(&bits))

@@ -9,8 +9,8 @@ go build -o sgrep ./cmd/sgrep
 # Test
 go test ./...
 
-# Lint
-golangci-lint run ./...
+# Lint (installs the pinned golangci-lint with this module's Go toolchain)
+make lint
 
 # Install
 go install ./cmd/sgrep

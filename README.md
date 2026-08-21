@@ -148,7 +148,7 @@ See the [benchmark methodology and full tables](https://xiaocui.me/sgrep/benchma
 ```bash
 go build -o sgrep ./cmd/sgrep
 go test ./...
-golangci-lint run ./...
+make lint
 ```
 
 ## License

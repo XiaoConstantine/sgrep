@@ -73,7 +73,8 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          # Keep this in sync with GOLANGCI_LINT_VERSION in the Makefile.
+          version: v2.13.1
           args: --timeout=5m --build-tags=sqlite_vec
 
   build:
