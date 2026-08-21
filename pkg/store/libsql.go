@@ -47,7 +47,7 @@ type LibSQLStore struct {
 	memMu       sync.RWMutex
 	vectors     [][]float32
 	docIDs      []string
-	vectorCount int64
+	vectorCount atomic.Int64
 
 	// Parallel search config
 	partitions int
@@ -452,7 +452,7 @@ func (s *LibSQLStore) initSearchMode() error {
 		return err
 	}
 
-	atomic.StoreInt64(&s.vectorCount, count)
+	s.vectorCount.Store(count)
 
 	// Load vectors into memory for small datasets
 	if !s.skipVectorCache && count < inMemoryThreshold && count > 0 {
@@ -591,10 +591,10 @@ func (s *LibSQLStore) Store(ctx context.Context, doc *Document) error {
 		return err
 	}
 
-	atomic.AddInt64(&s.vectorCount, 1)
+	s.vectorCount.Add(1)
 
 	// Update in-memory cache if using it (store normalized vector)
-	count := atomic.LoadInt64(&s.vectorCount)
+	count := s.vectorCount.Load()
 	if count < inMemoryThreshold {
 		s.memMu.Lock()
 		s.docIDs = append(s.docIDs, doc.ID)
@@ -643,7 +643,7 @@ func (s *LibSQLStore) StoreBatch(ctx context.Context, docs []*Document) error {
 		return err
 	}
 
-	atomic.AddInt64(&s.vectorCount, int64(len(docs)))
+	s.vectorCount.Add(int64(len(docs)))
 
 	// Note: Skip in-memory cache reload during bulk indexing for performance.
 	// The cache will be loaded on first search if needed.
@@ -686,7 +686,7 @@ func (s *LibSQLStore) StoreMetadataBatch(ctx context.Context, docs []*Document) 
 		return err
 	}
 
-	atomic.StoreInt64(&s.vectorCount, 0)
+	s.vectorCount.Store(0)
 	s.memMu.Lock()
 	s.docIDs = nil
 	s.vectors = nil
@@ -705,7 +705,7 @@ func (s *LibSQLStore) ClearVectorStorage(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `VACUUM`); err != nil {
 		return err
 	}
-	atomic.StoreInt64(&s.vectorCount, 0)
+	s.vectorCount.Store(0)
 	s.memMu.Lock()
 	s.docIDs = nil
 	s.vectors = nil
@@ -736,7 +736,7 @@ func (s *LibSQLStore) ResetIndex(ctx context.Context) error {
 		return err
 	}
 
-	atomic.StoreInt64(&s.vectorCount, 0)
+	s.vectorCount.Store(0)
 	s.memMu.Lock()
 	s.docIDs = nil
 	s.vectors = nil
@@ -778,7 +778,7 @@ func (s *LibSQLStore) PruneIndex(ctx context.Context, liveIDs []string, livePath
 
 	var count int64
 	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM documents WHERE embedding IS NOT NULL`).Scan(&count)
-	atomic.StoreInt64(&s.vectorCount, count)
+	s.vectorCount.Store(count)
 	s.memMu.Lock()
 	s.docIDs = nil
 	s.vectors = nil
@@ -788,7 +788,7 @@ func (s *LibSQLStore) PruneIndex(ctx context.Context, liveIDs []string, livePath
 
 // Search finds similar documents using DiskANN index or in-memory search.
 func (s *LibSQLStore) Search(ctx context.Context, embedding []float32, limit int, threshold float64) ([]*Document, []float64, error) {
-	count := atomic.LoadInt64(&s.vectorCount)
+	count := s.vectorCount.Load()
 
 	// Normalize query for dot product distance (stored vectors are pre-normalized)
 	queryNorm := util.NormalizeVectorCopy(embedding)
@@ -1156,10 +1156,10 @@ func (s *LibSQLStore) DeleteByPath(ctx context.Context, filepath string) error {
 	}
 
 	affected, _ := result.RowsAffected()
-	newCount := atomic.AddInt64(&s.vectorCount, -affected)
+	newCount := s.vectorCount.Add(-affected)
 	if newCount < 0 {
 		newCount = 0
-		atomic.StoreInt64(&s.vectorCount, 0)
+		s.vectorCount.Store(0)
 	}
 
 	if newCount == 0 {
@@ -1207,7 +1207,7 @@ func (s *LibSQLStore) EnsureFTS5() error {
 
 // VectorCount returns the number of vectors in the store.
 func (s *LibSQLStore) VectorCount() int64 {
-	return atomic.LoadInt64(&s.vectorCount)
+	return s.vectorCount.Load()
 }
 
 // ExportAllVectors returns all chunk IDs and their embeddings for MMap export.
@@ -1215,7 +1215,7 @@ func (s *LibSQLStore) VectorCount() int64 {
 func (s *LibSQLStore) ExportAllVectors(ctx context.Context) ([]string, [][]float32, error) {
 	// First try in-memory cache if available
 	s.memMu.RLock()
-	if len(s.vectors) > 0 && len(s.docIDs) == len(s.vectors) && int64(len(s.vectors)) == atomic.LoadInt64(&s.vectorCount) {
+	if len(s.vectors) > 0 && len(s.docIDs) == len(s.vectors) && int64(len(s.vectors)) == s.vectorCount.Load() {
 		// Make copies to avoid holding lock
 		ids := make([]string, len(s.docIDs))
 		vecs := make([][]float32, len(s.vectors))

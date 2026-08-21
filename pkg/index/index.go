@@ -117,8 +117,8 @@ type Indexer struct {
 	tqChunks     int
 	tqFiles      int
 	tqBuilt      bool
-	processed    int64
-	errors       int64
+	processed    atomic.Int64
+	errors       atomic.Int64
 }
 
 // New creates a new indexer for the given path with default configuration.
@@ -425,8 +425,8 @@ func (idx *Indexer) Index(ctx context.Context) error {
 	}
 	debugLevel := util.GetDebugLevel()
 	stats := util.NewTimingStats(debugLevel)
-	idx.processed = 0
-	idx.errors = 0
+	idx.processed.Store(0)
+	idx.errors.Store(0)
 	idx.tqChunks = 0
 	idx.tqFiles = 0
 	idx.tqBuilt = false
@@ -546,7 +546,7 @@ func (idx *Indexer) Index(ctx context.Context) error {
 			err := idx.storeIndexBatch(ctx, docs)
 			writeDuration := writeTimer.Stop()
 			if err != nil {
-				atomic.AddInt64(&idx.errors, 1)
+				idx.errors.Add(1)
 				fmt.Fprintf(os.Stderr, "Error storing batch: %v\n", err)
 				continue
 			}
@@ -583,7 +583,7 @@ func (idx *Indexer) Index(ctx context.Context) error {
 				stats.RecordOp("embedding", embedDuration, int64(len(texts)))
 
 				if err != nil {
-					atomic.AddInt64(&idx.errors, int64(len(batch)))
+					idx.errors.Add(int64(len(batch)))
 					fmt.Fprintf(os.Stderr, "Batch embedding failed: %v\n", err)
 					continue
 				}
@@ -625,7 +625,7 @@ func (idx *Indexer) Index(ctx context.Context) error {
 			stats.RecordOp("embedding", embedDuration, int64(len(texts)))
 
 			if err != nil {
-				atomic.AddInt64(&idx.errors, int64(len(pendingChunks)))
+				idx.errors.Add(int64(len(pendingChunks)))
 				fmt.Fprintf(os.Stderr, "Final batch embedding failed: %v\n", err)
 			} else {
 				docs := make([]*store.Document, len(pendingChunks))
@@ -658,7 +658,7 @@ func (idx *Indexer) Index(ctx context.Context) error {
 				readDuration := readTimer.Stop()
 
 				if err != nil {
-					atomic.AddInt64(&idx.errors, 1)
+					idx.errors.Add(1)
 					fmt.Fprintf(os.Stderr, "Error reading %s: %v\n", path, err)
 					continue
 				}
@@ -673,10 +673,10 @@ func (idx *Indexer) Index(ctx context.Context) error {
 				if len(chunks) > 0 {
 					chunkChan <- chunks
 				}
-				atomic.AddInt64(&idx.processed, 1)
+				idx.processed.Add(1)
 
 				// Progress
-				processed := atomic.LoadInt64(&idx.processed)
+				processed := idx.processed.Load()
 				if processed%10 == 0 {
 					fmt.Printf("\rProcessed %d/%d files...", processed, len(files))
 				}
@@ -707,7 +707,7 @@ func (idx *Indexer) Index(ctx context.Context) error {
 		stats.RecordStage("flush", flushDuration, 1)
 	}
 
-	hadErrors := atomic.LoadInt64(&idx.errors) != 0
+	hadErrors := idx.errors.Load() != 0
 	if !hadErrors {
 		pruneTimer := util.NewTimer("prune_index")
 		pruned, err := idx.pruneStaleIndex(ctx, liveIDs, livePaths)
@@ -726,12 +726,12 @@ func (idx *Indexer) Index(ctx context.Context) error {
 		return err
 	}
 	if hadErrors {
-		return fmt.Errorf("index rebuild incomplete: %d files or chunks failed; previous compatible index remains unavailable", atomic.LoadInt64(&idx.errors))
+		return fmt.Errorf("index rebuild incomplete: %d files or chunks failed; previous compatible index remains unavailable", idx.errors.Load())
 	}
 
 	elapsed := time.Since(startTime)
 	fmt.Printf("\rIndexed %d files in %v (%d errors)\n",
-		idx.processed, elapsed.Round(time.Millisecond), idx.errors)
+		idx.processed.Load(), elapsed.Round(time.Millisecond), idx.errors.Load())
 
 	// Print debug summary
 	if debugLevel >= util.DebugSummary {

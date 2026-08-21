@@ -52,7 +52,6 @@ type Embedder struct {
 	endpoint   string
 	client     *http.Client
 	cache      *Cache
-	mu         sync.Mutex
 	serverMgr  *server.Manager
 	autoStart  bool
 	startOnce  sync.Once
@@ -60,9 +59,9 @@ type Embedder struct {
 	eventBox   *util.EventBox
 
 	// Stats
-	totalRequests int64
-	cacheHits     int64
-	errors        int64
+	totalRequests atomic.Int64
+	cacheHits     atomic.Int64
+	errors        atomic.Int64
 }
 
 // New creates a new embedder with auto-start enabled.
@@ -157,22 +156,16 @@ func (e *Embedder) embedText(ctx context.Context, text string) ([]float32, error
 		return nil, err
 	}
 
-	e.mu.Lock()
-	e.totalRequests++
-	e.mu.Unlock()
+	e.totalRequests.Add(1)
 
 	if cached := e.cache.Get(text); cached != nil {
-		e.mu.Lock()
-		e.cacheHits++
-		e.mu.Unlock()
+		e.cacheHits.Add(1)
 		return cached, nil
 	}
 
 	embedding, err := e.callLlamaCpp(ctx, text)
 	if err != nil {
-		e.mu.Lock()
-		e.errors++
-		e.mu.Unlock()
+		e.errors.Add(1)
 		return nil, err
 	}
 
@@ -255,9 +248,7 @@ func (e *Embedder) embedBatch(ctx context.Context, texts []string) ([][]float32,
 	for i, text := range texts {
 		if cached := e.cache.Get(text); cached != nil {
 			results[i] = cached
-			e.mu.Lock()
-			e.cacheHits++
-			e.mu.Unlock()
+			e.cacheHits.Add(1)
 		} else {
 			uncachedIndices = append(uncachedIndices, i)
 			uncachedTexts = append(uncachedTexts, text)
@@ -452,9 +443,7 @@ func min(a, b int) int {
 
 // Stats returns embedder statistics.
 func (e *Embedder) Stats() (total, hits, errors int64) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.totalRequests, e.cacheHits, e.errors
+	return e.totalRequests.Load(), e.cacheHits.Load(), e.errors.Load()
 }
 
 // Cache is a simple LRU-ish cache for embeddings.

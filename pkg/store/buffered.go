@@ -40,7 +40,7 @@ type BufferedStore struct {
 
 	// Search mode
 	searchMode  searchModeType
-	vectorCount int64
+	vectorCount atomic.Int64
 
 	// In-memory search data (only populated for small repos)
 	memMu   sync.RWMutex
@@ -213,7 +213,7 @@ func (s *BufferedStore) initSearchMode() error {
 	if err != nil {
 		return err
 	}
-	atomic.StoreInt64(&s.vectorCount, count)
+	s.vectorCount.Store(count)
 
 	// Decide search mode based on count
 	if s.searchMode == searchModeAuto {
@@ -414,7 +414,7 @@ func (s *BufferedStore) StoreMetadataBatch(ctx context.Context, docs []*Document
 	s.docIDs = nil
 	s.vectors = nil
 	s.memMu.Unlock()
-	atomic.StoreInt64(&s.vectorCount, 0)
+	s.vectorCount.Store(0)
 	return nil
 }
 
@@ -433,7 +433,7 @@ func (s *BufferedStore) ClearVectorStorage(ctx context.Context) error {
 	s.docIDs = nil
 	s.vectors = nil
 	s.memMu.Unlock()
-	atomic.StoreInt64(&s.vectorCount, 0)
+	s.vectorCount.Store(0)
 	return nil
 }
 
@@ -465,7 +465,7 @@ func (s *BufferedStore) ResetIndex(ctx context.Context) error {
 	s.docIDs = nil
 	s.vectors = nil
 	s.memMu.Unlock()
-	atomic.StoreInt64(&s.vectorCount, 0)
+	s.vectorCount.Store(0)
 	return nil
 }
 
@@ -505,7 +505,7 @@ func (s *BufferedStore) PruneIndex(ctx context.Context, liveIDs []string, livePa
 
 	var count int64
 	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM vec_embeddings`).Scan(&count)
-	atomic.StoreInt64(&s.vectorCount, count)
+	s.vectorCount.Store(count)
 	s.memMu.Lock()
 	s.docIDs = nil
 	s.vectors = nil
@@ -569,7 +569,7 @@ func (s *BufferedStore) flushBufferLocked(ctx context.Context) error {
 	}
 
 	// Update count and potentially in-memory cache
-	atomic.AddInt64(&s.vectorCount, int64(len(newDocIDs)))
+	s.vectorCount.Add(int64(len(newDocIDs)))
 
 	if s.searchMode == searchModeInMemory {
 		s.memMu.Lock()
@@ -1042,7 +1042,7 @@ func (s *BufferedStore) DeleteByPath(ctx context.Context, filepath string) error
 		return err
 	}
 
-	atomic.AddInt64(&s.vectorCount, -int64(len(ids)))
+	s.vectorCount.Add(-int64(len(ids)))
 
 	// Remove from in-memory cache if applicable
 	if s.searchMode == searchModeInMemory {
@@ -1092,7 +1092,7 @@ func (s *BufferedStore) EnsureFTS5() error {
 
 // VectorCount returns the number of vectors in the store.
 func (s *BufferedStore) VectorCount() int64 {
-	return atomic.LoadInt64(&s.vectorCount)
+	return s.vectorCount.Load()
 }
 
 // SearchMode returns the current search mode.

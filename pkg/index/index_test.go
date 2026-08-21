@@ -343,8 +343,10 @@ func TestIgnoreRules_LoadMissing(t *testing.T) {
 }
 
 func TestIndexer_Fields(t *testing.T) {
-	idx := &Indexer{rootPath: "/test", processed: 5, errors: 2}
-	if idx.rootPath != "/test" || idx.processed != 5 || idx.errors != 2 {
+	idx := &Indexer{rootPath: "/test"}
+	idx.processed.Store(5)
+	idx.errors.Store(2)
+	if idx.rootPath != "/test" || idx.processed.Load() != 5 || idx.errors.Load() != 2 {
 		t.Error("field issue")
 	}
 }
