@@ -971,7 +971,7 @@ func TestRerankerManagerFailedAdoptionStopsSupervisor(t *testing.T) {
 	}
 }
 
-func TestRerankerSupervisorSIGKILLTerminatesEscapedRoot(t *testing.T) {
+func TestRerankerSupervisorSIGKILLTerminatesReexecutedRoot(t *testing.T) {
 	dir := t.TempDir()
 	token, err := newRerankerInstanceToken()
 	if err != nil {
@@ -986,8 +986,10 @@ func TestRerankerSupervisorSIGKILLTerminatesEscapedRoot(t *testing.T) {
 	t.Setenv("GO_WANT_RERANKER_HELPER", "1")
 	t.Setenv("GO_RERANKER_HELPER_READY", ready)
 	t.Setenv("GO_RERANKER_HELPER_IGNORE_TERM", "true")
+	t.Setenv("GO_RERANKER_HELPER_SELF_EXEC", "true")
 	if runtime.GOOS == "darwin" {
 		t.Setenv("GO_RERANKER_HELPER_SETPGID_PARENT", "true")
+		t.Setenv("GO_RERANKER_HELPER_REQUIRE_SETPGID_DENIAL", "true")
 		t.Setenv("GO_RERANKER_HELPER_CLOSE_IDENTITY", "true")
 	}
 	t.Setenv("GO_RERANKER_HELPER_SETSID", "true")
@@ -1026,11 +1028,8 @@ func TestRerankerSupervisorSIGKILLTerminatesEscapedRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.GOOS == "darwin" && pgid == state.PID {
-		t.Fatalf("reranker did not exercise the adversarial process-group escape: PGID %d", pgid)
-	}
-	if runtime.GOOS != "darwin" && pgid != state.PID {
-		t.Fatalf("Linux reranker escaped its seccomp-protected process group: PGID %d", pgid)
+	if pgid != state.PID {
+		t.Fatalf("reranker escaped its protected process group: PGID %d, want %d", pgid, state.PID)
 	}
 	if session, err := unix.Getsid(state.PID); err != nil || session == state.PID {
 		t.Fatalf("reranker escaped into a new session: SID %d, %v", session, err)
@@ -1049,7 +1048,7 @@ func TestRerankerSupervisorSIGKILLTerminatesEscapedRoot(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	if rerankerProcessAlive(state.PID) {
-		t.Fatal("supervisor SIGKILL orphaned the escaped reranker root")
+		t.Fatal("supervisor SIGKILL orphaned the re-executed reranker root")
 	}
 }
 
@@ -1631,12 +1630,13 @@ func TestRerankerHelperProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_RERANKER_HELPER") != "1" {
 		return
 	}
-	if os.Getenv("GO_RERANKER_HELPER_CLOSE_IDENTITY") == "true" {
+	firstExecution := os.Getenv("GO_RERANKER_HELPER_SELF_EXECED") != "true"
+	if firstExecution && os.Getenv("GO_RERANKER_HELPER_CLOSE_IDENTITY") == "true" {
 		if identity := os.NewFile(3, "reranker-identity"); identity != nil {
 			_ = identity.Close()
 		}
 	}
-	if os.Getenv("GO_RERANKER_HELPER_SETPGID_PARENT") == "true" {
+	if firstExecution && os.Getenv("GO_RERANKER_HELPER_SETPGID_PARENT") == "true" {
 		err := syscall.Setpgid(0, os.Getppid())
 		if os.Getenv("GO_RERANKER_HELPER_REQUIRE_SETPGID_DENIAL") == "true" {
 			if err == nil {
@@ -1646,7 +1646,7 @@ func TestRerankerHelperProcess(t *testing.T) {
 			os.Exit(2)
 		}
 	}
-	if os.Getenv("GO_RERANKER_HELPER_SETSID") == "true" {
+	if firstExecution && os.Getenv("GO_RERANKER_HELPER_SETSID") == "true" {
 		_, err := syscall.Setsid()
 		if os.Getenv("GO_RERANKER_HELPER_REQUIRE_SETSID_DENIAL") == "true" {
 			if err == nil {
@@ -1655,6 +1655,16 @@ func TestRerankerHelperProcess(t *testing.T) {
 		} else if err != nil {
 			os.Exit(2)
 		}
+	}
+	if firstExecution && os.Getenv("GO_RERANKER_HELPER_SELF_EXEC") == "true" {
+		executable, err := os.Executable()
+		if err != nil || os.Setenv("GO_RERANKER_HELPER_SELF_EXECED", "true") != nil {
+			os.Exit(2)
+		}
+		if err := syscall.Exec(executable, os.Args, os.Environ()); err != nil {
+			os.Exit(2)
+		}
+		os.Exit(2)
 	}
 	if os.Getenv("GO_RERANKER_HELPER_IGNORE_TERM") == "true" {
 		signal.Ignore(syscall.SIGTERM)

@@ -7,7 +7,10 @@ import (
 	"os"
 )
 
-const rerankerSandboxProfile = "(version 1) (allow default) (deny process-fork)"
+// The protected process group is the guardian's fallback when exec makes a
+// previously captured Darwin audit token stale. posix_spawn is denied because
+// SETEXEC can otherwise change the group atomically without forking.
+const rerankerSandboxProfile = "(version 1) (allow default) (deny process-fork) (deny syscall-unix (syscall-number SYS_setpgid SYS_setsid SYS_posix_spawn))"
 
 func preserveRerankerIdentityAfterExec() bool {
 	// Darwin has no pidfd. Keeping the private socket open across exec lets
