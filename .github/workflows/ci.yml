@@ -46,6 +46,12 @@ jobs:
           CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
           CGO_LDFLAGS: "-lm"
         run: go test ${{ matrix.tags }} -v -short -race -coverprofile=coverage.txt -covermode=atomic ./...
+
+      - name: Test portable SIMD kernels
+        if: runner.os == 'Linux'
+        env:
+          GOEXPERIMENT: simd
+        run: go test ./pkg/util
       
       - name: Upload coverage
         uses: codecov/codecov-action@v4

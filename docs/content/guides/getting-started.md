@@ -34,6 +34,13 @@ go build -o sgrep ./cmd/sgrep
 Source builds require Go 1.27 or later. Prebuilt Intel macOS binaries support
 macOS 13 Ventura or later; Apple Silicon binaries require macOS 15.5 or later.
 
+Go 1.27's experimental portable SIMD kernels can be enabled for source builds
+on non-ARM64 systems. ARM64 builds continue to use the faster NEON assembly:
+
+```bash
+GOEXPERIMENT=simd go build -o sgrep ./cmd/sgrep
+```
+
 The optional sqlite-vec backend is selected at build time:
 
 ```bash
