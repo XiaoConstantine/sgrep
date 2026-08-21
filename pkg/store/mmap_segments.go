@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -504,6 +505,7 @@ func (s *MMapSegmentStore) commitWriteLocked() error {
 		_ = f.Close()
 		return err
 	}
+	writer := bufio.NewWriterSize(f, 1<<20)
 
 	// Write header
 	header := make([]byte, headerSize)
@@ -520,12 +522,12 @@ func (s *MMapSegmentStore) commitWriteLocked() error {
 		binary.LittleEndian.PutUint32(header[28:32], codecID)
 		binary.LittleEndian.PutUint32(header[32:36], uint32(len(codecMetadata)))
 	}
-	if _, err := f.Write(header); err != nil {
+	if _, err := writer.Write(header); err != nil {
 		_ = f.Close()
 		return err
 	}
 	if len(codecMetadata) > 0 {
-		if _, err := f.Write(codecMetadata); err != nil {
+		if _, err := writer.Write(codecMetadata); err != nil {
 			_ = f.Close()
 			return err
 		}
@@ -539,20 +541,17 @@ func (s *MMapSegmentStore) commitWriteLocked() error {
 		segments := s.writeBuffer.chunks[chunkID]
 
 		// Write index entry
-		entry := make([]byte, 16+len(chunkID))
+		entrySize := (16 + len(chunkID) + 3) & ^3
+		entry := make([]byte, entrySize)
 		h := fnv.New64a()
-		h.Write([]byte(chunkID))
+		_, _ = h.Write([]byte(chunkID))
 		binary.LittleEndian.PutUint64(entry[0:8], h.Sum64())
 		binary.LittleEndian.PutUint32(entry[8:12], uint32(dataOffset))
 		binary.LittleEndian.PutUint16(entry[12:14], uint16(len(segments)))
 		binary.LittleEndian.PutUint16(entry[14:16], uint16(len(chunkID)))
 		copy(entry[16:], chunkID)
 
-		// Pad to 4-byte alignment
-		if len(entry)%4 != 0 {
-			entry = append(entry, make([]byte, 4-len(entry)%4)...)
-		}
-		if _, err := f.Write(entry); err != nil {
+		if _, err := writer.Write(entry); err != nil {
 			_ = f.Close()
 			return err
 		}
@@ -565,30 +564,44 @@ func (s *MMapSegmentStore) commitWriteLocked() error {
 	}
 
 	// Write segment data
+	var int8Data []byte
 	for _, chunkID := range chunkIDs {
 		segments := s.writeBuffer.chunks[chunkID]
 		for _, seg := range segments {
-			segData := make([]byte, segSize)
+			var data []byte
 			switch codec {
 			case ColBERTCodecPQ6:
-				copy(segData, seg.PQCodes)
+				data = seg.PQCodes
 			case ColBERTCodecTQMSE:
-				copy(segData, seg.TQCodes)
+				data = seg.TQCodes
 			default:
-				for j, v := range seg.EmbeddingInt8 {
-					segData[j] = byte(v)
+				if cap(int8Data) < segSize {
+					int8Data = make([]byte, segSize)
+				} else {
+					int8Data = int8Data[:segSize]
 				}
-				copy(segData[s.dims:s.dims+4], float32tobytes(seg.QuantScale))
-				copy(segData[s.dims+4:s.dims+8], float32tobytes(seg.QuantMin))
+				clear(int8Data)
+				for j, v := range seg.EmbeddingInt8 {
+					int8Data[j] = byte(v)
+				}
+				binary.LittleEndian.PutUint32(int8Data[s.dims:s.dims+4], *(*uint32)(unsafe.Pointer(&seg.QuantScale)))
+				binary.LittleEndian.PutUint32(int8Data[s.dims+4:s.dims+8], *(*uint32)(unsafe.Pointer(&seg.QuantMin)))
+				data = int8Data
 			}
-			if _, err := f.Write(segData); err != nil {
+			if _, err := writer.Write(data); err != nil {
 				_ = f.Close()
 				return err
 			}
 		}
 	}
 
-	_ = f.Close()
+	if err := writer.Flush(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
 	s.writeBuffer = nil
 	s.codec = codec
 

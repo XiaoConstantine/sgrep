@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -622,5 +623,56 @@ func BenchmarkMMapSegmentStore_Read(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		chunkID := "chunk" + string(rune('0'+(i%100)/10)) + string(rune('0'+(i%100)%10))
 		_, _ = store.GetColBERTSegments(ctx, chunkID)
+	}
+}
+
+func BenchmarkMMapSegmentStore_CommitTQMSE14K(b *testing.B) {
+	const (
+		dims             = 768
+		chunkCount       = 14126
+		segmentsPerChunk = 4
+	)
+
+	tq, err := util.NewTQMSEQuantizer(util.TQMSEConfig{
+		Dims: dims,
+		Bits: 4,
+		Seed: 42,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	code, err := tq.Encode(util.NormalizeVector(make([]float32, dims)))
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	chunks := make(map[string][]ColBERTSegment, chunkCount)
+	for i := range chunkCount {
+		segments := make([]ColBERTSegment, segmentsPerChunk)
+		for j := range segments {
+			segments[j] = ColBERTSegment{SegmentIdx: j, TQCodes: code.Codes}
+		}
+		chunks[fmt.Sprintf("file-%05d.go:chunk_1", i)] = segments
+	}
+
+	store, err := OpenMMapSegmentStore(b.TempDir(), dims)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = store.Close() })
+	store.SetColBERTCodec(ColBERTCodecTQMSE, nil, tq)
+	b.ReportAllocs()
+	b.SetBytes(int64(chunkCount * segmentsPerChunk * tq.CodeSize()))
+
+	for b.Loop() {
+		b.StopTimer()
+		store.BeginWrite()
+		for chunkID, segments := range chunks {
+			store.WriteSegments(chunkID, segments)
+		}
+		b.StartTimer()
+		if err := store.CommitWrite(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
