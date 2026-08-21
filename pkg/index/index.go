@@ -13,6 +13,7 @@ import (
 	pathpkg "path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -2323,10 +2324,14 @@ func (idx *Indexer) ExportColBERTToMMap(ctx context.Context, outputDir string) (
 	mmapStore.BeginWrite()
 	totalSegments := 0
 	exportedChunks := 0
+	var exportTQEncoder *util.TQMSEEncoder
+	if exportCodec == store.ColBERTCodecTQMSE && exportTQ != nil {
+		exportTQEncoder = exportTQ.NewEncoder()
+	}
 	exportChunk := func(chunkID string, chunkSegments []store.ColBERTSegment) error {
 		// Write segments to MMap in the artifact codec. SQLite stores may be
 		// mixed after an upgrade or partial refresh.
-		encodedSegments, err := convertColBERTSegmentsForCodecStrict(chunkID, chunkSegments, exportCodec, exportPQ, exportTQ)
+		encodedSegments, err := convertColBERTSegmentsForCodecWithFallback(chunkID, chunkSegments, exportCodec, exportPQ, exportTQ, false, exportTQEncoder)
 		if err != nil {
 			return fmt.Errorf("failed to encode chunk %s for MMap export: %w", chunkID, err)
 		}
@@ -2508,11 +2513,65 @@ func (idx *Indexer) buildColBERTChunkSegments(ctx context.Context, chunks []stor
 		return nil, err
 	}
 
+	if idx.colbertCodec == store.ColBERTCodecTQMSE && idx.colbertTQMSE != nil {
+		return encodeTQMSEChunkBatch(floatSegments, idx.colbertTQMSE, runtime.GOMAXPROCS(0)), nil
+	}
+
 	chunkSegments := make(map[string][]store.ColBERTSegment, len(floatSegments))
 	for chunkID, segments := range floatSegments {
 		chunkSegments[chunkID] = convertColBERTSegmentsForCodec(chunkID, segments, idx.colbertCodec, idx.colbertPQ, idx.colbertTQMSE)
 	}
 	return chunkSegments, nil
+}
+
+func encodeTQMSEChunkBatch(chunks map[string][]store.ColBERTSegment, tq *util.TQMSEQuantizer, workers int) map[string][]store.ColBERTSegment {
+	type job struct {
+		chunkID  string
+		segments []store.ColBERTSegment
+	}
+	type result struct {
+		chunkID  string
+		segments []store.ColBERTSegment
+	}
+
+	workers = min(max(workers, 1), len(chunks))
+	if workers == 0 {
+		return map[string][]store.ColBERTSegment{}
+	}
+	encoded := make(map[string][]store.ColBERTSegment, len(chunks))
+	if workers == 1 {
+		encoder := tq.NewEncoder()
+		for chunkID, segments := range chunks {
+			converted, _ := convertColBERTSegmentsForCodecWithFallback(chunkID, segments, store.ColBERTCodecTQMSE, nil, tq, true, encoder)
+			encoded[chunkID] = converted
+		}
+		return encoded
+	}
+
+	jobs := make(chan job, len(chunks))
+	results := make(chan result, len(chunks))
+	for chunkID, segments := range chunks {
+		jobs <- job{chunkID: chunkID, segments: segments}
+	}
+	close(jobs)
+
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			encoder := tq.NewEncoder()
+			for job := range jobs {
+				segments, _ := convertColBERTSegmentsForCodecWithFallback(job.chunkID, job.segments, store.ColBERTCodecTQMSE, nil, tq, true, encoder)
+				results <- result{chunkID: job.chunkID, segments: segments}
+			}
+		})
+	}
+	wg.Wait()
+	close(results)
+
+	for result := range results {
+		encoded[result.chunkID] = result.segments
+	}
+	return encoded
 }
 
 func (idx *Indexer) buildFloat32ColBERTChunkSegments(ctx context.Context, chunks []store.ChunkInfo) (map[string][]store.ColBERTSegment, error) {
@@ -2598,15 +2657,15 @@ func buildFloat32ColBERTSegments(segmentTexts []string, embeddings [][]float32, 
 }
 
 func convertColBERTSegmentsForCodec(chunkID string, segments []store.ColBERTSegment, codec store.ColBERTCodec, pq *util.ProductQuantizer, tq *util.TQMSEQuantizer) []store.ColBERTSegment {
-	converted, _ := convertColBERTSegmentsForCodecWithFallback(chunkID, segments, codec, pq, tq, true)
+	converted, _ := convertColBERTSegmentsForCodecWithFallback(chunkID, segments, codec, pq, tq, true, nil)
 	return converted
 }
 
 func convertColBERTSegmentsForCodecStrict(chunkID string, segments []store.ColBERTSegment, codec store.ColBERTCodec, pq *util.ProductQuantizer, tq *util.TQMSEQuantizer) ([]store.ColBERTSegment, error) {
-	return convertColBERTSegmentsForCodecWithFallback(chunkID, segments, codec, pq, tq, false)
+	return convertColBERTSegmentsForCodecWithFallback(chunkID, segments, codec, pq, tq, false, nil)
 }
 
-func convertColBERTSegmentsForCodecWithFallback(chunkID string, segments []store.ColBERTSegment, codec store.ColBERTCodec, pq *util.ProductQuantizer, tq *util.TQMSEQuantizer, allowFallback bool) ([]store.ColBERTSegment, error) {
+func convertColBERTSegmentsForCodecWithFallback(chunkID string, segments []store.ColBERTSegment, codec store.ColBERTCodec, pq *util.ProductQuantizer, tq *util.TQMSEQuantizer, allowFallback bool, tqEncoder *util.TQMSEEncoder) ([]store.ColBERTSegment, error) {
 	if codec == store.ColBERTCodecPQ6 && pq != nil {
 		encoded, err := encodeSegmentsToPQ(chunkID, segments, pq)
 		if err != nil {
@@ -2619,7 +2678,7 @@ func convertColBERTSegmentsForCodecWithFallback(chunkID string, segments []store
 		}
 	}
 	if codec == store.ColBERTCodecTQMSE && tq != nil {
-		encoded, err := encodeSegmentsToTQMSE(chunkID, segments, tq)
+		encoded, err := encodeSegmentsToTQMSEWithEncoder(chunkID, segments, tq, tqEncoder)
 		if err != nil {
 			if !allowFallback {
 				return nil, err
@@ -2643,11 +2702,14 @@ func convertColBERTSegmentsForCodecWithFallback(chunkID string, segments []store
 }
 
 func encodeSegmentsToTQMSE(chunkID string, segments []store.ColBERTSegment, tq *util.TQMSEQuantizer) ([]store.ColBERTSegment, error) {
+	return encodeSegmentsToTQMSEWithEncoder(chunkID, segments, tq, nil)
+}
+
+func encodeSegmentsToTQMSEWithEncoder(chunkID string, segments []store.ColBERTSegment, tq *util.TQMSEQuantizer, encoder *util.TQMSEEncoder) ([]store.ColBERTSegment, error) {
 	if tq == nil {
 		return nil, fmt.Errorf("nil tqmse quantizer")
 	}
 	encoded := make([]store.ColBERTSegment, len(segments))
-	encoder := tq.NewEncoder()
 	codeSize := tq.CodeSize()
 	for i, seg := range segments {
 		if len(seg.TQCodes) == codeSize {
@@ -2669,14 +2731,17 @@ func encodeSegmentsToTQMSE(chunkID string, segments []store.ColBERTSegment, tq *
 			}
 			return nil, fmt.Errorf("segment %d in chunk %s is missing an encodable embedding", seg.SegmentIdx, chunkID)
 		}
-		code, err := encoder.Encode(emb)
+		if encoder == nil {
+			encoder = tq.NewEncoder()
+		}
+		code, err := encoder.EncodeInto(util.TQMSECode{Codes: make([]byte, codeSize)}, emb)
 		if err != nil {
 			return nil, err
 		}
 		encoded[i] = store.ColBERTSegment{
 			SegmentIdx: seg.SegmentIdx,
 			Text:       seg.Text,
-			TQCodes:    append([]byte(nil), code.Codes...),
+			TQCodes:    code.Codes,
 		}
 	}
 	return encoded, nil

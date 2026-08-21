@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -1059,6 +1060,38 @@ func TestEncodeSegmentsToTQMSE_PreservesStoredCodes(t *testing.T) {
 	}
 }
 
+func TestEncodeTQMSEChunkBatchMatchesSequential(t *testing.T) {
+	tq, err := util.NewTQMSEQuantizer(util.TQMSEConfig{Dims: 4, Bits: 4, Seed: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunks := map[string][]store.ColBERTSegment{
+		"chunk-a": {{SegmentIdx: 0, Text: "a", Embedding: util.NormalizeVectorCopy([]float32{1, 2, 3, 4})}},
+		"chunk-b": {{SegmentIdx: 0, Text: "b", Embedding: util.NormalizeVectorCopy([]float32{4, 3, 2, 1})}},
+	}
+	expected := make(map[string][]store.ColBERTSegment, len(chunks))
+	for chunkID, segments := range chunks {
+		expected[chunkID], err = encodeSegmentsToTQMSE(chunkID, segments, tq)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := encodeTQMSEChunkBatch(chunks, tq, 2)
+	for chunkID := range chunks {
+		if len(got[chunkID]) != 1 || !bytes.Equal(got[chunkID][0].TQCodes, expected[chunkID][0].TQCodes) {
+			t.Fatalf("chunk %s code = %v, want %v", chunkID, got[chunkID], expected[chunkID])
+		}
+	}
+	got["chunk-a"][0].TQCodes[0] ^= 0xff
+	if bytes.Equal(got["chunk-a"][0].TQCodes, expected["chunk-a"][0].TQCodes) {
+		t.Fatal("generated code aliases the sequential result")
+	}
+	if !bytes.Equal(got["chunk-b"][0].TQCodes, expected["chunk-b"][0].TQCodes) {
+		t.Fatal("generated codes alias across chunks")
+	}
+}
+
 func TestEncodeSegmentsToPQ_UsesStoredInt8Embeddings(t *testing.T) {
 	pq, err := util.NewProductQuantizer(util.PQConfig{
 		Dims:       4,
@@ -1152,6 +1185,44 @@ func allBytesZero(data []byte) bool {
 		}
 	}
 	return len(data) > 0
+}
+
+func BenchmarkEncodeSegmentsToTQMSE64Chunks(b *testing.B) {
+	const (
+		dims             = 768
+		chunkCount       = 64
+		segmentsPerChunk = 4
+	)
+	tq, err := util.NewTQMSEQuantizer(util.TQMSEConfig{Dims: dims, Bits: 4, Seed: 42})
+	if err != nil {
+		b.Fatal(err)
+	}
+	embedding := make([]float32, dims)
+	for i := range embedding {
+		embedding[i] = float32(i%17) - 8
+	}
+	embedding = util.NormalizeVector(embedding)
+	segments := make([]store.ColBERTSegment, segmentsPerChunk)
+	for i := range segments {
+		segments[i] = store.ColBERTSegment{SegmentIdx: i, Embedding: embedding}
+	}
+	chunks := make(map[string][]store.ColBERTSegment, chunkCount)
+	for i := range chunkCount {
+		chunks[fmt.Sprintf("chunk-%d", i)] = segments
+	}
+
+	for _, workers := range []int{1, runtime.GOMAXPROCS(0)} {
+		b.Run(fmt.Sprintf("workers=%d", workers), func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(chunkCount * segmentsPerChunk * dims * 4)
+			for b.Loop() {
+				encoded := encodeTQMSEChunkBatch(chunks, tq, workers)
+				if len(encoded) != chunkCount {
+					b.Fatalf("encoded %d chunks", len(encoded))
+				}
+			}
+		})
+	}
 }
 
 func TestColBERTPQScratchRoundTrip(t *testing.T) {
