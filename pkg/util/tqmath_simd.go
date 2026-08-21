@@ -4,30 +4,11 @@ package util
 
 import "simd"
 
-const maxSIMDFloat32Lanes = 64
-
 func dotProductFloat32(a, b []float32) float64 {
-	lanes := simd.VectorBitSize() / 32
-	if len(a) < 32 || simd.Emulated() || lanes <= 0 || lanes > maxSIMDFloat32Lanes {
-		return dotProductUnrolled8Scalar(a, b)
-	}
-
-	var sums simd.Float32s
-	i := 0
-	for ; i+lanes <= len(a); i += lanes {
-		sums = simd.LoadFloat32s(a[i:]).MulAdd(simd.LoadFloat32s(b[i:]), sums)
-	}
-
-	var partial [maxSIMDFloat32Lanes]float32
-	sums.Store(partial[:lanes])
-	var dot float64
-	for _, value := range partial[:lanes] {
-		dot += float64(value)
-	}
-	for ; i < len(a); i++ {
-		dot += float64(a[i]) * float64(b[i])
-	}
-	return dot
+	// Portable SIMD has no float32-to-float64 widening operation. Accumulating
+	// in Float32s changes score semantics, and MulAdd requires FMA even when Go
+	// 1.27 selects hardware SIMD on an AVX-only CPU. Preserve the scalar result.
+	return dotProductUnrolled8Scalar(a, b)
 }
 
 func mulFloat32Into(dst, a, b []float32) {
@@ -45,18 +26,10 @@ func mulFloat32Into(dst, a, b []float32) {
 }
 
 func scaleFloat32(values []float32, scale float32) {
-	lanes := simd.VectorBitSize() / 32
-	if simd.Emulated() || lanes <= 0 {
-		scaleFloat32Scalar(values, scale)
-		return
-	}
-
-	factor := simd.BroadcastFloat32s(scale)
-	i := 0
-	for ; i+lanes <= len(values); i += lanes {
-		simd.LoadFloat32s(values[i:]).Mul(factor).Store(values[i:])
-	}
-	scaleFloat32Scalar(values[i:], scale)
+	// Go 1.27 lowers BroadcastFloat32s to an AVX2-only register broadcast,
+	// although its 128-bit SIMD dispatcher only guarantees AVX. Keep scaling
+	// scalar so AVX-only hosts cannot reach an unsupported instruction.
+	scaleFloat32Scalar(values, scale)
 }
 
 func fwhtStepFloat32(values []float32, step int) {

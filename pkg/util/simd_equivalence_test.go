@@ -5,51 +5,44 @@ package util
 import (
 	"math"
 	"math/rand"
-	"sort"
+	"strconv"
 	"testing"
 )
 
-func TestSIMDDotProductPreservesTopRanking(t *testing.T) {
-	const (
-		dims = 768
-		docs = 512
-		topK = 50
-		seed = 47
-	)
-	rng := rand.New(rand.NewSource(seed))
+func TestSIMDBuildDotProductMatchesScalar(t *testing.T) {
+	const dims = 768
+
+	huge := make([]float32, 32)
+	for i := range huge {
+		huge[i] = 1e20
+	}
+	assertDotMatchesScalar(t, "large finite products", huge, huge)
+
+	uniform := make([]float32, dims)
+	value := float32(1 / math.Sqrt(dims))
+	for i := range uniform {
+		uniform[i] = value
+	}
+	assertDotMatchesScalar(t, "uniform normalized vector", uniform, uniform)
+
+	rng := rand.New(rand.NewSource(47))
 	query := randomNormalizedVector(rng, dims)
-
-	type scoredIndex struct {
-		index int
-		score float64
-	}
-	simdRanking := make([]scoredIndex, docs)
-	scalarRanking := make([]scoredIndex, docs)
-	for i := range docs {
+	for i := range 512 {
 		doc := randomNormalizedVector(rng, dims)
-		simdScore := dotProductFloat32(query, doc)
-		scalarScore := dotProductUnrolled8Scalar(query, doc)
-		if diff := math.Abs(simdScore - scalarScore); diff > 1e-6 {
-			t.Fatalf("document %d score differs by %g: SIMD %.12f scalar %.12f", i, diff, simdScore, scalarScore)
-		}
-		simdRanking[i] = scoredIndex{index: i, score: simdScore}
-		scalarRanking[i] = scoredIndex{index: i, score: scalarScore}
+		assertDotMatchesScalar(t, "random normalized document "+strconv.Itoa(i), query, doc)
 	}
 
-	less := func(ranking []scoredIndex) func(int, int) bool {
-		return func(i, j int) bool {
-			if ranking[i].score == ranking[j].score {
-				return ranking[i].index < ranking[j].index
-			}
-			return ranking[i].score > ranking[j].score
-		}
-	}
-	sort.Slice(simdRanking, less(simdRanking))
-	sort.Slice(scalarRanking, less(scalarRanking))
-	for rank := range topK {
-		if simdRanking[rank].index != scalarRanking[rank].index {
-			t.Fatalf("rank %d differs: SIMD document %d, scalar document %d", rank, simdRanking[rank].index, scalarRanking[rank].index)
-		}
+	tailQuery := randomNormalizedVector(rng, dims+1)
+	tailDoc := randomNormalizedVector(rng, dims+1)
+	assertDotMatchesScalar(t, "vector tail", tailQuery, tailDoc)
+}
+
+func assertDotMatchesScalar(t *testing.T, name string, a, b []float32) {
+	t.Helper()
+	got := DotProductUnrolled8(a, b)
+	want := dotProductUnrolled8Scalar(a, b)
+	if math.Float64bits(got) != math.Float64bits(want) {
+		t.Fatalf("%s: DotProductUnrolled8 = %.12g, scalar = %.12g", name, got, want)
 	}
 }
 
