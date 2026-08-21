@@ -31,6 +31,9 @@ cd sgrep
 go build -o sgrep ./cmd/sgrep
 ```
 
+Source builds require Go 1.27 or later. Go 1.27-built macOS binaries require
+macOS 13 Ventura or later.
+
 The optional sqlite-vec backend is selected at build time:
 
 ```bash
