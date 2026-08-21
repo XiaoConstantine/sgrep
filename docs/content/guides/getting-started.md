@@ -34,8 +34,12 @@ go build -o sgrep ./cmd/sgrep
 Source builds require Go 1.27 or later. Prebuilt Intel macOS binaries support
 macOS 13 Ventura or later; Apple Silicon binaries require macOS 15.5 or later.
 
-Go 1.27's experimental portable SIMD kernels can be enabled for source builds
-on non-ARM64 systems. ARM64 builds continue to use the faster NEON assembly:
+Prebuilt x86_64 releases installed by Homebrew or the install script include
+Go 1.27's experimental portable SIMD TQ rotation kernels. ARM64 releases use
+NEON assembly, and neither installation needs runtime configuration. Dense dot
+products retain float64 scalar accumulation for score compatibility.
+
+Enable the same portable SIMD kernels for a non-ARM64 source build with:
 
 ```bash
 GOEXPERIMENT=simd go build -o sgrep ./cmd/sgrep

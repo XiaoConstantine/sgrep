@@ -32,6 +32,10 @@ brew install sgrep
 sgrep setup
 ```
 
+Prebuilt x86_64 releases include Go 1.27's experimental portable SIMD TQ
+rotation kernels; Apple Silicon releases use NEON assembly. No runtime
+configuration is needed.
+
 See the [installation guide](https://xiaocui.me/sgrep/guides/getting-started/)
 for curl, Go, source builds, and sqlite-vec.
 
