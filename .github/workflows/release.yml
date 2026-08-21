@@ -53,16 +53,15 @@ jobs:
     strategy:
       matrix:
         include:
-          # macOS Intel: use sqlite_vec (go-libsql lacks x86_64 prebuilts)
+          # Build sqlite_vec from source so every Darwin object targets macOS 13.
           - runner: macos-15-intel
             arch: amd64
             artifact_arch: x86_64
             tags: "-tags=sqlite_vec"
-          # macOS ARM: use libSQL (default, has prebuilt binaries)
           - runner: macos-latest
             arch: arm64
             artifact_arch: arm64
-            tags: ""
+            tags: "-tags=sqlite_vec"
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -84,6 +83,7 @@ jobs:
         env:
           CGO_ENABLED: 1
           CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
           GOOS: darwin
           GOARCH: ${{ matrix.arch }}
         run: |
