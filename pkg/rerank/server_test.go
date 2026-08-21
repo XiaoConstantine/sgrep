@@ -56,6 +56,46 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+func TestRunnerDisablesAsyncPreemptionOnlyBeforeTargetExec(t *testing.T) {
+	find := func(environment []string, name string) (string, bool) {
+		prefix := name + "="
+		for _, entry := range environment {
+			if strings.HasPrefix(entry, prefix) {
+				return strings.TrimPrefix(entry, prefix), true
+			}
+		}
+		return "", false
+	}
+	tests := []struct {
+		name         string
+		environment  []string
+		wantDebug    string
+		wantDebugSet bool
+	}{
+		{name: "unset"},
+		{name: "empty", environment: []string{"GODEBUG="}, wantDebugSet: true},
+		{name: "preserved", environment: []string{"GODEBUG=cgocheck=0,asyncpreemptoff=0"}, wantDebug: "cgocheck=0,asyncpreemptoff=0", wantDebugSet: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := environmentForRunner(test.environment, "test-instance")
+			runnerDebug, ok := find(runner, "GODEBUG")
+			if !ok || !strings.HasSuffix(runnerDebug, "asyncpreemptoff=1") {
+				t.Fatalf("runner GODEBUG = %q, %v; want asyncpreemptoff=1", runnerDebug, ok)
+			}
+
+			target := environmentForConstrainedReranker(runner)
+			targetDebug, ok := find(target, "GODEBUG")
+			if targetDebug != test.wantDebug || ok != test.wantDebugSet {
+				t.Fatalf("target GODEBUG = %q, %v; want %q, %v", targetDebug, ok, test.wantDebug, test.wantDebugSet)
+			}
+			if _, ok := find(target, supervisorRunnerDebugEnv); ok {
+				t.Fatal("target retained private runner GODEBUG state")
+			}
+		})
+	}
+}
+
 func TestRerankerManagerStopRefusesUnownedLivePID(t *testing.T) {
 	dir := t.TempDir()
 	pid := os.Getpid()
@@ -120,7 +160,8 @@ func TestRerankerManagerStartWorksForEmbeddedHost(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = mgr.Stop() })
 	if err := mgr.Start(); err != nil {
-		t.Fatal(err)
+		log, _ := os.ReadFile(filepath.Join(home, "reranker.log"))
+		t.Fatalf("%v\nreranker log:\n%s", err, log)
 	}
 	state, err := mgr.readPIDState()
 	if err != nil {

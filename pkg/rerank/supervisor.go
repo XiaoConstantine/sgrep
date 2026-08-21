@@ -37,6 +37,7 @@ const (
 	supervisorHomeEnv         = "SGREP_RERANKER_SUPERVISOR_HOME"
 	supervisorPortEnv         = "SGREP_RERANKER_SUPERVISOR_PORT"
 	supervisorLifecycleEnv    = "SGREP_RERANKER_SUPERVISOR_LIFECYCLE_LOCK"
+	supervisorRunnerDebugEnv  = "SGREP_RERANKER_SUPERVISOR_RUNNER_GODEBUG"
 	supervisorProtocolVersion = 1
 	guardianCleanShutdown     = byte(0x73)
 	guardianReady             = byte(0x61)
@@ -320,7 +321,7 @@ func runConstrainedReranker(args []string) error {
 	if command[0] != runnerContinue {
 		return fmt.Errorf("invalid constrained reranker authorization")
 	}
-	environment := withoutSupervisorEnvironment(os.Environ())
+	environment := environmentForConstrainedReranker(os.Environ())
 	if err := syscall.Exec(executable, commandArgs, environment); err != nil {
 		return fmt.Errorf("exec constrained reranker: %w", err)
 	}
@@ -1318,10 +1319,50 @@ func environmentForGuardian(environment []string) []string {
 
 func environmentForRunner(environment []string, instance string) []string {
 	result := environmentForReranker(environment, instance)
+	filtered := result[:0]
+	runnerDebug := "asyncpreemptoff=1"
+	for _, entry := range result {
+		if strings.HasPrefix(entry, "GODEBUG=") {
+			original := strings.TrimPrefix(entry, "GODEBUG=")
+			filtered = append(filtered, supervisorRunnerDebugEnv+"="+original)
+			if original != "" {
+				runnerDebug = original + "," + runnerDebug
+			}
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	// Darwin's PT_TRACE_ME can delay an asynchronous preemption signal forever,
+	// deadlocking runtime_BeforeExec. The setting is removed before the target
+	// exec, so it applies only to the short-lived Go runner.
+	result = append(filtered, "GODEBUG="+runnerDebug)
 	return append(result,
 		supervisorModeEnv+"=1",
 		supervisorProtocolEnv+"="+strconv.Itoa(supervisorProtocolVersion),
 	)
+}
+
+func environmentForConstrainedReranker(environment []string) []string {
+	var originalDebug string
+	var restoreDebug bool
+	debugPrefix := supervisorRunnerDebugEnv + "="
+	for _, entry := range environment {
+		if strings.HasPrefix(entry, debugPrefix) {
+			originalDebug = strings.TrimPrefix(entry, debugPrefix)
+			restoreDebug = true
+		}
+	}
+	result := withoutSupervisorEnvironment(environment)
+	filtered := result[:0]
+	for _, entry := range result {
+		if !strings.HasPrefix(entry, "GODEBUG=") {
+			filtered = append(filtered, entry)
+		}
+	}
+	if restoreDebug {
+		filtered = append(filtered, "GODEBUG="+originalDebug)
+	}
+	return filtered
 }
 
 func environmentForReranker(environment []string, instance string) []string {
