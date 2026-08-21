@@ -181,6 +181,12 @@ type ColBERTSegmentStorer interface {
 	GetChunksForColBERT(ctx context.Context, batchSize int, offset int) ([]ChunkInfo, error)
 }
 
+// ColBERTSegmentExporter streams complete chunks without loading source text.
+// Implementations must call export with segments grouped by chunk ID.
+type ColBERTSegmentExporter interface {
+	ExportColBERTSegments(ctx context.Context, export func(chunkID string, segments []ColBERTSegment) error) error
+}
+
 // ColBERTSegment represents a pre-computed segment embedding for ColBERT scoring.
 // Supports float32 staging plus compact persisted codecs for query-time scoring.
 type ColBERTSegment struct {

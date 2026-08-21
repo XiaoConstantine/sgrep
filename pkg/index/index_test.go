@@ -156,6 +156,23 @@ func (s *exportColBERTTestStore) TQMSEQuantizer() *util.TQMSEQuantizer {
 	return s.tq
 }
 
+type streamingExportColBERTTestStore struct {
+	*exportColBERTTestStore
+	exportCalls int
+}
+
+func (s *streamingExportColBERTTestStore) ExportColBERTSegments(_ context.Context, export func(string, []store.ColBERTSegment) error) error {
+	s.exportCalls++
+	for _, chunk := range s.chunks {
+		if segments := s.segments[chunk.ID]; len(segments) > 0 {
+			if err := export(chunk.ID, segments); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 type tqExportTestStore struct {
 	ids          []string
 	vectors      [][]float32
@@ -962,8 +979,8 @@ func TestExportColBERTToMMap_ReencodesLegacyInt8SegmentsToTQMSE(t *testing.T) {
 		t.Fatal("test fixture produced an all-zero TQ-MSE code")
 	}
 
-	idx := &Indexer{
-		store: &exportColBERTTestStore{
+	source := &streamingExportColBERTTestStore{
+		exportColBERTTestStore: &exportColBERTTestStore{
 			chunks: []store.ChunkInfo{{ID: "chunk-old"}},
 			segments: map[string][]store.ColBERTSegment{
 				"chunk-old": legacySegments,
@@ -972,6 +989,7 @@ func TestExportColBERTToMMap_ReencodesLegacyInt8SegmentsToTQMSE(t *testing.T) {
 			tq:    tq,
 		},
 	}
+	idx := &Indexer{store: source}
 
 	outputDir := t.TempDir()
 	total, err := idx.ExportColBERTToMMap(ctx, outputDir)
@@ -980,6 +998,9 @@ func TestExportColBERTToMMap_ReencodesLegacyInt8SegmentsToTQMSE(t *testing.T) {
 	}
 	if total != 1 {
 		t.Fatalf("expected 1 exported segment, got %d", total)
+	}
+	if source.exportCalls != 1 {
+		t.Fatalf("expected compact streaming export, got %d calls", source.exportCalls)
 	}
 
 	mmapStore, err := store.OpenMMapSegmentStore(outputDir, 4)

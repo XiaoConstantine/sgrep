@@ -864,6 +864,49 @@ func TestLibSQLStore_ColBERTTQMSEMetadataAndSegments(t *testing.T) {
 	}
 }
 
+func TestLibSQLStore_ExportColBERTSegmentsStreamsCompactOrderedChunks(t *testing.T) {
+	s, err := OpenLibSQL(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	ctx := context.Background()
+	if err := s.StoreColBERTSegmentsBatch(ctx, map[string][]ColBERTSegment{
+		"chunk-b": {
+			{SegmentIdx: 1, Text: "not exported", EmbeddingInt8: []int8{2, 3}, QuantScale: 0.5, QuantMin: -1},
+			{SegmentIdx: 0, Text: "not exported", EmbeddingInt8: []int8{0, 1}, QuantScale: 0.25, QuantMin: 0},
+		},
+		"chunk-a": {{SegmentIdx: 0, Text: "not exported", PQCodes: []byte{4, 5}}},
+		"chunk-c": {{SegmentIdx: 0, Text: "not exported", TQCodes: []byte{6, 7}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var chunkIDs []string
+	var exported [][]ColBERTSegment
+	err = s.ExportColBERTSegments(ctx, func(chunkID string, segments []ColBERTSegment) error {
+		chunkIDs = append(chunkIDs, chunkID)
+		exported = append(exported, segments)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunkIDs) != 3 || chunkIDs[0] != "chunk-a" || chunkIDs[1] != "chunk-b" || chunkIDs[2] != "chunk-c" {
+		t.Fatalf("chunk order = %v", chunkIDs)
+	}
+	if len(exported[1]) != 2 || exported[1][0].SegmentIdx != 0 || exported[1][1].SegmentIdx != 1 {
+		t.Fatalf("segment order = %+v", exported[1])
+	}
+	if exported[1][0].Text != "" || exported[1][0].QuantMin != 0 || exported[1][1].QuantMin != -1 {
+		t.Fatalf("int8 export = %+v", exported[1])
+	}
+	if len(exported[0][0].PQCodes) != 2 || len(exported[2][0].TQCodes) != 2 {
+		t.Fatalf("compact codecs not exported: pq=%v tq=%v", exported[0][0].PQCodes, exported[2][0].TQCodes)
+	}
+}
+
 func TestLibSQLStore_ColBERTInt8ZeroQuantMinRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
@@ -1107,5 +1150,67 @@ func BenchmarkLibSQLStore_DiskSize(b *testing.B) {
 
 		b.Logf("LibSQL: %d vectors in %d bytes (%.2f KB/vector)",
 			1000, info.Size(), float64(info.Size())/1000.0/1024.0)
+	}
+}
+
+func BenchmarkLibSQLStore_ExportColBERTSegments14K(b *testing.B) {
+	const (
+		chunkCount       = 14126
+		segmentsPerChunk = 4
+	)
+
+	s, err := OpenLibSQL(filepath.Join(b.TempDir(), "test.db"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = s.Close() })
+
+	ctx := context.Background()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	docStmt, err := tx.PrepareContext(ctx, `INSERT INTO documents (id, filepath, content, start_line, end_line, metadata, is_test) VALUES (?, ?, ?, 1, 1, '{}', 0)`)
+	if err != nil {
+		b.Fatal(err)
+	}
+	segmentStmt, err := tx.PrepareContext(ctx, `INSERT INTO colbert_segments (chunk_id, segment_idx, segment_text, tq_codes) VALUES (?, ?, '', ?)`)
+	if err != nil {
+		b.Fatal(err)
+	}
+	content := string(make([]byte, 1024))
+	code := make([]byte, 384)
+	for i := range chunkCount {
+		chunkID := "file.go:chunk_" + itoa(i)
+		if _, err := docStmt.ExecContext(ctx, chunkID, "file.go", content); err != nil {
+			b.Fatal(err)
+		}
+		for j := range segmentsPerChunk {
+			if _, err := segmentStmt.ExecContext(ctx, chunkID, j, code); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+	_ = docStmt.Close()
+	_ = segmentStmt.Close()
+	if err := tx.Commit(); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ReportAllocs()
+	b.SetBytes(chunkCount * segmentsPerChunk * int64(len(code)))
+	b.ResetTimer()
+	for b.Loop() {
+		totalSegments := 0
+		err := s.ExportColBERTSegments(ctx, func(_ string, segments []ColBERTSegment) error {
+			totalSegments += len(segments)
+			return nil
+		})
+		if err != nil {
+			b.Fatal(err)
+		}
+		if totalSegments != chunkCount*segmentsPerChunk {
+			b.Fatalf("exported %d segments, want %d", totalSegments, chunkCount*segmentsPerChunk)
+		}
 	}
 }

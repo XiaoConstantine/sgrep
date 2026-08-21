@@ -2323,59 +2323,59 @@ func (idx *Indexer) ExportColBERTToMMap(ctx context.Context, outputDir string) (
 	mmapStore.BeginWrite()
 	totalSegments := 0
 	exportedChunks := 0
-
-	// Use paginated chunk retrieval to avoid zero-vector search issues with large repos
-	const fetchBatchSize = 1000
-	const segmentBatchSize = 100
-	offset := 0
-
-	for {
-		// Fetch a batch of chunk IDs
-		chunks, err := segmentStore.GetChunksForColBERT(ctx, fetchBatchSize, offset)
+	exportChunk := func(chunkID string, chunkSegments []store.ColBERTSegment) error {
+		// Write segments to MMap in the artifact codec. SQLite stores may be
+		// mixed after an upgrade or partial refresh.
+		encodedSegments, err := convertColBERTSegmentsForCodecStrict(chunkID, chunkSegments, exportCodec, exportPQ, exportTQ)
 		if err != nil {
-			return 0, fmt.Errorf("failed to fetch chunks at offset %d: %w", offset, err)
+			return fmt.Errorf("failed to encode chunk %s for MMap export: %w", chunkID, err)
 		}
-
-		if len(chunks) == 0 {
-			break
+		if len(encodedSegments) == 0 {
+			return fmt.Errorf("chunk %s has no ColBERT segments during MMap export", chunkID)
 		}
+		mmapStore.WriteSegments(chunkID, encodedSegments)
+		exportedChunks++
+		totalSegments += len(encodedSegments)
+		return nil
+	}
 
-		// Process chunks in smaller batches for segment retrieval
-		for i := 0; i < len(chunks); i += segmentBatchSize {
-			end := i + segmentBatchSize
-			if end > len(chunks) {
-				end = len(chunks)
-			}
-
-			batchChunks := chunks[i:end]
-			chunkIDs := make([]string, len(batchChunks))
-			for j, chunk := range batchChunks {
-				chunkIDs[j] = chunk.ID
-			}
-
-			// Load segments for this batch
-			segments, err := segmentStore.GetColBERTSegmentsBatch(ctx, chunkIDs)
+	if exporter, ok := segmentStore.(store.ColBERTSegmentExporter); ok {
+		if err := exporter.ExportColBERTSegments(ctx, exportChunk); err != nil {
+			return 0, fmt.Errorf("failed to stream ColBERT segments: %w", err)
+		}
+	} else {
+		// Generic stores retain the paginated export path.
+		const fetchBatchSize = 1000
+		const segmentBatchSize = 100
+		offset := 0
+		for {
+			chunks, err := segmentStore.GetChunksForColBERT(ctx, fetchBatchSize, offset)
 			if err != nil {
-				return 0, fmt.Errorf("failed to load segments: %w", err)
+				return 0, fmt.Errorf("failed to fetch chunks at offset %d: %w", offset, err)
+			}
+			if len(chunks) == 0 {
+				break
 			}
 
-			// Write segments to MMap in the artifact codec. SQLite stores may be
-			// mixed after an upgrade or partial refresh.
-			for chunkID, chunkSegments := range segments {
-				encodedSegments, err := convertColBERTSegmentsForCodecStrict(chunkID, chunkSegments, exportCodec, exportPQ, exportTQ)
+			for i := 0; i < len(chunks); i += segmentBatchSize {
+				end := min(i+segmentBatchSize, len(chunks))
+				batchChunks := chunks[i:end]
+				chunkIDs := make([]string, len(batchChunks))
+				for j, chunk := range batchChunks {
+					chunkIDs[j] = chunk.ID
+				}
+				segments, err := segmentStore.GetColBERTSegmentsBatch(ctx, chunkIDs)
 				if err != nil {
-					return 0, fmt.Errorf("failed to encode chunk %s for MMap export: %w", chunkID, err)
+					return 0, fmt.Errorf("failed to load segments: %w", err)
 				}
-				if len(encodedSegments) == 0 {
-					return 0, fmt.Errorf("chunk %s has no ColBERT segments during MMap export", chunkID)
+				for chunkID, chunkSegments := range segments {
+					if err := exportChunk(chunkID, chunkSegments); err != nil {
+						return 0, err
+					}
 				}
-				mmapStore.WriteSegments(chunkID, encodedSegments)
-				exportedChunks++
-				totalSegments += len(encodedSegments)
 			}
+			offset += len(chunks)
 		}
-
-		offset += len(chunks)
 	}
 
 	stats, err := idx.store.Stats(ctx)

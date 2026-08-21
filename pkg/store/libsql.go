@@ -1787,6 +1787,57 @@ func (s *LibSQLStore) GetColBERTSegmentsBatch(ctx context.Context, chunkIDs []st
 	return result, rows.Err()
 }
 
+// ExportColBERTSegments streams compact segment rows grouped by chunk ID.
+func (s *LibSQLStore) ExportColBERTSegments(ctx context.Context, export func(chunkID string, segments []ColBERTSegment) error) error {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT chunk_id, segment_idx, embedding, quant_scale, quant_min, pq_codes, tq_codes
+		FROM colbert_segments
+		ORDER BY chunk_id, segment_idx
+	`)
+	if err != nil {
+		return fmt.Errorf("query ColBERT export rows: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var chunkID string
+	var segments []ColBERTSegment
+	for rows.Next() {
+		var rowChunkID string
+		var seg ColBERTSegment
+		var embBytes, pqCodes, tqCodes []byte
+		var scale, min sql.NullFloat64
+		if err := rows.Scan(&rowChunkID, &seg.SegmentIdx, &embBytes, &scale, &min, &pqCodes, &tqCodes); err != nil {
+			return fmt.Errorf("scan ColBERT export row: %w", err)
+		}
+		if len(segments) > 0 && rowChunkID != chunkID {
+			if err := export(chunkID, segments); err != nil {
+				return err
+			}
+			segments = nil
+		}
+		chunkID = rowChunkID
+		if scale.Valid {
+			seg.QuantScale = float32(scale.Float64)
+		}
+		if min.Valid {
+			seg.QuantMin = float32(min.Float64)
+		}
+		seg.EmbeddingInt8 = bytesToInt8Slice(embBytes)
+		seg.PQCodes = pqCodes
+		seg.TQCodes = tqCodes
+		segments = append(segments, seg)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate ColBERT export rows: %w", err)
+	}
+	if len(segments) > 0 {
+		if err := export(chunkID, segments); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // DeleteColBERTSegments removes segment embeddings for a chunk.
 func (s *LibSQLStore) DeleteColBERTSegments(ctx context.Context, chunkID string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM colbert_segments WHERE chunk_id = ?`, chunkID)
