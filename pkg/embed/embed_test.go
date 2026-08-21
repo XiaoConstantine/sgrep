@@ -472,6 +472,54 @@ func BenchmarkEmbedder_Embed_CacheHit(b *testing.B) {
 	}
 }
 
+func BenchmarkEmbedder_CallLlamaCppBatch(b *testing.B) {
+	const batchSize = 128
+
+	response := make([]llamaCppResponseItem, batchSize)
+	for i := range response {
+		embedding := make([]float32, 768)
+		for j := range embedding {
+			embedding[j] = float32(j) / 768
+		}
+		response[i] = llamaCppResponseItem{
+			Index:     i,
+			Embedding: [][]float32{embedding},
+		}
+	}
+	responseBody, err := json.Marshal(response)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(responseBody)
+	}))
+	b.Cleanup(server.Close)
+
+	e := NewWithConfig(Config{
+		Endpoint:  server.URL,
+		AutoStart: false,
+	})
+	texts := make([]string, batchSize)
+	for i := range texts {
+		texts[i] = "benchmark text"
+	}
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(responseBody)))
+	b.ResetTimer()
+	for b.Loop() {
+		results, err := e.callLlamaCppBatch(context.Background(), texts)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(results) != batchSize {
+			b.Fatalf("got %d results, want %d", len(results), batchSize)
+		}
+	}
+}
+
 func BenchmarkCache_Set(b *testing.B) {
 	c := NewCache(10000)
 	vec := make([]float32, 768)

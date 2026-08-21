@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"fmt"
 	"io"
 	"net"
@@ -301,14 +302,9 @@ func (e *Embedder) callLlamaCppBatch(ctx context.Context, texts []string) ([][]f
 		return nil, fmt.Errorf("llama.cpp returned status %d: %s", resp.StatusCode, string(body))
 	}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
 	// Parse batch response - array of embedding results
 	var batchResult []llamaCppResponseItem
-	if err := json.Unmarshal(body, &batchResult); err != nil {
+	if err := jsonv2.UnmarshalRead(resp.Body, &batchResult); err != nil {
 		return nil, fmt.Errorf("failed to parse batch response: %w", err)
 	}
 
