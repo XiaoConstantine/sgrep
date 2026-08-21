@@ -3,7 +3,9 @@ package store
 import (
 	"container/heap"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -45,6 +47,17 @@ type TQVectorStore struct {
 	quantizer *util.TQMSEQuantizer
 	ids       []string
 	idToIndex map[string]int
+}
+
+// ContentSHA256 identifies the exact mapped sidecar bytes.
+func (s *TQVectorStore) ContentSHA256() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	sum := sha256.Sum256(s.data)
+	return hex.EncodeToString(sum[:])
 }
 
 // TQVectorBuildOptions configures TQVectorStore export.

@@ -2,7 +2,9 @@ package conv
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -29,6 +31,7 @@ const (
 	convTQVectorGenerationKey        = "tq_vector_generation"
 	convTQVectorSidecarGenerationKey = "tq_vector_sidecar_generation"
 	convTQVectorSidecarCountKey      = "tq_vector_sidecar_count"
+	convTQVectorSidecarSHA256Key     = "tq_vector_sidecar_sha256"
 	convEmbeddingFormatVersionKey    = "embedding_format_version"
 	convEmbeddingContextTokensKey    = "embedding_context_tokens"
 )
@@ -39,17 +42,22 @@ type Store struct {
 	dbPath string
 	dims   int
 
-	tqPath string
-	tqMu   sync.RWMutex
-	tq     *storepkg.TQVectorStore
+	tqPath         string
+	tqMu           sync.RWMutex
+	tq             *storepkg.TQVectorStore
+	tqGeneration   int64
+	afterTQPublish func() // test hook after rename and before metadata certification
+	afterTQScore   func() // test hook after TQ scoring and before SQL hydration
 }
 
 type tqVectorMetadata struct {
 	generation           int64
 	sidecarGeneration    int64
 	sidecarCount         int64
+	sidecarSHA256        string
 	hasSidecarGeneration bool
 	hasSidecarCount      bool
+	hasSidecarSHA256     bool
 }
 
 type sqlQuerier interface {
@@ -92,10 +100,9 @@ func NewStore(cfg StoreConfig) (*Store, error) {
 		_ = store.Close()
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
 	}
-	if err := store.loadTQIfAvailable(context.Background()); err != nil {
-		_ = store.Close()
-		return nil, err
-	}
+	// The sidecar is a rebuildable cache. A writable store must remain
+	// available to repair stale or pre-upgrade metadata, even in forced TQ mode.
+	_ = store.loadTQIfAvailable(context.Background())
 
 	return store, nil
 }
@@ -110,10 +117,9 @@ func OpenStore(dbPath string) (*Store, error) {
 		_ = store.Close()
 		return nil, err
 	}
-	if err := store.loadTQIfAvailable(context.Background()); err != nil {
-		_ = store.Close()
-		return nil, err
-	}
+	// As with NewStore, writable opens recover through SQL and can rebuild the
+	// optional sidecar. Read-only/search opens retain strict forced-mode checks.
+	_ = store.loadTQIfAvailable(context.Background())
 	return store, nil
 }
 
@@ -228,6 +234,7 @@ func (s *Store) Close() error {
 	s.tqMu.Lock()
 	tq := s.tq
 	s.tq = nil
+	s.tqGeneration = 0
 	s.tqMu.Unlock()
 
 	var err error
@@ -243,6 +250,27 @@ func (s *Store) Close() error {
 // TQVectorPath returns the compact TQ-MSE sidecar path for turn embeddings.
 func (s *Store) TQVectorPath() string {
 	return s.tqPath
+}
+
+// ConversationGeneration identifies the canonical turn-embedding snapshot.
+func (s *Store) ConversationGeneration(ctx context.Context) (int64, error) {
+	var generation int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM conv_metadata WHERE key = ?), 0)
+	`, convTQVectorGenerationKey).Scan(&generation)
+	return generation, err
+}
+
+// RefreshVectorSnapshot revalidates the optional TQ-MSE sidecar. If indexing
+// changed without rebuilding it yet, subsequent searches safely use SQL vectors.
+func (s *Store) RefreshVectorSnapshot(ctx context.Context) error {
+	s.tqMu.Lock()
+	if err := s.closeTQLocked(); err != nil {
+		s.tqMu.Unlock()
+		return err
+	}
+	s.tqMu.Unlock()
+	return s.loadTQIfAvailable(ctx)
 }
 
 func conversationVectorBackend() string {
@@ -285,8 +313,21 @@ func (s *Store) loadTQIfAvailable(ctx context.Context) error {
 		_ = tq.Close()
 		return err
 	}
+	metadata, err := s.tqVectorMetadata(ctx)
+	if err != nil || !metadata.sidecarClean(tq.VectorCount(), tq.ContentSHA256()) {
+		s.tqMu.Unlock()
+		_ = tq.Close()
+		if backend == "tqmse" && err != nil {
+			return err
+		}
+		if backend == "tqmse" {
+			return fmt.Errorf("conversation TQ-MSE vector store changed while opening")
+		}
+		return nil
+	}
 	old := s.tq
 	s.tq = tq
+	s.tqGeneration = metadata.sidecarGeneration
 	s.tqMu.Unlock()
 	if old != nil {
 		_ = old.Close()
@@ -315,7 +356,7 @@ func (s *Store) validateTQVectorStore(ctx context.Context, tq *storepkg.TQVector
 		}
 		return false, nil
 	}
-	if !metadata.sidecarClean(count) {
+	if !metadata.sidecarClean(count, tq.ContentSHA256()) {
 		if backend == "tqmse" {
 			return false, fmt.Errorf("conversation TQ-MSE vector store is stale; run sgrep conv index")
 		}
@@ -330,11 +371,13 @@ func (s *Store) turnEmbeddingCount(ctx context.Context) (int, error) {
 	return count, err
 }
 
-func (m tqVectorMetadata) sidecarClean(sqlCount int) bool {
+func (m tqVectorMetadata) sidecarClean(sqlCount int, sidecarSHA256 string) bool {
 	return m.hasSidecarGeneration &&
 		m.hasSidecarCount &&
+		m.hasSidecarSHA256 &&
 		m.generation == m.sidecarGeneration &&
-		m.sidecarCount == int64(sqlCount)
+		m.sidecarCount == int64(sqlCount) &&
+		m.sidecarSHA256 == sidecarSHA256
 }
 
 func (s *Store) tqVectorMetadata(ctx context.Context) (tqVectorMetadata, error) {
@@ -345,8 +388,8 @@ func tqVectorMetadataFrom(ctx context.Context, q sqlQuerier) (tqVectorMetadata, 
 	rows, err := q.QueryContext(ctx, `
 		SELECT key, value
 		FROM conv_metadata
-		WHERE key IN (?, ?, ?)
-	`, convTQVectorGenerationKey, convTQVectorSidecarGenerationKey, convTQVectorSidecarCountKey)
+		WHERE key IN (?, ?, ?, ?)
+	`, convTQVectorGenerationKey, convTQVectorSidecarGenerationKey, convTQVectorSidecarCountKey, convTQVectorSidecarSHA256Key)
 	if err != nil {
 		return tqVectorMetadata{}, err
 	}
@@ -357,6 +400,11 @@ func tqVectorMetadataFrom(ctx context.Context, q sqlQuerier) (tqVectorMetadata, 
 		var key, value string
 		if err := rows.Scan(&key, &value); err != nil {
 			return tqVectorMetadata{}, err
+		}
+		if key == convTQVectorSidecarSHA256Key {
+			metadata.sidecarSHA256 = value
+			metadata.hasSidecarSHA256 = true
+			continue
 		}
 		parsed, err := strconv.ParseInt(value, 10, 64)
 		if err != nil {
@@ -394,7 +442,7 @@ func bumpTQVectorGeneration(ctx context.Context, exec sqlExecutor) error {
 	return err
 }
 
-func (s *Store) markTQVectorSidecarClean(ctx context.Context, generation int64, count int) (bool, error) {
+func (s *Store) markTQVectorSidecarClean(ctx context.Context, generation int64, count int, sidecarSHA256 string) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
@@ -425,6 +473,9 @@ func (s *Store) markTQVectorSidecarClean(ctx context.Context, generation int64, 
 	if err := setMetadataValue(ctx, tx, convTQVectorSidecarCountKey, strconv.Itoa(count)); err != nil {
 		return false, err
 	}
+	if err := setMetadataValue(ctx, tx, convTQVectorSidecarSHA256Key, sidecarSHA256); err != nil {
+		return false, err
+	}
 	if err := tx.Commit(); err != nil {
 		return false, err
 	}
@@ -446,6 +497,7 @@ func (s *Store) closeTQLocked() error {
 	}
 	err := s.tq.Close()
 	s.tq = nil
+	s.tqGeneration = 0
 	return err
 }
 
@@ -656,8 +708,13 @@ func (s *Store) dropLegacyVectorIndex() (bool, error) {
 	return true, nil
 }
 
-// StoreSession stores a session and its turns.
+// StoreSession stores a text-only session snapshot. Existing vectors for the
+// session are removed so changed text can never remain paired with stale
+// embeddings. Production indexing uses ReplaceSessionWithEmbeddings instead.
 func (s *Store) StoreSession(ctx context.Context, session *Session) error {
+	s.tqMu.Lock()
+	defer s.tqMu.Unlock()
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -669,57 +726,194 @@ func (s *Store) StoreSession(ctx context.Context, session *Session) error {
 		}
 	}()
 
-	// Insert session
 	_, err = tx.ExecContext(ctx, `
-		INSERT OR REPLACE INTO conv_sessions (
+		INSERT INTO conv_sessions (
 			id, agent, agent_version, source_path, project_path, project_name,
-			git_branch, git_commit, started_at, ended_at, total_turns, total_tokens
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
-		session.ID, session.Agent, session.AgentVersion, session.SourcePath,
+			git_branch, git_commit, started_at, ended_at, total_turns, total_tokens,
+			metadata, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, CURRENT_TIMESTAMP)
+		ON CONFLICT(id) DO UPDATE SET
+			agent=excluded.agent, agent_version=excluded.agent_version,
+			source_path=excluded.source_path, project_path=excluded.project_path,
+			project_name=excluded.project_name, git_branch=excluded.git_branch,
+			git_commit=excluded.git_commit, started_at=excluded.started_at,
+			ended_at=excluded.ended_at, total_turns=excluded.total_turns,
+			total_tokens=excluded.total_tokens, metadata=NULL,
+			updated_at=CURRENT_TIMESTAMP
+	`, session.ID, session.Agent, session.AgentVersion, session.SourcePath,
 		session.ProjectPath, session.ProjectName, session.GitBranch, session.GitCommit,
-		session.StartedAt, session.EndedAt, len(session.Turns), session.TotalTokens,
-	)
+		session.StartedAt, session.EndedAt, len(session.Turns), session.TotalTokens)
 	if err != nil {
-		return fmt.Errorf("failed to insert session: %w", err)
+		return fmt.Errorf("failed to upsert session: %w", err)
 	}
 
-	// Insert turns
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM conv_turn_embeddings
+		WHERE EXISTS (
+			SELECT 1 FROM conv_turns t
+			WHERE t.session_id = ?
+			  AND (
+				conv_turn_embeddings.turn_id = t.id
+				OR substr(conv_turn_embeddings.turn_id, 1, length(t.id) + 1) = t.id || ':'
+			  )
+		)
+	`, session.ID); err != nil {
+		return fmt.Errorf("delete stale conversation embeddings: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM conv_turns WHERE session_id = ?`, session.ID); err != nil {
+		return fmt.Errorf("delete old conversation turns: %w", err)
+	}
+
 	for _, turn := range session.Turns {
 		turnID := fmt.Sprintf("%s:%d", session.ID, turn.Index)
 		combinedContent := fmt.Sprintf("USER: %s\n\nASSISTANT: %s", turn.UserContent, turn.AssistContent)
-
 		codeLangsJSON := ""
 		if len(turn.CodeLangs) > 0 {
 			data, _ := json.Marshal(turn.CodeLangs)
 			codeLangsJSON = string(data)
 		}
-
-		_, err = tx.ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO conv_turns (
-				id, session_id, turn_index, user_content, assistant_content, combined_content,
-				timestamp, has_code, code_langs, parent_uuid, is_sidechain
+				id, session_id, turn_index, user_content, assistant_content,
+				combined_content, timestamp, has_code, code_langs, parent_uuid,
+				is_sidechain
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT(id) DO UPDATE SET
-				session_id=excluded.session_id, turn_index=excluded.turn_index,
-				user_content=excluded.user_content, assistant_content=excluded.assistant_content,
-				combined_content=excluded.combined_content, timestamp=excluded.timestamp,
-				has_code=excluded.has_code, code_langs=excluded.code_langs,
-				parent_uuid=excluded.parent_uuid, is_sidechain=excluded.is_sidechain
-		`,
-			turnID, session.ID, turn.Index, turn.UserContent, turn.AssistContent, combinedContent,
-			turn.Timestamp, turn.HasCode, codeLangsJSON, turn.ParentUUID, turn.IsSidechain,
-		)
-		if err != nil {
+		`, turnID, session.ID, turn.Index, turn.UserContent, turn.AssistContent,
+			combinedContent, turn.Timestamp, turn.HasCode, codeLangsJSON,
+			turn.ParentUUID, turn.IsSidechain); err != nil {
 			return fmt.Errorf("failed to insert turn: %w", err)
 		}
 	}
-
+	if err := bumpTQVectorGeneration(ctx, tx); err != nil {
+		return fmt.Errorf("mark conversation snapshot changed: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
-		_ = tx.Rollback()
 		return err
 	}
 	committed = true
+	_ = s.closeTQLocked()
+	return nil
+}
+
+// ReplaceSessionWithEmbeddings atomically publishes a complete session snapshot.
+// Existing turns and embeddings for the session are removed in the same
+// transaction, so failed refreshes cannot expose new text with stale vectors.
+func (s *Store) ReplaceSessionWithEmbeddings(ctx context.Context, session *Session, turnIDs []string, embeddings [][]float32, contentHash string) error {
+	if len(turnIDs) != len(embeddings) {
+		return fmt.Errorf("turnIDs and embeddings length mismatch")
+	}
+	if len(turnIDs) != len(session.Turns) {
+		return fmt.Errorf("session has %d turns but %d embeddings", len(session.Turns), len(turnIDs))
+	}
+	for i, embedding := range embeddings {
+		if len(embedding) != s.dims {
+			return fmt.Errorf("embedding for %s has %d dimensions, want %d", turnIDs[i], len(embedding), s.dims)
+		}
+	}
+
+	metadata, err := json.Marshal(map[string]string{"content_hash": contentHash})
+	if err != nil {
+		return err
+	}
+
+	s.tqMu.Lock()
+	defer s.tqMu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO conv_sessions (
+			id, agent, agent_version, source_path, project_path, project_name,
+			git_branch, git_commit, started_at, ended_at, total_turns, total_tokens,
+			metadata, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(id) DO UPDATE SET
+			agent=excluded.agent, agent_version=excluded.agent_version,
+			source_path=excluded.source_path, project_path=excluded.project_path,
+			project_name=excluded.project_name, git_branch=excluded.git_branch,
+			git_commit=excluded.git_commit, started_at=excluded.started_at,
+			ended_at=excluded.ended_at, total_turns=excluded.total_turns,
+			total_tokens=excluded.total_tokens, metadata=excluded.metadata,
+			updated_at=CURRENT_TIMESTAMP
+	`, session.ID, session.Agent, session.AgentVersion, session.SourcePath,
+		session.ProjectPath, session.ProjectName, session.GitBranch, session.GitCommit,
+		session.StartedAt, session.EndedAt, len(session.Turns), session.TotalTokens,
+		string(metadata))
+	if err != nil {
+		return fmt.Errorf("upsert conversation session: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM conv_turn_embeddings
+		WHERE EXISTS (
+			SELECT 1 FROM conv_turns t
+			WHERE t.session_id = ?
+			  AND (
+				conv_turn_embeddings.turn_id = t.id
+				OR substr(conv_turn_embeddings.turn_id, 1, length(t.id) + 1) = t.id || ':'
+			  )
+		)
+	`, session.ID); err != nil {
+		return fmt.Errorf("delete old conversation embeddings: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM conv_turns WHERE session_id = ?`, session.ID); err != nil {
+		return fmt.Errorf("delete old conversation turns: %w", err)
+	}
+
+	for _, turn := range session.Turns {
+		turnID := fmt.Sprintf("%s:%d", session.ID, turn.Index)
+		combinedContent := fmt.Sprintf("USER: %s\n\nASSISTANT: %s", turn.UserContent, turn.AssistContent)
+		codeLangsJSON := ""
+		if len(turn.CodeLangs) > 0 {
+			data, _ := json.Marshal(turn.CodeLangs)
+			codeLangsJSON = string(data)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO conv_turns (
+				id, session_id, turn_index, user_content, assistant_content,
+				combined_content, timestamp, has_code, code_langs, parent_uuid,
+				is_sidechain
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, turnID, session.ID, turn.Index, turn.UserContent, turn.AssistContent,
+			combinedContent, turn.Timestamp, turn.HasCode, codeLangsJSON,
+			turn.ParentUUID, turn.IsSidechain); err != nil {
+			return fmt.Errorf("insert conversation turn: %w", err)
+		}
+	}
+
+	var embeddingSQL string
+	if sqliteDriverName == "libsql" {
+		embeddingSQL = `INSERT INTO conv_turn_embeddings (turn_id, embedding) VALUES (?, vector32(?))`
+	} else {
+		embeddingSQL = `INSERT INTO conv_turn_embeddings (turn_id, embedding) VALUES (?, ?)`
+	}
+	stmt, err := tx.PrepareContext(ctx, embeddingSQL)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = stmt.Close() }()
+	for i, turnID := range turnIDs {
+		if _, err := stmt.ExecContext(ctx, turnID, float32ToBlob(embeddings[i])); err != nil {
+			return fmt.Errorf("insert conversation embedding for %s: %w", turnID, err)
+		}
+	}
+	if err := bumpTQVectorGeneration(ctx, tx); err != nil {
+		return fmt.Errorf("mark conversation TQ-MSE vectors stale: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	_ = s.closeTQLocked()
 	return nil
 }
 
@@ -906,7 +1100,7 @@ func (s *Store) RebuildTQVectorStore(ctx context.Context) (int, error) {
 		if err := storepkg.RemoveTQVectorStoreAtPath(s.tqPath); err != nil {
 			return 0, err
 		}
-		clean, err := s.markTQVectorSidecarClean(ctx, generation, 0)
+		clean, err := s.markTQVectorSidecarClean(ctx, generation, 0, "")
 		if err != nil {
 			return 0, err
 		}
@@ -919,7 +1113,21 @@ func (s *Store) RebuildTQVectorStore(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
-	count, err := storepkg.BuildTQVectorStoreAtPath(ctx, s.tqPath, ids, embeddings, storepkg.TQVectorBuildOptions{
+	stagingFile, err := os.CreateTemp(filepath.Dir(s.tqPath), ".turn_embeddings-*.tqmse")
+	if err != nil {
+		return 0, fmt.Errorf("create conversation TQ-MSE staging path: %w", err)
+	}
+	stagingPath := stagingFile.Name()
+	if err := stagingFile.Close(); err != nil {
+		_ = os.Remove(stagingPath)
+		return 0, err
+	}
+	if err := os.Remove(stagingPath); err != nil {
+		return 0, err
+	}
+	defer func() { _ = os.Remove(stagingPath) }()
+
+	count, err := storepkg.BuildTQVectorStoreAtPath(ctx, stagingPath, ids, embeddings, storepkg.TQVectorBuildOptions{
 		Dims: s.dims,
 		Bits: 4,
 		Seed: 42,
@@ -928,7 +1136,7 @@ func (s *Store) RebuildTQVectorStore(ctx context.Context) (int, error) {
 		_ = s.loadTQIfAvailable(ctx)
 		return 0, err
 	}
-	clean, err := s.markTQVectorSidecarClean(ctx, generation, count)
+	clean, err := s.publishTQVectorStaging(ctx, generation, count, stagingPath)
 	if err != nil {
 		return 0, err
 	}
@@ -942,6 +1150,29 @@ func (s *Store) RebuildTQVectorStore(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	return count, nil
+}
+
+func (s *Store) publishTQVectorStaging(ctx context.Context, generation int64, count int, stagingPath string) (bool, error) {
+	sidecarSHA256, err := fileSHA256(stagingPath)
+	if err != nil {
+		return false, fmt.Errorf("hash conversation TQ-MSE vectors: %w", err)
+	}
+	if err := os.Rename(stagingPath, s.tqPath); err != nil {
+		return false, fmt.Errorf("publish conversation TQ-MSE vectors: %w", err)
+	}
+	if s.afterTQPublish != nil {
+		s.afterTQPublish()
+	}
+	return s.markTQVectorSidecarClean(ctx, generation, count, sidecarSHA256)
+}
+
+func fileSHA256(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // GetSession retrieves a session by ID.
@@ -1078,24 +1309,58 @@ func (s *Store) VectorSearch(ctx context.Context, embedding []float32, limit int
 	return results, rows.Err()
 }
 
-func (s *Store) tqVectorSearch(ctx context.Context, embedding []float32, limit int, threshold float64) ([]SearchResult, bool, error) {
+func (s *Store) ensureCurrentTQ(ctx context.Context) (bool, error) {
 	s.tqMu.RLock()
-	defer s.tqMu.RUnlock()
+	available := s.tq != nil
+	loadedGeneration := s.tqGeneration
+	s.tqMu.RUnlock()
+	if !available {
+		return false, nil
+	}
+	currentGeneration, err := s.ConversationGeneration(ctx)
+	if err != nil {
+		return true, err
+	}
+	if currentGeneration != loadedGeneration {
+		if err := s.RefreshVectorSnapshot(ctx); err != nil {
+			return true, err
+		}
+		s.tqMu.RLock()
+		available = s.tq != nil
+		s.tqMu.RUnlock()
+	}
+	return available, nil
+}
+
+func (s *Store) tqVectorSearch(ctx context.Context, embedding []float32, limit int, threshold float64) ([]SearchResult, bool, error) {
+	available, err := s.ensureCurrentTQ(ctx)
+	if err != nil || !available {
+		return nil, available, err
+	}
+
+	s.tqMu.RLock()
 	tq := s.tq
 	if tq == nil {
+		s.tqMu.RUnlock()
 		return nil, false, nil
 	}
+	generation := s.tqGeneration
+	afterScore := s.afterTQScore
 
 	distanceThreshold := 1.0 - threshold
 	if threshold <= 0 {
 		distanceThreshold = 2.0
 	}
 	hits, err := tq.Search(ctx, embedding, limit, distanceThreshold)
+	s.tqMu.RUnlock()
 	if err != nil {
 		return nil, true, err
 	}
+	if afterScore != nil {
+		afterScore()
+	}
 	if len(hits) == 0 {
-		return nil, true, nil
+		return s.finishTQSearch(ctx, generation, nil)
 	}
 
 	ids := make([]string, len(hits))
@@ -1117,7 +1382,21 @@ func (s *Store) tqVectorSearch(ctx context.Context, embedding []float32, limit i
 		result.MatchType = "semantic"
 		results = append(results, result)
 	}
-	return results, true, nil
+	return s.finishTQSearch(ctx, generation, results)
+}
+
+func (s *Store) finishTQSearch(ctx context.Context, generation int64, results []SearchResult) ([]SearchResult, bool, error) {
+	currentGeneration, err := s.ConversationGeneration(ctx)
+	if err != nil {
+		return nil, true, err
+	}
+	if currentGeneration == generation {
+		return results, true, nil
+	}
+	if err := s.RefreshVectorSnapshot(ctx); err != nil {
+		return nil, true, err
+	}
+	return nil, false, nil
 }
 
 func (s *Store) loadSearchResultsByTurnID(ctx context.Context, ids []string) (map[string]SearchResult, error) {
@@ -1324,13 +1603,10 @@ func (s *Store) FilteredSearch(ctx context.Context, embedding []float32, opts Se
 }
 
 func (s *Store) tqFilteredSearch(ctx context.Context, embedding []float32, opts SearchOptions, conditions []string, args []interface{}) ([]SearchResult, bool, error) {
-	s.tqMu.RLock()
-	tq := s.tq
-	if tq == nil {
-		s.tqMu.RUnlock()
-		return nil, false, nil
+	available, err := s.ensureCurrentTQ(ctx)
+	if err != nil || !available {
+		return nil, available, err
 	}
-	s.tqMu.RUnlock()
 
 	whereClause := ""
 	if len(conditions) > 0 {
@@ -1364,19 +1640,28 @@ func (s *Store) tqFilteredSearch(ctx context.Context, embedding []float32, opts 
 	if err := rows.Close(); err != nil {
 		return nil, true, err
 	}
-	if len(ids) == 0 {
-		return nil, true, nil
-	}
-
 	s.tqMu.RLock()
-	defer s.tqMu.RUnlock()
-	tq = s.tq
+	tq := s.tq
 	if tq == nil {
+		s.tqMu.RUnlock()
 		return nil, false, nil
 	}
+	generation := s.tqGeneration
+	afterScore := s.afterTQScore
+	if len(ids) == 0 {
+		s.tqMu.RUnlock()
+		if afterScore != nil {
+			afterScore()
+		}
+		return s.finishTQSearch(ctx, generation, nil)
+	}
 	distances, err := tq.ScoreByID(ctx, embedding, ids)
+	s.tqMu.RUnlock()
 	if err != nil {
 		return nil, true, err
+	}
+	if afterScore != nil {
+		afterScore()
 	}
 
 	type scoredID struct {
@@ -1398,7 +1683,7 @@ func (s *Store) tqFilteredSearch(ctx context.Context, embedding []float32, opts 
 		scored = scored[:opts.Limit]
 	}
 	if len(scored) == 0 {
-		return nil, true, nil
+		return s.finishTQSearch(ctx, generation, nil)
 	}
 
 	topIDs := make([]string, len(scored))
@@ -1420,7 +1705,7 @@ func (s *Store) tqFilteredSearch(ctx context.Context, embedding []float32, opts 
 		result.MatchType = "semantic"
 		results = append(results, result)
 	}
-	return results, true, nil
+	return s.finishTQSearch(ctx, generation, results)
 }
 
 // FilteredHybridSearch combines filtered dense and FTS results.
@@ -1585,7 +1870,7 @@ func (s *Store) GetStats(ctx context.Context) (*IndexStats, error) {
 
 	// Get last indexed time - scan as string first since SQLite stores as TEXT
 	var lastIndexedStr sql.NullString
-	if err := s.db.QueryRowContext(ctx, "SELECT MAX(created_at) FROM conv_sessions").Scan(&lastIndexedStr); err == nil && lastIndexedStr.Valid {
+	if err := s.db.QueryRowContext(ctx, "SELECT MAX(updated_at) FROM conv_sessions").Scan(&lastIndexedStr); err == nil && lastIndexedStr.Valid {
 		// Try common SQLite timestamp formats
 		for _, layout := range []string{
 			"2006-01-02 15:04:05",
@@ -1688,7 +1973,6 @@ func (s *Store) MissingEmbeddingsCountForSession(ctx context.Context, sessionID 
 		  AND NOT EXISTS (
 			SELECT 1 FROM conv_turn_embeddings e
 			WHERE e.turn_id = t.id
-			   OR e.turn_id LIKE t.id || ':%'
 		  )
 	`, sessionID).Scan(&count)
 	return count, err
@@ -1703,20 +1987,22 @@ func (s *Store) SessionExists(ctx context.Context, sessionID string) (bool, erro
 
 // SessionMeta contains lightweight session metadata for update checks.
 type SessionMeta struct {
-	TotalTurns int
-	EndedAt    time.Time
+	TotalTurns  int
+	EndedAt     time.Time
+	ContentHash string
 }
 
 // GetSessionMeta returns lightweight session metadata.
 func (s *Store) GetSessionMeta(ctx context.Context, sessionID string) (SessionMeta, bool, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT total_turns, ended_at
+		SELECT total_turns, ended_at, metadata
 		FROM conv_sessions WHERE id = ?
 	`, sessionID)
 
 	var meta SessionMeta
 	var endedAt sql.NullTime
-	if err := row.Scan(&meta.TotalTurns, &endedAt); err != nil {
+	var metadata sql.NullString
+	if err := row.Scan(&meta.TotalTurns, &endedAt, &metadata); err != nil {
 		if err == sql.ErrNoRows {
 			return SessionMeta{}, false, nil
 		}
@@ -1724,6 +2010,12 @@ func (s *Store) GetSessionMeta(ctx context.Context, sessionID string) (SessionMe
 	}
 	if endedAt.Valid {
 		meta.EndedAt = endedAt.Time
+	}
+	if metadata.Valid && metadata.String != "" {
+		var values map[string]string
+		if json.Unmarshal([]byte(metadata.String), &values) == nil {
+			meta.ContentHash = values["content_hash"]
+		}
 	}
 	return meta, true, nil
 }

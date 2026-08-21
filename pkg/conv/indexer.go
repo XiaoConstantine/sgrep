@@ -2,16 +2,23 @@ package conv
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
-
-	"github.com/XiaoConstantine/sgrep/pkg/embed"
 )
+
+// DocumentEmbedder generates embeddings for conversation turns.
+type DocumentEmbedder interface {
+	EmbedDocuments(context.Context, []string) ([][]float32, error)
+}
 
 // Indexer handles indexing conversations.
 type Indexer struct {
 	store    *Store
-	embedder *embed.Embedder
+	embedder DocumentEmbedder
 	chunker  *Chunker
 	force    bool
 }
@@ -19,7 +26,7 @@ type Indexer struct {
 // IndexerConfig configures the indexer.
 type IndexerConfig struct {
 	Store    *Store
-	Embedder *embed.Embedder
+	Embedder DocumentEmbedder
 	Chunker  *Chunker
 	Force    bool // Re-index even if session exists
 }
@@ -60,42 +67,32 @@ func (idx *Indexer) IndexSessions(ctx context.Context, sessions []*Session) (*In
 
 	for _, session := range sessions {
 		result.SessionsFound++
+		session.TotalTokens = EstimateSessionTokens(session)
+		contentHash, err := sessionContentHash(session)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("hash session %s failed: %w", session.ID, err))
+			continue
+		}
 
-		// Check if already indexed (skip if not forcing)
 		if !idx.force {
-			exists, _ := idx.store.SessionExists(ctx, session.ID)
-			if exists {
-				meta, ok, err := idx.store.GetSessionMeta(ctx, session.ID)
+			meta, exists, err := idx.store.GetSessionMeta(ctx, session.ID)
+			if err != nil {
+				result.Errors = append(result.Errors, fmt.Errorf("check session meta for %s failed: %w", session.ID, err))
+				continue
+			}
+			if exists && meta.ContentHash == contentHash {
+				missing, err := idx.store.MissingEmbeddingsCountForSession(ctx, session.ID)
 				if err != nil {
-					result.Errors = append(result.Errors, fmt.Errorf("check session meta for %s failed: %w", session.ID, err))
+					result.Errors = append(result.Errors, fmt.Errorf("check missing embeddings for %s failed: %w", session.ID, err))
 					continue
 				}
-				needsUpdate := false
-				if ok {
-					if len(session.Turns) > meta.TotalTurns {
-						needsUpdate = true
-					}
-					if !session.EndedAt.IsZero() && (meta.EndedAt.IsZero() || session.EndedAt.After(meta.EndedAt)) {
-						needsUpdate = true
-					}
-				}
-				if needsUpdate {
-					// Fall through to re-index updated session.
-				} else {
-					missing, err := idx.store.MissingEmbeddingsCountForSession(ctx, session.ID)
-					if err != nil {
-						result.Errors = append(result.Errors, fmt.Errorf("check missing embeddings for %s failed: %w", session.ID, err))
-						continue
-					}
-					if missing == 0 {
-						continue
-					}
+				if missing == 0 {
+					continue
 				}
 			}
 		}
 
-		// Index the session
-		if err := idx.indexSession(ctx, session); err != nil {
+		if err := idx.indexSessionWithHash(ctx, session, contentHash); err != nil {
 			result.Errors = append(result.Errors, fmt.Errorf("index session %s failed: %w", session.ID, err))
 			continue
 		}
@@ -108,15 +105,29 @@ func (idx *Indexer) IndexSessions(ctx context.Context, sessions []*Session) (*In
 	return result, nil
 }
 
-// IndexSession indexes a single session.
+// IndexSession indexes a single session unless its content-addressed snapshot is current.
 func (idx *Indexer) IndexSession(ctx context.Context, session *Session) error {
-	// Check if already indexed
-	exists, _ := idx.store.SessionExists(ctx, session.ID)
-	if exists {
-		return nil
+	session.TotalTokens = EstimateSessionTokens(session)
+	contentHash, err := sessionContentHash(session)
+	if err != nil {
+		return err
 	}
-
-	return idx.indexSession(ctx, session)
+	if !idx.force {
+		meta, exists, err := idx.store.GetSessionMeta(ctx, session.ID)
+		if err != nil {
+			return err
+		}
+		if exists && meta.ContentHash == contentHash {
+			missing, err := idx.store.MissingEmbeddingsCountForSession(ctx, session.ID)
+			if err != nil {
+				return err
+			}
+			if missing == 0 {
+				return nil
+			}
+		}
+	}
+	return idx.indexSessionWithHash(ctx, session, contentHash)
 }
 
 // RebuildTQVectorStore refreshes the compact TQ-MSE sidecar for conversation search.
@@ -124,57 +135,55 @@ func (idx *Indexer) RebuildTQVectorStore(ctx context.Context) (int, error) {
 	return idx.store.RebuildTQVectorStore(ctx)
 }
 
-// indexSession indexes a single session and its turns.
-func (idx *Indexer) indexSession(ctx context.Context, session *Session) error {
-	// Estimate tokens
-	session.TotalTokens = EstimateSessionTokens(session)
-
-	// Store session metadata and turns
-	if err := idx.store.StoreSession(ctx, session); err != nil {
-		return fmt.Errorf("failed to store session: %w", err)
+func sessionContentHash(session *Session) (string, error) {
+	data, err := json.Marshal(session)
+	if err != nil {
+		return "", err
 	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
 
-	// Generate and store embeddings for each turn
-	chunks := idx.chunker.ChunkSession(session)
-
-	// Skip embedding if no embedder
+// indexSessionWithHash embeds the complete parsed snapshot before publishing it.
+func (idx *Indexer) indexSessionWithHash(ctx context.Context, session *Session, contentHash string) error {
 	if idx.embedder == nil {
-		return nil
+		return fmt.Errorf("conversation indexing requires an embedder")
 	}
 
-	// Batch chunk embeddings, then mean-pool split chunks back to the canonical
-	// turn ID used by conv_turns. Storing chunk-suffixed IDs would make long-turn
-	// embeddings unreachable by the search joins.
+	chunks := idx.chunker.ChunkSession(session)
 	type turnEmbedding struct {
 		sum   []float32
 		count int
 	}
 	pooled := make(map[string]*turnEmbedding)
-	batchSize := 10
+	const batchSize = 10
 	for i := 0; i < len(chunks); i += batchSize {
 		end := i + batchSize
 		if end > len(chunks) {
 			end = len(chunks)
 		}
 		batch := chunks[i:end]
-
 		contents := make([]string, len(batch))
-		for j, chunk := range batch {
-			contents[j] = chunk.Content
+		for j := range batch {
+			contents[j] = batch[j].Content
 		}
 
-		// Generate embeddings
 		embeddings, err := idx.embedder.EmbedDocuments(ctx, contents)
 		if err != nil {
 			return fmt.Errorf("failed to generate embeddings: %w", err)
 		}
-
+		if len(embeddings) != len(batch) {
+			return fmt.Errorf("embedding backend returned %d vectors for %d documents", len(embeddings), len(batch))
+		}
 		for j, embedding := range embeddings {
 			turnID := fmt.Sprintf("%s:%d", batch[j].SessionID, batch[j].TurnIndex)
 			entry := pooled[turnID]
 			if entry == nil {
 				entry = &turnEmbedding{sum: make([]float32, len(embedding))}
 				pooled[turnID] = entry
+			}
+			if len(entry.sum) != len(embedding) {
+				return fmt.Errorf("inconsistent embedding dimensions for %s", turnID)
 			}
 			for dim, value := range embedding {
 				entry.sum[dim] += value
@@ -184,19 +193,26 @@ func (idx *Indexer) indexSession(ctx context.Context, session *Session) error {
 	}
 
 	turnIDs := make([]string, 0, len(pooled))
-	embeddings := make([][]float32, 0, len(pooled))
-	for turnID, entry := range pooled {
+	for turnID := range pooled {
+		turnIDs = append(turnIDs, turnID)
+	}
+	sort.Strings(turnIDs)
+	embeddings := make([][]float32, 0, len(turnIDs))
+	for _, turnID := range turnIDs {
+		entry := pooled[turnID]
 		if entry.count == 0 {
 			continue
 		}
 		for dim := range entry.sum {
 			entry.sum[dim] /= float32(entry.count)
 		}
-		turnIDs = append(turnIDs, turnID)
 		embeddings = append(embeddings, entry.sum)
 	}
-	if err := idx.store.StoreTurnEmbeddingBatch(ctx, turnIDs, embeddings); err != nil {
-		return fmt.Errorf("failed to store pooled turn embeddings: %w", err)
+	if len(turnIDs) != len(session.Turns) {
+		return fmt.Errorf("generated embeddings for %d of %d turns", len(turnIDs), len(session.Turns))
+	}
+	if err := idx.store.ReplaceSessionWithEmbeddings(ctx, session, turnIDs, embeddings, contentHash); err != nil {
+		return fmt.Errorf("failed to publish session snapshot: %w", err)
 	}
 	return nil
 }

@@ -2,10 +2,13 @@ package conv
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	storepkg "github.com/XiaoConstantine/sgrep/pkg/store"
 )
 
 func TestNewStore(t *testing.T) {
@@ -678,6 +681,340 @@ func TestStore_RebuildTQVectorStoreLoadsForReadOnlySearch(t *testing.T) {
 	}
 	if results[0].MatchType != "semantic" {
 		t.Fatalf("match type = %q, want semantic", results[0].MatchType)
+	}
+}
+
+func TestStore_WritableOpenRepairsLegacyTQMetadataInForcedMode(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	store, err := NewStore(StoreConfig{DBPath: dbPath, Dims: defaultDims})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	session := &Session{ID: "legacy-sidecar", Agent: AgentCodexCLI, StartedAt: time.Now(), Turns: []Turn{
+		{Index: 0, UserContent: "legacy metadata", AssistContent: "repair it"},
+	}}
+	if err := store.StoreSession(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	embedding := make([]float32, defaultDims)
+	embedding[0] = 1
+	if err := store.StoreTurnEmbedding(ctx, "legacy-sidecar:0", embedding); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RebuildTQVectorStore(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, `DELETE FROM conv_metadata WHERE key = ?`, convTQVectorSidecarSHA256Key); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("SGREP_CONV_VECTOR_BACKEND", "tqmse")
+	if readStore, err := OpenStoreReadOnly(dbPath); err == nil {
+		_ = readStore.Close()
+		t.Fatal("read-only forced-TQ open accepted legacy sidecar metadata")
+	}
+	writable, err := NewStore(StoreConfig{DBPath: dbPath, Dims: defaultDims})
+	if err != nil {
+		t.Fatalf("writable open could not recover legacy sidecar: %v", err)
+	}
+	defer func() { _ = writable.Close() }()
+	if writable.tq != nil {
+		t.Fatal("writable open loaded an uncertified legacy sidecar")
+	}
+	if _, err := writable.RebuildTQVectorStore(ctx); err != nil {
+		t.Fatalf("writable store could not rebuild legacy sidecar: %v", err)
+	}
+	if writable.tq == nil {
+		t.Fatal("rebuilt sidecar was not loaded")
+	}
+}
+
+func TestStore_OpenReaderDropsSidecarChangedByAnotherProcess(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	writer, err := NewStore(StoreConfig{DBPath: dbPath, Dims: defaultDims})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = writer.Close() }()
+	ctx := context.Background()
+	session := &Session{ID: "cross-process", Agent: AgentCodexCLI, StartedAt: time.Now(), Turns: []Turn{
+		{Index: 0, UserContent: "first", AssistContent: "answer"},
+		{Index: 1, UserContent: "second", AssistContent: "answer"},
+	}}
+	if err := writer.StoreSession(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	first := make([]float32, defaultDims)
+	first[0] = 1
+	second := make([]float32, defaultDims)
+	second[1] = 1
+	if err := writer.StoreTurnEmbeddingBatch(ctx, []string{"cross-process:0", "cross-process:1"}, [][]float32{first, second}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.RebuildTQVectorStore(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	reader, err := OpenStoreReadOnly(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Close() }()
+	if reader.tq == nil {
+		t.Fatal("reader did not load initial sidecar")
+	}
+
+	hash, err := sessionContentHash(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.ReplaceSessionWithEmbeddings(ctx, session,
+		[]string{"cross-process:0", "cross-process:1"}, [][]float32{second, first}, hash); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.RebuildTQVectorStore(ctx); err != nil {
+		t.Fatal(err)
+	}
+	valid, err := reader.validateTQVectorStore(ctx, reader.tq, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if valid {
+		t.Fatal("old mapped sidecar was accepted with newer clean metadata")
+	}
+	results, err := reader.VectorSearch(ctx, second, 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentGeneration, err := reader.ConversationGeneration(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reader.tq == nil || reader.tqGeneration != currentGeneration {
+		t.Fatal("reader did not refresh to the current cross-process sidecar")
+	}
+	if len(results) == 0 || results[0].TurnID != "cross-process:0" {
+		t.Fatalf("reader did not use updated vectors: %+v", results)
+	}
+}
+
+func TestStore_TQSearchFencesConcurrentGenerationChange(t *testing.T) {
+	for _, filtered := range []bool{false, true} {
+		name := "vector"
+		if filtered {
+			name = "filtered"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("SGREP_CONV_VECTOR_BACKEND", "")
+			t.Setenv("SGREP_VECTOR_BACKEND", "")
+			dbPath := filepath.Join(t.TempDir(), "test.db")
+			writer, err := NewStore(StoreConfig{DBPath: dbPath, Dims: defaultDims})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = writer.Close() }()
+			ctx := context.Background()
+			session := &Session{ID: "generation-race", Agent: AgentCodexCLI, StartedAt: time.Now(), Turns: []Turn{
+				{Index: 0, UserContent: "old first", AssistContent: "old answer"},
+				{Index: 1, UserContent: "old second", AssistContent: "old answer"},
+			}}
+			if err := writer.StoreSession(ctx, session); err != nil {
+				t.Fatal(err)
+			}
+			first := make([]float32, defaultDims)
+			first[0] = 1
+			second := make([]float32, defaultDims)
+			second[1] = 1
+			ids := []string{"generation-race:0", "generation-race:1"}
+			if err := writer.StoreTurnEmbeddingBatch(ctx, ids, [][]float32{first, second}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := writer.RebuildTQVectorStore(ctx); err != nil {
+				t.Fatal(err)
+			}
+
+			reader, err := OpenStoreReadOnly(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = reader.Close() }()
+			updatedSession := &Session{ID: session.ID, Agent: session.Agent, StartedAt: session.StartedAt, Turns: []Turn{
+				{Index: 0, UserContent: "new first", AssistContent: "new answer"},
+				{Index: 1, UserContent: "new second", AssistContent: "new answer"},
+			}}
+			hash, err := sessionContentHash(updatedSession)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var updateErr error
+			updated := false
+			reader.afterTQScore = func() {
+				reader.afterTQScore = nil
+				updated = true
+				updateErr = writer.ReplaceSessionWithEmbeddings(ctx, updatedSession, ids, [][]float32{second, first}, hash)
+			}
+
+			var results []SearchResult
+			if filtered {
+				results, err = reader.FilteredSearch(ctx, first, SearchOptions{Limit: 2, Threshold: 0, Agent: AgentCodexCLI})
+			} else {
+				results, err = reader.VectorSearch(ctx, first, 2, 0)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !updated {
+				t.Fatal("generation update hook was not called")
+			}
+			if updateErr != nil {
+				t.Fatalf("concurrent generation update failed: %v", updateErr)
+			}
+			if len(results) == 0 || results[0].TurnID != "generation-race:1" || results[0].UserContent != "new second" {
+				t.Fatalf("search mixed stale scores with current rows: %+v", results)
+			}
+		})
+	}
+}
+
+func TestStore_TwoPublishersCannotCertifyAnotherArtifact(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	writer, err := NewStore(StoreConfig{DBPath: dbPath, Dims: defaultDims})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = writer.Close() }()
+	ctx := context.Background()
+	session := &Session{ID: "publish-race", Agent: AgentCodexCLI, StartedAt: time.Now(), Turns: []Turn{
+		{Index: 0, UserContent: "first", AssistContent: "answer"},
+		{Index: 1, UserContent: "second", AssistContent: "answer"},
+	}}
+	if err := writer.StoreSession(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	first := make([]float32, defaultDims)
+	first[0] = 1
+	second := make([]float32, defaultDims)
+	second[1] = 1
+	ids := []string{"publish-race:0", "publish-race:1"}
+	oldEmbeddings := [][]float32{first, second}
+	if err := writer.StoreTurnEmbeddingBatch(ctx, ids, oldEmbeddings); err != nil {
+		t.Fatal(err)
+	}
+	oldGeneration, err := writer.ConversationGeneration(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	build := func(name string, embeddings [][]float32) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		count, err := storepkg.BuildTQVectorStoreAtPath(ctx, path, ids, embeddings, storepkg.TQVectorBuildOptions{Dims: defaultDims, Bits: 4, Seed: 42})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if count != len(ids) {
+			t.Fatalf("built %d vectors, want %d", count, len(ids))
+		}
+		return path
+	}
+	oldFirst := build("old-first.tqmse", oldEmbeddings)
+	oldSecond := build("old-second.tqmse", oldEmbeddings)
+
+	newEmbeddings := [][]float32{second, first}
+	hash, err := sessionContentHash(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.ReplaceSessionWithEmbeddings(ctx, session, ids, newEmbeddings, hash); err != nil {
+		t.Fatal(err)
+	}
+	newGeneration, err := writer.ConversationGeneration(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newFirst := build("new-first.tqmse", newEmbeddings)
+	newSecond := build("new-second.tqmse", newEmbeddings)
+
+	// A current publisher after a stale publisher certifies exactly the current artifact.
+	if clean, err := writer.publishTQVectorStaging(ctx, oldGeneration, len(ids), oldFirst); err != nil || clean {
+		t.Fatalf("stale publisher clean=%v err=%v", clean, err)
+	}
+	if clean, err := writer.publishTQVectorStaging(ctx, newGeneration, len(ids), newFirst); err != nil || !clean {
+		t.Fatalf("current publisher clean=%v err=%v", clean, err)
+	}
+	reader, err := OpenStoreReadOnly(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := reader.VectorSearch(ctx, second, 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reader.tq == nil || len(results) == 0 || results[0].TurnID != "publish-race:0" {
+		t.Fatalf("current-after-stale publication was not usable: tq=%v results=%+v", reader.tq != nil, results)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pause the current publisher after its rename, then let a stale publisher
+	// overwrite the shared path before the current publisher certifies metadata.
+	// Hashing the shared path after rename would incorrectly certify stale bytes.
+	stalePublisher, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	published := make(chan struct{})
+	release := make(chan struct{})
+	writer.afterTQPublish = func() {
+		close(published)
+		<-release
+	}
+	type publishResult struct {
+		clean bool
+		err   error
+	}
+	currentDone := make(chan publishResult, 1)
+	go func() {
+		clean, err := writer.publishTQVectorStaging(ctx, newGeneration, len(ids), newSecond)
+		currentDone <- publishResult{clean: clean, err: err}
+	}()
+	<-published
+	staleClean, staleErr := stalePublisher.publishTQVectorStaging(ctx, oldGeneration, len(ids), oldSecond)
+	close(release)
+	currentResult := <-currentDone
+	if staleErr != nil || staleClean {
+		t.Fatalf("interleaved stale publisher clean=%v err=%v", staleClean, staleErr)
+	}
+	writer.afterTQPublish = nil
+	if currentResult.err != nil || !currentResult.clean {
+		t.Fatalf("interleaved current publisher clean=%v err=%v", currentResult.clean, currentResult.err)
+	}
+	if err := stalePublisher.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err = OpenStoreReadOnly(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Close() }()
+	if reader.tq != nil {
+		t.Fatal("reader accepted stale-after-current sidecar bytes")
+	}
+	results, err = reader.VectorSearch(ctx, second, 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 || results[0].TurnID != "publish-race:0" {
+		t.Fatalf("SQL fallback did not use current vectors: %+v", results)
+	}
+	if _, err := os.Stat(oldFirst); !os.IsNotExist(err) {
+		t.Fatalf("published staging artifact still exists: %v", err)
 	}
 }
 
