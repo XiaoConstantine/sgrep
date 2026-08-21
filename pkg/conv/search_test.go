@@ -188,6 +188,40 @@ func TestSearcherExactUsesKeywordSearchWithoutEmbedder(t *testing.T) {
 	}
 }
 
+func TestRetrieveTurnsKeepsMultipleMatchesWhileSearchDeduplicates(t *testing.T) {
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db"), Dims: defaultDims})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	ctx := context.Background()
+	session := &Session{ID: "multi", Agent: AgentCodexCLI, StartedAt: time.Now(), Turns: []Turn{
+		{Index: 0, UserContent: "incremental indexing", AssistContent: "first discussion"},
+		{Index: 1, UserContent: "indexing followup", AssistContent: "second discussion"},
+	}}
+	if err := store.StoreSession(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	searcher := NewSearcher(store, nil)
+	opts := DefaultSearchOptions()
+	opts.ExactMatch = true
+	opts.Limit = 10
+	raw, err := searcher.RetrieveTurns(ctx, "indexing", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != 2 {
+		t.Fatalf("raw turn results = %d, want 2", len(raw))
+	}
+	response, err := searcher.Search(ctx, "indexing", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Results) != 1 {
+		t.Fatalf("legacy session results = %d, want 1", len(response.Results))
+	}
+}
+
 func TestFilteredHybridSearchAppliesAgentFilter(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewStore(StoreConfig{DBPath: filepath.Join(tmpDir, "test.db"), Dims: defaultDims})

@@ -6,21 +6,54 @@ import (
 	"strings"
 	"time"
 
-	"github.com/XiaoConstantine/sgrep/pkg/embed"
 	searchterms "github.com/XiaoConstantine/sgrep/pkg/search"
 )
+
+// QueryEmbedder generates embeddings for conversation queries.
+type QueryEmbedder interface {
+	EmbedQuery(context.Context, string) ([]float32, error)
+}
 
 // Searcher handles conversation search with embedding integration.
 type Searcher struct {
 	store    *Store
-	embedder *embed.Embedder
+	embedder QueryEmbedder
 }
 
 // NewSearcher creates a new conversation searcher.
-func NewSearcher(store *Store, embedder *embed.Embedder) *Searcher {
+func NewSearcher(store *Store, embedder QueryEmbedder) *Searcher {
 	return &Searcher{
 		store:    store,
 		embedder: embedder,
+	}
+}
+
+// RetrieveTurns returns ranked turn-level results without collapsing them by session.
+// Callers that assemble context can therefore retain multiple pieces of evidence
+// from the same conversation.
+func (s *Searcher) RetrieveTurns(ctx context.Context, query string, opts SearchOptions) ([]SearchResult, error) {
+	if opts.ExactMatch {
+		return s.store.KeywordSearch(ctx, searchterms.ExtractHybridSearchTerms(query), opts)
+	}
+	if s.embedder == nil {
+		return nil, fmt.Errorf("semantic search requires an embedder")
+	}
+
+	queryEmb, err := s.embedder.EmbedQuery(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate query embedding: %w", err)
+	}
+
+	hasFilters := opts.Agent != AgentAll || opts.Project != "" || !opts.Since.IsZero() || !opts.Before.IsZero()
+	switch {
+	case opts.UseHybrid && hasFilters:
+		return s.store.FilteredHybridSearch(ctx, queryEmb, searchterms.ExtractHybridSearchTerms(query), opts)
+	case opts.UseHybrid:
+		return s.store.HybridSearch(ctx, queryEmb, searchterms.ExtractHybridSearchTerms(query), opts.Limit, opts.Threshold, opts.SemanticWeight, opts.BM25Weight)
+	case hasFilters:
+		return s.store.FilteredSearch(ctx, queryEmb, opts)
+	default:
+		return s.store.VectorSearch(ctx, queryEmb, opts.Limit, opts.Threshold)
 	}
 }
 
@@ -28,36 +61,12 @@ func NewSearcher(store *Store, embedder *embed.Embedder) *Searcher {
 func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions) (*SearchResponse, error) {
 	startTime := time.Now()
 
-	// Perform search based on options
-	var results []SearchResult
-	var err error
-	if opts.ExactMatch {
-		searchOpts := opts
-		searchOpts.Limit = opts.Limit * 2
-		results, err = s.store.KeywordSearch(ctx, searchterms.ExtractHybridSearchTerms(query), searchOpts)
-	} else {
-		if s.embedder == nil {
-			return nil, fmt.Errorf("semantic search requires an embedder")
-		}
-
-		// Generate query embedding
-		queryEmb, embedErr := s.embedder.EmbedQuery(ctx, query)
-		if embedErr != nil {
-			return nil, fmt.Errorf("failed to generate query embedding: %w", embedErr)
-		}
-
-		hasFilters := opts.Agent != AgentAll || opts.Project != "" || !opts.Since.IsZero() || !opts.Before.IsZero()
-		if opts.UseHybrid && hasFilters {
-			results, err = s.store.FilteredHybridSearch(ctx, queryEmb, searchterms.ExtractHybridSearchTerms(query), opts)
-		} else if opts.UseHybrid {
-			results, err = s.store.HybridSearch(ctx, queryEmb, searchterms.ExtractHybridSearchTerms(query), opts.Limit*2, opts.Threshold, opts.SemanticWeight, opts.BM25Weight)
-		} else if hasFilters {
-			results, err = s.store.FilteredSearch(ctx, queryEmb, opts)
-		} else {
-			results, err = s.store.VectorSearch(ctx, queryEmb, opts.Limit*2, opts.Threshold)
-		}
+	fetchOpts := opts
+	hasFilters := opts.Agent != AgentAll || opts.Project != "" || !opts.Since.IsZero() || !opts.Before.IsZero()
+	if opts.ExactMatch || !hasFilters {
+		fetchOpts.Limit *= 2
 	}
-
+	results, err := s.RetrieveTurns(ctx, query, fetchOpts)
 	if err != nil {
 		return nil, fmt.Errorf("search failed: %w", err)
 	}

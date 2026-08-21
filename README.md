@@ -61,6 +61,7 @@ sgrep conv index
 
 sgrep conv "embedding server ownership bug"
 sgrep conv "session compaction" --agent codex --since 7d
+sgrep conv recall -- "what did prior agents decide, implement, and leave unfinished?"
 sgrep conv resume <session_id>
 ```
 

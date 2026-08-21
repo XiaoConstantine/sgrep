@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/XiaoConstantine/sgrep/pkg/conv"
 	"github.com/XiaoConstantine/sgrep/pkg/conv/parser"
@@ -59,6 +60,10 @@ var (
 	// Conv resume flags
 	convResumeFrom   int
 	convResumeDryRun bool
+
+	// Conv recall flags
+	convRecallMaxBytes int
+	convRecallCWD      string
 )
 
 // Register parsers once at initialization
@@ -116,6 +121,7 @@ func init() {
 	convCmd.AddCommand(convCopyCmd)
 	convCmd.AddCommand(convIndexCmd)
 	convCmd.AddCommand(convStatusCmd)
+	convCmd.AddCommand(convRecallCmd)
 }
 
 // Subcommands
@@ -125,6 +131,12 @@ var convSearchCmd = &cobra.Command{
 	Short: "Search conversations (default)",
 	Args:  cobra.ExactArgs(1),
 	RunE:  runConvSearch,
+}
+
+var convRecallCmd = &cobra.Command{
+	Use:   "recall [flags] -- <query>",
+	Short: "Recover bounded context from prior coding-agent sessions",
+	RunE:  runConvRecall,
 }
 
 var convViewCmd = &cobra.Command{
@@ -175,6 +187,10 @@ var convStatusCmd = &cobra.Command{
 }
 
 func init() {
+	// Recall flags
+	convRecallCmd.Flags().IntVar(&convRecallMaxBytes, "max-bytes", conv.DefaultRecallMaxBytes, "Maximum serialized JSON response size")
+	convRecallCmd.Flags().StringVar(&convRecallCWD, "cwd", "", "Current project directory for affinity (default: working directory)")
+
 	// View flags
 	convViewCmd.Flags().IntVarP(&convTurn, "turn", "n", -1, "Jump to specific turn")
 	convViewCmd.Flags().BoolVar(&convJSON, "json", false, "Output as JSON")
@@ -299,6 +315,66 @@ func runConvSearch(cmd *cobra.Command, args []string) error {
 
 	// Output results
 	return outputConvResults(response)
+}
+
+func runConvRecall(cmd *cobra.Command, args []string) error {
+	if len(args) != 1 {
+		response := newCLIRecallResponse("", conv.RecallInvalidRequest, convRecallMaxBytes, "invalid_request", "conversation recall requires exactly one query argument after --")
+		return encodeRecallResponse(cmd, response)
+	}
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	query := args[0]
+	if strings.TrimSpace(query) == "" || len(query) > 2048 || convRecallMaxBytes < conv.MinRecallMaxBytes || convRecallMaxBytes > conv.MaxRecallMaxBytes {
+		response := newCLIRecallResponse(query, conv.RecallInvalidRequest, convRecallMaxBytes, "invalid_request", "query must be 1-2048 bytes and max-bytes must be 4096-131072")
+		return encodeRecallResponse(cmd, response)
+	}
+
+	store, err := openConvStoreReadOnly()
+	if err != nil {
+		response := newCLIRecallResponse(query, conv.RecallNotReady, convRecallMaxBytes, "index_unavailable", "conversation index is unavailable; run sgrep conv index after obtaining user consent")
+		return encodeRecallResponse(cmd, response)
+	}
+	defer func() { _ = store.Close() }()
+
+	searcher := conv.NewSearcher(store, embed.New())
+	service := conv.NewRecallService(store, searcher)
+	response, err := service.Recall(ctx, query, conv.RecallOptions{
+		MaxBytes:   convRecallMaxBytes,
+		CurrentDir: convRecallCWD,
+	})
+	if err != nil {
+		response = newCLIRecallResponse(query, conv.RecallInternalError, convRecallMaxBytes, "internal_error", "conversation recall failed unexpectedly")
+	}
+	return encodeRecallResponse(cmd, response)
+}
+
+func newCLIRecallResponse(query string, status conv.RecallStatus, maxBytes int, code, message string) *conv.RecallResponse {
+	truncated := false
+	if len(query) > 512 {
+		truncated = true
+		query = query[:512]
+		for !utf8.ValidString(query) && len(query) > 0 {
+			query = query[:len(query)-1]
+		}
+	}
+	return &conv.RecallResponse{
+		Schema:        conv.RecallSchema,
+		Status:        status,
+		Query:         query,
+		RetrievalMode: "hybrid",
+		Index:         conv.RecallIndex{Ready: false},
+		Budget:        conv.RecallBudget{MaxBytes: maxBytes, Truncated: truncated},
+		Sessions:      []conv.RecallSession{},
+		Warnings:      []conv.RecallWarning{{Code: code, Message: message}},
+	}
+}
+
+func encodeRecallResponse(cmd *cobra.Command, response *conv.RecallResponse) error {
+	conv.EnforceRecallBudget(response)
+	return json.NewEncoder(cmd.OutOrStdout()).Encode(response)
 }
 
 func runConvView(cmd *cobra.Command, args []string) error {
