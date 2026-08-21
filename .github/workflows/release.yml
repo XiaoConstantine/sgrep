@@ -29,6 +29,7 @@ jobs:
         env:
           CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
           CGO_LDFLAGS: "-lm"
+          GOEXPERIMENT: simd
         run: go test -tags=sqlite_vec -short -v ./...
 
       - name: Build Linux binary (with hybrid search)
@@ -36,6 +37,7 @@ jobs:
           CGO_ENABLED: 1
           CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
           CGO_LDFLAGS: "-lm"
+          GOEXPERIMENT: simd
           GOOS: linux
           GOARCH: amd64
         run: |
@@ -59,12 +61,14 @@ jobs:
             artifact_arch: x86_64
             tags: "-tags=sqlite_vec"
             macos_target: "13.0"
+            goexperiment: simd
           # macOS ARM: retain libSQL compatibility with existing indexes.
           - runner: macos-latest
             arch: arm64
             artifact_arch: arm64
             tags: ""
             macos_target: "15.5"
+            goexperiment: ""
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -81,6 +85,7 @@ jobs:
         env:
           CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5 -mmacosx-version-min=${{ matrix.macos_target }}"
           CGO_LDFLAGS: "-mmacosx-version-min=${{ matrix.macos_target }}"
+          GOEXPERIMENT: ${{ matrix.goexperiment }}
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_target }}
         run: go test ${{ matrix.tags }} -short -v ./...
 
@@ -89,6 +94,7 @@ jobs:
           CGO_ENABLED: 1
           CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5 -mmacosx-version-min=${{ matrix.macos_target }}"
           CGO_LDFLAGS: "-mmacosx-version-min=${{ matrix.macos_target }}"
+          GOEXPERIMENT: ${{ matrix.goexperiment }}
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_target }}
           GOOS: darwin
           GOARCH: ${{ matrix.arch }}
