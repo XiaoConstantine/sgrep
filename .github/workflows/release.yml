@@ -53,15 +53,18 @@ jobs:
     strategy:
       matrix:
         include:
-          # Build sqlite_vec from source so every Darwin object targets macOS 13.
+          # macOS Intel: use sqlite_vec (go-libsql lacks x86_64 prebuilts).
           - runner: macos-15-intel
             arch: amd64
             artifact_arch: x86_64
             tags: "-tags=sqlite_vec"
+            macos_target: "13.0"
+          # macOS ARM: retain libSQL compatibility with existing indexes.
           - runner: macos-latest
             arch: arm64
             artifact_arch: arm64
-            tags: "-tags=sqlite_vec"
+            tags: ""
+            macos_target: "15.5"
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -76,14 +79,17 @@ jobs:
 
       - name: Run tests (with FTS5 for hybrid search)
         env:
-          CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
+          CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5 -mmacosx-version-min=${{ matrix.macos_target }}"
+          CGO_LDFLAGS: "-mmacosx-version-min=${{ matrix.macos_target }}"
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_target }}
         run: go test ${{ matrix.tags }} -short -v ./...
 
       - name: Build Darwin binary (with hybrid search)
         env:
           CGO_ENABLED: 1
-          CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
-          MACOSX_DEPLOYMENT_TARGET: "13.0"
+          CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5 -mmacosx-version-min=${{ matrix.macos_target }}"
+          CGO_LDFLAGS: "-mmacosx-version-min=${{ matrix.macos_target }}"
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_target }}
           GOOS: darwin
           GOARCH: ${{ matrix.arch }}
         run: |
