@@ -636,11 +636,11 @@ func (s *Store) initSchema() error {
 
 func (s *Store) applyPragmas() error {
 	pragmas := []string{
+		"PRAGMA busy_timeout=10000",
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA synchronous=NORMAL",
 		"PRAGMA temp_store=MEMORY",
 		"PRAGMA cache_size=-50000",
-		"PRAGMA busy_timeout=10000",
 	}
 
 	for _, pragma := range pragmas {
