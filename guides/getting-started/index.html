@@ -1,0 +1,40 @@
+<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><meta name=description content="Install sgrep, prepare the local embedding model, and run your first code and conversation searches."><title>Getting started · sgrep</title><link rel=stylesheet href=/sgrep/css/site.css></head><body><header class=site-header><a class=brand href=/sgrep/ aria-label="sgrep documentation home"><span class=brand-mark>s</span><span>sgrep</span></a><nav aria-label="Main navigation"><a href=/sgrep/guides/>Guides</a>
+<a href=/sgrep/reference/>Reference</a>
+<a href=/sgrep/architecture/>Architecture</a>
+<a href=/sgrep/benchmarks/>Benchmarks</a>
+<a href=https://github.com/XiaoConstantine/sgrep>GitHub</a></nav></header><main class=docs-shell><aside class=sidebar aria-label="Documentation navigation"><p class=sidebar-title>Documentation</p><div class=sidebar-group><a class=sidebar-section href=/sgrep/guides/>Guides</a>
+<a class="sidebar-page active" href=/sgrep/guides/getting-started/>Getting started</a>
+<a class=sidebar-page href=/sgrep/guides/code-search/>Code search</a>
+<a class=sidebar-page href=/sgrep/guides/conversation-search/>Conversation search</a>
+<a class=sidebar-page href=/sgrep/guides/agent-integration/>Agent integration</a></div><div class=sidebar-group><a class=sidebar-section href=/sgrep/reference/>Reference</a>
+<a class=sidebar-page href=/sgrep/reference/cli/>CLI reference</a>
+<a class=sidebar-page href=/sgrep/reference/configuration/>Configuration</a>
+<a class=sidebar-page href=/sgrep/reference/storage/>Storage</a></div><div class=sidebar-group><a class=sidebar-page href=/sgrep/architecture/>Architecture</a>
+<a class=sidebar-page href=/sgrep/benchmarks/>Benchmarks</a>
+<a class=sidebar-page href=/sgrep/library/>Library API</a></div></aside><article class=doc><p class=eyebrow>guides</p><h1>Getting started</h1><p class=lede>Install sgrep, prepare the local embedding model, and run your first code and conversation searches.</p><div class=doc-content><h2 id=install>Install</h2><p>Homebrew is the recommended installation method on macOS and Linux:</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl>brew tap XiaoConstantine/tap
+</span></span><span class=line><span class=cl>brew install sgrep
+</span></span></code></pre></div><p>You can also use the install script or Go:</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl><span class=c1># Prebuilt release</span>
+</span></span><span class=line><span class=cl>curl -fsSL https://raw.githubusercontent.com/XiaoConstantine/sgrep/main/install.sh <span class=p>|</span> bash
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># Go toolchain</span>
+</span></span><span class=line><span class=cl>go install github.com/XiaoConstantine/sgrep/cmd/sgrep@latest
+</span></span></code></pre></div><p>To build from source:</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl>git clone https://github.com/XiaoConstantine/sgrep.git
+</span></span><span class=line><span class=cl><span class=nb>cd</span> sgrep
+</span></span><span class=line><span class=cl>go build -o sgrep ./cmd/sgrep
+</span></span></code></pre></div><p>Source builds require Go 1.27 or later. Prebuilt Intel macOS binaries support
+macOS 13 Ventura or later; Apple Silicon binaries require macOS 15.5 or later.</p><p>Prebuilt x86_64 releases installed by Homebrew or the install script include
+Go 1.27&rsquo;s experimental portable SIMD TQ rotation kernels. ARM64 releases use
+NEON assembly, and neither installation needs runtime configuration. Dense dot
+products retain float64 scalar accumulation for score compatibility.</p><p>Enable the same portable SIMD kernels for a non-ARM64 source build with:</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl><span class=nv>GOEXPERIMENT</span><span class=o>=</span>simd go build -o sgrep ./cmd/sgrep
+</span></span></code></pre></div><p>The optional sqlite-vec backend is selected at build time:</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl>go build -tags<span class=o>=</span>sqlite_vec -o sgrep ./cmd/sgrep
+</span></span></code></pre></div><h2 id=prepare-the-embedding-service>Prepare the embedding service</h2><p>sgrep uses llama.cpp for local embeddings. On macOS, install it with Homebrew:</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl>brew install llama.cpp
+</span></span></code></pre></div><p>Then download the default Nomic embedding model and verify the installation:</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl>sgrep setup
+</span></span></code></pre></div><p>The managed embedding server starts on demand and stays available as a daemon. Use <code>SGREP_ENDPOINT</code> instead when you want sgrep to connect to an external compatible server.</p><h2 id=search-a-repository>Search a repository</h2><div class=highlight><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl><span class=nb>cd</span> your-repository
+</span></span><span class=line><span class=cl>sgrep index .
+</span></span><span class=line><span class=cl>sgrep <span class=s2>&#34;database connection error handling&#34;</span>
+</span></span></code></pre></div><p>The default <code>balanced</code> profile combines semantic and lexical retrieval. Use <code>fast</code> for the lowest latency and <code>quality</code> for ColBERT late interaction:</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl>sgrep --profile fast <span class=s2>&#34;request routing&#34;</span>
+</span></span><span class=line><span class=cl>sgrep --profile quality <span class=s2>&#34;JWT validation middleware&#34;</span>
+</span></span></code></pre></div><p>See <a href=../code-search/>code search</a> for profiles, watch mode, output formats, and advanced retrieval controls.</p><h2 id=search-coding-agent-history>Search coding-agent history</h2><div class=highlight><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl>sgrep conv index
+</span></span><span class=line><span class=cl>sgrep conv <span class=s2>&#34;embedding server ownership bug&#34;</span>
+</span></span></code></pre></div><p>sgrep discovers local Claude Code, Codex CLI, Cursor, OpenCode, and Pi histories. See <a href=../conversation-search/>conversation search</a> for source filters, date filters, export, and resume commands.</p></div></article></main><footer class=site-footer><span>Local search for code and agent history.</span>
+<span><a href=https://github.com/XiaoConstantine/sgrep>GitHub</a> · Apache-2.0</span></footer></body></html>

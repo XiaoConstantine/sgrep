@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Reference on sgrep documentation</title><link>https://xiaoconstantine.github.io/sgrep/reference/</link><description>Recent content in Reference on sgrep documentation</description><generator>Hugo</generator><language>en-us</language><atom:link href="https://xiaoconstantine.github.io/sgrep/reference/index.xml" rel="self" type="application/rss+xml"/><item><title>CLI reference</title><link>https://xiaoconstantine.github.io/sgrep/reference/cli/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://xiaoconstantine.github.io/sgrep/reference/cli/</guid><description>&lt;h2 id="commands"&gt;Commands&lt;/h2&gt;
+&lt;table&gt;
+ &lt;thead&gt;
+ &lt;tr&gt;
+ &lt;th&gt;Command&lt;/th&gt;
+ &lt;th&gt;Purpose&lt;/th&gt;
+ &lt;/tr&gt;
+ &lt;/thead&gt;
+ &lt;tbody&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sgrep [query]&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Search the current repository with the balanced profile&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sgrep index [path]&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Build or rebuild a repository index&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sgrep watch [path]&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Watch a repository and update its index&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sgrep list&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;List indexed repositories&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sgrep status&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Show repository index status&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sgrep clear&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Clear a repository index&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sgrep conv [search] &amp;lt;query&amp;gt;&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Search indexed agent conversations&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sgrep conv index&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Index or watch conversation sources&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sgrep conv view &amp;lt;session_id&amp;gt;&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;View a conversation&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sgrep conv export &amp;lt;session_id&amp;gt;&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Export a conversation&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sgrep conv context &amp;lt;session_id&amp;gt;&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Extract reusable context&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sgrep conv copy &amp;lt;session_id&amp;gt;&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Copy a conversation or turn&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sgrep conv resume &amp;lt;session_id&amp;gt;&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Resume in the originating agent when supported&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sgrep conv status&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Show conversation index status&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sgrep setup&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Download the embedding model and verify llama.cpp&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sgrep server start|stop|status&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Manage the local embedding daemon explicitly&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sgrep install-claude-code&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Install Claude Code hooks and skill&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sgrep install-skill&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Install offline skill copies&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;Run &lt;code&gt;sgrep &amp;lt;command&amp;gt; --help&lt;/code&gt; for the authoritative flags accepted by the installed version.&lt;/p&gt;</description></item><item><title>Configuration</title><link>https://xiaoconstantine.github.io/sgrep/reference/configuration/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://xiaoconstantine.github.io/sgrep/reference/configuration/</guid><description>&lt;p&gt;sgrep works without configuration. Environment variables are intended for alternate storage locations, compatible external embedding servers, and reproducible backend experiments.&lt;/p&gt;
+&lt;h2 id="core-settings"&gt;Core settings&lt;/h2&gt;
+&lt;table&gt;
+ &lt;thead&gt;
+ &lt;tr&gt;
+ &lt;th&gt;Variable&lt;/th&gt;
+ &lt;th&gt;Default&lt;/th&gt;
+ &lt;th&gt;Purpose&lt;/th&gt;
+ &lt;/tr&gt;
+ &lt;/thead&gt;
+ &lt;tbody&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;SGREP_HOME&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;~/.sgrep&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Models, repository indexes, and managed-server state&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;SGREP_DIMS&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;768&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Embedding dimensions; changing it requires reindexing&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;SGREP_CONTEXT_TOKENS&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;1280&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Per-slot code context; conversation chunks remain at 512 by default. An explicit value applies to both and requires reindexing&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;SGREP_MAX_TOKENS&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;context budget minus reserve&lt;/td&gt;
+ &lt;td&gt;Optional source-chunk budget override&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;The model format adds &lt;code&gt;search_query:&lt;/code&gt; to queries and &lt;code&gt;search_document:&lt;/code&gt; to indexed material. Index metadata records the format and context budget so incompatible indexes fail validation instead of mixing embeddings.&lt;/p&gt;</description></item><item><title>Storage</title><link>https://xiaoconstantine.github.io/sgrep/reference/storage/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://xiaoconstantine.github.io/sgrep/reference/storage/</guid><description>&lt;h2 id="layout"&gt;Layout&lt;/h2&gt;
+&lt;p&gt;sgrep stores data under &lt;code&gt;~/.sgrep&lt;/code&gt; unless &lt;code&gt;SGREP_HOME&lt;/code&gt; selects another root.&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-text" data-lang="text"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;~/.sgrep/
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;├── models/
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;│ └── nomic-embed-text-v1.5.Q8_0.gguf
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;├── repos/
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;│ └── &amp;lt;path-hash&amp;gt;/
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;│ ├── index.db
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;│ ├── vectors.mmap
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;│ ├── vectors.tqmse
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;│ ├── file_vectors.tqmse
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;│ ├── colbert_segments.mmap
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;│ └── metadata.json
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;├── conversations/
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;│ ├── conv.db
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;│ └── turn_embeddings.tqmse
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;├── server.pid
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;└── server.log
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;Not every repository has every sidecar. The selected index options, corpus size, and successful completion of each export determine which compatible artifacts exist.&lt;/p&gt;</description></item></channel></rss>

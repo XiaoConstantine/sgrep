@@ -1,0 +1,31 @@
+<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><meta name=description content="Understand repository, conversation, model, and server artifacts under the local sgrep home."><title>Storage · sgrep</title><link rel=stylesheet href=/sgrep/css/site.css></head><body><header class=site-header><a class=brand href=/sgrep/ aria-label="sgrep documentation home"><span class=brand-mark>s</span><span>sgrep</span></a><nav aria-label="Main navigation"><a href=/sgrep/guides/>Guides</a>
+<a href=/sgrep/reference/>Reference</a>
+<a href=/sgrep/architecture/>Architecture</a>
+<a href=/sgrep/benchmarks/>Benchmarks</a>
+<a href=https://github.com/XiaoConstantine/sgrep>GitHub</a></nav></header><main class=docs-shell><aside class=sidebar aria-label="Documentation navigation"><p class=sidebar-title>Documentation</p><div class=sidebar-group><a class=sidebar-section href=/sgrep/guides/>Guides</a>
+<a class=sidebar-page href=/sgrep/guides/getting-started/>Getting started</a>
+<a class=sidebar-page href=/sgrep/guides/code-search/>Code search</a>
+<a class=sidebar-page href=/sgrep/guides/conversation-search/>Conversation search</a>
+<a class=sidebar-page href=/sgrep/guides/agent-integration/>Agent integration</a></div><div class=sidebar-group><a class=sidebar-section href=/sgrep/reference/>Reference</a>
+<a class=sidebar-page href=/sgrep/reference/cli/>CLI reference</a>
+<a class=sidebar-page href=/sgrep/reference/configuration/>Configuration</a>
+<a class="sidebar-page active" href=/sgrep/reference/storage/>Storage</a></div><div class=sidebar-group><a class=sidebar-page href=/sgrep/architecture/>Architecture</a>
+<a class=sidebar-page href=/sgrep/benchmarks/>Benchmarks</a>
+<a class=sidebar-page href=/sgrep/library/>Library API</a></div></aside><article class=doc><p class=eyebrow>reference</p><h1>Storage</h1><p class=lede>Understand repository, conversation, model, and server artifacts under the local sgrep home.</p><div class=doc-content><h2 id=layout>Layout</h2><p>sgrep stores data under <code>~/.sgrep</code> unless <code>SGREP_HOME</code> selects another root.</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-text data-lang=text><span class=line><span class=cl>~/.sgrep/
+</span></span><span class=line><span class=cl>├── models/
+</span></span><span class=line><span class=cl>│   └── nomic-embed-text-v1.5.Q8_0.gguf
+</span></span><span class=line><span class=cl>├── repos/
+</span></span><span class=line><span class=cl>│   └── &lt;path-hash&gt;/
+</span></span><span class=line><span class=cl>│       ├── index.db
+</span></span><span class=line><span class=cl>│       ├── vectors.mmap
+</span></span><span class=line><span class=cl>│       ├── vectors.tqmse
+</span></span><span class=line><span class=cl>│       ├── file_vectors.tqmse
+</span></span><span class=line><span class=cl>│       ├── colbert_segments.mmap
+</span></span><span class=line><span class=cl>│       └── metadata.json
+</span></span><span class=line><span class=cl>├── conversations/
+</span></span><span class=line><span class=cl>│   ├── conv.db
+</span></span><span class=line><span class=cl>│   └── turn_embeddings.tqmse
+</span></span><span class=line><span class=cl>├── server.pid
+</span></span><span class=line><span class=cl>└── server.log
+</span></span></code></pre></div><p>Not every repository has every sidecar. The selected index options, corpus size, and successful completion of each export determine which compatible artifacts exist.</p><h2 id=repository-index>Repository index</h2><ul><li><code>index.db</code> is the source of truth for chunks, file metadata, index compatibility metadata, and FTS/BM25 data.</li><li><code>vectors.mmap</code> holds exact float32 chunk vectors for repositories at or below <code>--exact-vector-limit</code>.</li><li><code>vectors.tqmse</code> is the compact TQ-MSE chunk-vector fallback.</li><li><code>file_vectors.tqmse</code> stores compact document-level vectors.</li><li><code>colbert_segments.mmap</code> stores token-segment embeddings for late interaction.</li><li><code>metadata.json</code> maps the hashed directory back to the indexed repository and records index state.</li></ul><p>For indexes up to 20,000 chunks, the default index also writes the resident exact-float artifact. Larger indexes use lower-memory TQ-MSE scanning. Set the cutoff with <code>--exact-vector-limit</code>; use <code>0</code> to disable exact artifacts.</p><p>The default compact index does not retain full SQL vector blobs. Add <code>--sql-vectors</code> only when you need the legacy SQL search path or the sqlite-vec backend.</p><h2 id=incremental-indexing>Incremental indexing</h2><p><code>sgrep watch</code> keeps SQL vectors as incremental-update backing data and refreshes compact sidecars after changes. If a refresh cannot leave compatible sidecars, watch stops with an error rather than serving stale vector artifacts.</p><p>All sidecar replacements are built adjacent to the active file and atomically published after validation. Readers retain their previous mapping until a complete replacement is available.</p><h2 id=conversation-index>Conversation index</h2><p>Conversation metadata, turn content, and FTS data are stored in <code>conversations/conv.db</code>. Canonical turn embeddings are stored in the compact <code>turn_embeddings.tqmse</code> sidecar. The conversation index records embedding format and context-token metadata transactionally so a configuration change requires a compatible rebuild.</p><p>Use <code>sgrep list</code>, <code>sgrep status</code>, and <code>sgrep conv status</code> to inspect stored indexes through the CLI.</p></div></article></main><footer class=site-footer><span>Local search for code and agent history.</span>
+<span><a href=https://github.com/XiaoConstantine/sgrep>GitHub</a> · Apache-2.0</span></footer></body></html>

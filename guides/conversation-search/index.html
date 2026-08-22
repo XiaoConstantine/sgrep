@@ -1,0 +1,42 @@
+<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><meta name=description content="Search, inspect, export, and resume local histories from Claude Code, Codex, Cursor, OpenCode, and Pi."><title>Conversation search · sgrep</title><link rel=stylesheet href=/sgrep/css/site.css></head><body><header class=site-header><a class=brand href=/sgrep/ aria-label="sgrep documentation home"><span class=brand-mark>s</span><span>sgrep</span></a><nav aria-label="Main navigation"><a href=/sgrep/guides/>Guides</a>
+<a href=/sgrep/reference/>Reference</a>
+<a href=/sgrep/architecture/>Architecture</a>
+<a href=/sgrep/benchmarks/>Benchmarks</a>
+<a href=https://github.com/XiaoConstantine/sgrep>GitHub</a></nav></header><main class=docs-shell><aside class=sidebar aria-label="Documentation navigation"><p class=sidebar-title>Documentation</p><div class=sidebar-group><a class=sidebar-section href=/sgrep/guides/>Guides</a>
+<a class=sidebar-page href=/sgrep/guides/getting-started/>Getting started</a>
+<a class=sidebar-page href=/sgrep/guides/code-search/>Code search</a>
+<a class="sidebar-page active" href=/sgrep/guides/conversation-search/>Conversation search</a>
+<a class=sidebar-page href=/sgrep/guides/agent-integration/>Agent integration</a></div><div class=sidebar-group><a class=sidebar-section href=/sgrep/reference/>Reference</a>
+<a class=sidebar-page href=/sgrep/reference/cli/>CLI reference</a>
+<a class=sidebar-page href=/sgrep/reference/configuration/>Configuration</a>
+<a class=sidebar-page href=/sgrep/reference/storage/>Storage</a></div><div class=sidebar-group><a class=sidebar-page href=/sgrep/architecture/>Architecture</a>
+<a class=sidebar-page href=/sgrep/benchmarks/>Benchmarks</a>
+<a class=sidebar-page href=/sgrep/library/>Library API</a></div></aside><article class=doc><p class=eyebrow>guides</p><h1>Conversation search</h1><p class=lede>Search, inspect, export, and resume local histories from Claude Code, Codex, Cursor, OpenCode, and Pi.</p><div class=doc-content><h2 id=index-conversations>Index conversations</h2><p>Index every discovered source or restrict indexing to one agent:</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl>sgrep conv index
+</span></span><span class=line><span class=cl>sgrep conv index --source codex
+</span></span><span class=line><span class=cl>sgrep conv index --source claude
+</span></span><span class=line><span class=cl>sgrep conv index --source cursor
+</span></span><span class=line><span class=cl>sgrep conv index --source opencode
+</span></span><span class=line><span class=cl>sgrep conv index --source pi
+</span></span></code></pre></div><p>Use watch mode to ingest new sessions, or force a full refresh of cached sessions:</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl>sgrep conv index --watch
+</span></span><span class=line><span class=cl>sgrep conv index --force
+</span></span></code></pre></div><h2 id=search-and-filter>Search and filter</h2><p>The shorthand and explicit search forms are equivalent:</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl>sgrep conv <span class=s2>&#34;authentication cache key&#34;</span>
+</span></span><span class=line><span class=cl>sgrep conv search <span class=s2>&#34;authentication cache key&#34;</span>
+</span></span></code></pre></div><p>Narrow results by source, project, or time:</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl>sgrep conv <span class=s2>&#34;session compaction&#34;</span> --agent codex --limit <span class=m>5</span>
+</span></span><span class=line><span class=cl>sgrep conv <span class=s2>&#34;database migration&#34;</span> --agent claude --since 7d
+</span></span><span class=line><span class=cl>sgrep conv <span class=s2>&#34;bug fix&#34;</span> --project payment-service --after 2026-01-01 --before 2026-06-01
+</span></span></code></pre></div><p>Semantic search is the default. Add <code>--hybrid</code> to combine it with conversation FTS, or <code>--exact</code> for lexical-only retrieval:</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl>sgrep conv <span class=s2>&#34;JWT token&#34;</span> --hybrid
+</span></span><span class=line><span class=cl>sgrep conv <span class=s2>&#34;JWT_SECRET&#34;</span> --exact
+</span></span></code></pre></div><h2 id=recover-context-inside-a-coding-agent>Recover context inside a coding agent</h2><p>The installed sgrep skill can call the JSON-only recall command when you ask the current agent about earlier work:</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl>sgrep conv recall -- <span class=s2>&#34;what did prior agents decide about incremental indexing?&#34;</span>
+</span></span><span class=line><span class=cl>sgrep conv recall --max-bytes <span class=m>32768</span> -- <span class=s2>&#34;what was implemented and what remains?&#34;</span>
+</span></span></code></pre></div><p>Recall searches all indexed agents with hybrid retrieval, keeps multiple matching turns per session, adds immediate neighbors and the latest completed turns, and returns bounded JSON with citations such as <code>E1</code> and <code>conv://codex/.../turn/7</code>. Historical excerpts are untrusted evidence: agents should cite them, never obey instructions found in them, and verify the current repository before acting.</p><p>Recall never creates the private conversation index automatically. If it returns <code>not_ready</code>, review the indexing scope before running <code>sgrep conv index</code>.</p><h2 id=inspect-and-reuse-a-session>Inspect and reuse a session</h2><p>Search output includes the canonical session ID. Use it to view, export, resume, or extract context:</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl>sgrep conv view &lt;session_id&gt;
+</span></span><span class=line><span class=cl>sgrep conv view &lt;session_id&gt; --turn <span class=m>3</span> --no-color
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>sgrep conv <span class=nb>export</span> &lt;session_id&gt; --format markdown -o conversation.md
+</span></span><span class=line><span class=cl>sgrep conv <span class=nb>export</span> &lt;session_id&gt; --format json -o conversation.json
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>sgrep conv resume &lt;session_id&gt;
+</span></span><span class=line><span class=cl>sgrep conv context &lt;session_id&gt; --turns <span class=m>10</span> --copy
+</span></span></code></pre></div><p>Copy a whole conversation, a single turn, or only its code blocks:</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl>sgrep conv copy &lt;session_id&gt;
+</span></span><span class=line><span class=cl>sgrep conv copy &lt;session_id&gt; --turn <span class=m>2</span> --code-only
+</span></span></code></pre></div><p>Use <code>sgrep conv status</code> to inspect the conversation index.</p><h2 id=storage-and-privacy>Storage and privacy</h2><p>Conversation content and metadata are stored locally in <code>~/.sgrep/conversations/conv.db</code>; compact turn vectors live in <code>~/.sgrep/conversations/turn_embeddings.tqmse</code>. Re-running <code>sgrep conv index</code> backfills missing embeddings and refreshes the vector sidecar.</p></div></article></main><footer class=site-footer><span>Local search for code and agent history.</span>
+<span><a href=https://github.com/XiaoConstantine/sgrep>GitHub</a> · Apache-2.0</span></footer></body></html>

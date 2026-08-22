@@ -1,0 +1,55 @@
+<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><meta name=description content="Final pooled cross-tool retrieval results plus separately bounded internal index and vector measurements."><title>Benchmarks · sgrep</title><link rel=stylesheet href=/sgrep/css/site.css></head><body><header class=site-header><a class=brand href=/sgrep/ aria-label="sgrep documentation home"><span class=brand-mark>s</span><span>sgrep</span></a><nav aria-label="Main navigation"><a href=/sgrep/guides/>Guides</a>
+<a href=/sgrep/reference/>Reference</a>
+<a href=/sgrep/architecture/>Architecture</a>
+<a href=/sgrep/benchmarks/>Benchmarks</a>
+<a href=https://github.com/XiaoConstantine/sgrep>GitHub</a></nav></header><main class=docs-shell><aside class=sidebar aria-label="Documentation navigation"><p class=sidebar-title>Documentation</p><div class=sidebar-group><a class=sidebar-section href=/sgrep/guides/>Guides</a>
+<a class=sidebar-page href=/sgrep/guides/getting-started/>Getting started</a>
+<a class=sidebar-page href=/sgrep/guides/code-search/>Code search</a>
+<a class=sidebar-page href=/sgrep/guides/conversation-search/>Conversation search</a>
+<a class=sidebar-page href=/sgrep/guides/agent-integration/>Agent integration</a></div><div class=sidebar-group><a class=sidebar-section href=/sgrep/reference/>Reference</a>
+<a class=sidebar-page href=/sgrep/reference/cli/>CLI reference</a>
+<a class=sidebar-page href=/sgrep/reference/configuration/>Configuration</a>
+<a class=sidebar-page href=/sgrep/reference/storage/>Storage</a></div><div class=sidebar-group><a class=sidebar-page href=/sgrep/architecture/>Architecture</a>
+<a class="sidebar-page active" href=/sgrep/benchmarks/>Benchmarks</a>
+<a class=sidebar-page href=/sgrep/library/>Library API</a></div></aside><article class=doc><p class=eyebrow>sgrep</p><h1>Benchmarks</h1><p class=lede>Final pooled cross-tool retrieval results plus separately bounded internal index and vector measurements.</p><div class=doc-content><h2 id=final-pooled-local-verdict>Final pooled local verdict</h2><p>The final cross-tool harness compared sgrep, grepai, osgrep, and ChunkHound on
+an Apple M3 Pro using 20 queries against <code>dspy-go</code> commit <code>87cb50f</code>. The tested
+sgrep source was <code>19ebec1</code>. Rankings were frozen before the pooled qrels were
+finalized, then rescored without rerunning the tools.</p><p><code>sgrep balanced</code> is the strongest overall local quality-latency tradeoff and
+the strongest normalized implementation-code retriever by point estimate. It
+is not universally best. The 95% query-bootstrap confidence intervals overlap,
+so the ordering is not a claim of statistical significance.</p><h3 id=normalized-implementation-code-results>Normalized implementation-code results</h3><p>The normalized track requests 50 candidates, applies a common
+implementation-file scope, deduplicates by first file occurrence, and scores
+up to ten unique files.</p><table><thead><tr><th>Tool/profile</th><th style=text-align:right>MRR</th><th style=text-align:right>NDCG@10</th><th style=text-align:right>R@10</th><th style=text-align:right>Median latency</th></tr></thead><tbody><tr><td><code>sgrep fast</code></td><td style=text-align:right>0.749</td><td style=text-align:right>0.532</td><td style=text-align:right>0.377</td><td style=text-align:right><strong>42.0ms</strong></td></tr><tr><td><code>sgrep balanced</code></td><td style=text-align:right><strong>0.792</strong></td><td style=text-align:right><strong>0.589</strong></td><td style=text-align:right><strong>0.413</strong></td><td style=text-align:right>54.4ms</td></tr><tr><td><code>sgrep quality</code></td><td style=text-align:right><strong>0.792</strong></td><td style=text-align:right>0.555</td><td style=text-align:right>0.372</td><td style=text-align:right>69.3ms</td></tr><tr><td>grepai</td><td style=text-align:right>0.585</td><td style=text-align:right>0.436</td><td style=text-align:right>0.332</td><td style=text-align:right>110.2ms</td></tr><tr><td>osgrep</td><td style=text-align:right>0.733</td><td style=text-align:right>0.462</td><td style=text-align:right>0.292</td><td style=text-align:right>939.4ms</td></tr><tr><td>ChunkHound</td><td style=text-align:right>0.679</td><td style=text-align:right>0.493</td><td style=text-align:right>0.396</td><td style=text-align:right>2946.0ms</td></tr></tbody></table><p>Balanced is recommended over quality: it is faster, ties its MRR, and has
+higher NDCG@10 and R@10 point estimates in this track.</p><h3 id=other-local-evaluation-tracks>Other local evaluation tracks</h3><table><thead><tr><th>Track</th><th>Point-estimate leaders</th></tr></thead><tbody><tr><td>Normalized all files</td><td>osgrep MRR <strong>0.867</strong>; sgrep balanced/quality NDCG@10 <strong>0.607</strong> and R@10 <strong>0.340</strong></td></tr><tr><td>Native product output</td><td>osgrep MRR <strong>0.858</strong>; ChunkHound R@10 <strong>0.236</strong>; sgrep balanced NDCG@10 <strong>0.429</strong> in the full pool</td></tr></tbody></table><p>The product track preserves each CLI&rsquo;s native order and duplicate file hits.
+Its small NDCG@10 ordering is pool-sensitive: when candidates exclusive to the
+sgrep family are left out, ChunkHound is 0.426, sgrep fast is 0.421, and sgrep
+balanced is 0.413. This is why the full-pool product NDCG point estimate is not
+presented as a robust win. The normalized local leaders do not change under
+that sensitivity check.</p><h3 id=judgment-and-cloud-caveats>Judgment and cloud caveats</h3><p>The pooled qrels are model-judged, not human-annotated. Two independent full
+passes were followed by blind adjudication. The reported 95% percentile
+intervals use 10,000 query bootstrap samples; with only 20 queries, they are
+wide and overlap. Product defaults also differ in model, chunking, and storage,
+so the benchmark measures whole retrieval products rather than an isolated
+algorithm.</p><p>Cloud-backed mgrep remains in a separate exploratory track. Its run was
+quota-interrupted and its timing is a completion-interval proxy, not official
+CLI wall time. It is therefore excluded from the local quality-latency verdict.</p><h2 id=separate-internal-index-and-vector-measurements>Separate internal index and vector measurements</h2><p>The measurements below come from an earlier sgrep-only after-state snapshot on
+the same pinned corpus. They do not share the final cross-tool harness&rsquo;s
+executable, pooled judgments, or external CLI timing boundary. In particular,
+internal search-stage times exclude CLI process startup, while the final table
+above reports external CLI wall time.</p><p>In that internal snapshot, mean stage timings were 22.6ms for query embedding
+in the quality profile, 12.1ms for its vector stage, and 11.7ms for ColBERT.
+The fast profile&rsquo;s vector stage measured 4.3ms. Do not add these stages to, or
+compare them directly with, the final cross-tool medians.</p><h3 id=index-time-and-storage>Index time and storage</h3><p>The base index took 3m40.95s. Full indexing with the default ColBERT precompute and export took 7m42.59s.</p><table><thead><tr><th>Artifact</th><th style=text-align:right>Size</th></tr></thead><tbody><tr><td>SQLite index</td><td style=text-align:right>62MB</td></tr><tr><td>Exact float32 mmap</td><td style=text-align:right>39MB</td></tr><tr><td>ColBERT mmap</td><td style=text-align:right>23MB</td></tr><tr><td>TQ-MSE chunk vectors</td><td style=text-align:right>5.3MB</td></tr><tr><td>File vectors</td><td style=text-align:right>222KB</td></tr><tr><td><strong>Total</strong></td><td style=text-align:right><strong>about 130MB</strong></td></tr></tbody></table><h3 id=vector-microbenchmarks>Vector microbenchmarks</h3><p>Five-run top-50 scan measurements:</p><table><thead><tr><th>Backend</th><th style=text-align:right>10k vectors</th><th style=text-align:right>100k vectors</th><th>Storage tradeoff</th></tr></thead><tbody><tr><td>Exact float32</td><td style=text-align:right>0.63ms</td><td style=text-align:right>6.8ms</td><td>Largest resident artifact</td></tr><tr><td>TQ-MSE</td><td style=text-align:right>4.9ms</td><td style=text-align:right>49.3ms</td><td>About 7.4× smaller vector storage</td></tr><tr><td>Binary coarse scan</td><td style=text-align:right>0.43ms</td><td style=text-align:right>4.3ms</td><td>Intended as a coarse filter before reranking</td></tr></tbody></table><p>At the real 13,136-chunk corpus, the exact first-stage vector time was 4.3ms versus 7.1ms with TQ-MSE forced. The production cutoff remains 20,000 chunks to cap exact artifact memory and disk use.</p><h2 id=methodology-limits>Methodology limits</h2><ul><li>Final retrieval scores use 20 model-judged queries; overlapping bootstrap
+intervals preclude a strong general or significance claim.</li><li>The product/native NDCG ordering changes under sgrep-family pool leaveout;
+normalized point-estimate leaders remain unchanged in that check.</li><li>Product defaults use different models, chunking, and storage engines, so
+they do not isolate one component.</li><li>The index, storage, stage-timing, and vector measurements are an internal
+after-state snapshot, not a controlled same-index pre/post A/B test and not
+the final cross-tool run boundary.</li><li>Latency depends on corpus size, hardware, warm state, profile, vector
+artifact, and whether process startup is included.</li></ul><p>The committed internal-snapshot query logs are in
+<a href=https://github.com/XiaoConstantine/sgrep/tree/main/bench/results/current-implementation><code>bench/results/current-implementation</code></a>.
+They reproduce the internal smoke boundary, not the final pooled cross-tool
+scores. Reproduction should pin source and corpus commits, use full
+repository-relative qrel paths, fail on subprocess errors and timeouts, and
+report warmup policy, concurrency, and whether latency includes process
+startup.</p></div></article></main><footer class=site-footer><span>Local search for code and agent history.</span>
+<span><a href=https://github.com/XiaoConstantine/sgrep>GitHub</a> · Apache-2.0</span></footer></body></html>
