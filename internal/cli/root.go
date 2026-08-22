@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/XiaoConstantine/sgrep/pkg/index"
 	"github.com/XiaoConstantine/sgrep/pkg/rerank"
@@ -410,6 +411,11 @@ var indexCmd = &cobra.Command{
 	Short: "Index a directory for semantic search",
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		commandStart := time.Now()
+		defer func() {
+			util.Debugf(util.DebugSummary, "Index command total wall time: %v", time.Since(commandStart).Round(time.Millisecond))
+		}()
+
 		path := "."
 		if len(args) > 0 {
 			path = args[0]
@@ -435,9 +441,11 @@ var indexCmd = &cobra.Command{
 		}
 		defer func() { _ = indexer.Close() }()
 
+		baseIndexStart := time.Now()
 		if err := indexer.Index(ctx); err != nil {
 			return err
 		}
+		util.Debugf(util.DebugSummary, "Base indexing wall time: %v", time.Since(baseIndexStart).Round(time.Millisecond))
 
 		if indexer.CompactVectorStoreWritten() {
 			chunkCount, fileCount := indexer.CompactVectorStoreCounts()
@@ -458,26 +466,32 @@ var indexCmd = &cobra.Command{
 				return fmt.Errorf("invalidate stale ColBERT artifact: %w", err)
 			}
 			fmt.Println("\nPre-computing ColBERT segments for fast query-time scoring...")
+			colbertStart := time.Now()
 			processed, err := indexer.ComputeColBERTSegments(ctx)
 			if err != nil {
 				return fmt.Errorf("failed to compute ColBERT segments: %w", err)
 			}
+			util.Debugf(util.DebugSummary, "ColBERT precompute wall time: %v", time.Since(colbertStart).Round(time.Millisecond))
 			fmt.Printf("Computed segments for %d chunks\n", processed)
 
 			// Export to MMap for faster query-time access
 			fmt.Println("Exporting segments to MMap store...")
+			exportStart := time.Now()
 			segCount, err := indexer.ExportColBERTToMMap(ctx, indexer.RepoDir())
 			if err != nil {
 				return fmt.Errorf("export ColBERT segments to mmap: %w", err)
 			}
+			util.Debugf(util.DebugSummary, "ColBERT MMap export wall time: %v", time.Since(exportStart).Round(time.Millisecond))
 			fmt.Printf("Exported %d segments to MMap store\n", segCount)
 		} else if err := os.Remove(filepath.Join(indexer.RepoDir(), "colbert_segments.mmap")); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove disabled ColBERT artifact: %w", err)
 		}
 
+		checkpointStart := time.Now()
 		if err := indexer.Checkpoint(ctx); err != nil {
 			return fmt.Errorf("checkpoint index: %w", err)
 		}
+		util.Debugf(util.DebugSummary, "Final checkpoint wall time: %v", time.Since(checkpointStart).Round(time.Millisecond))
 
 		return nil
 	},
@@ -719,7 +733,7 @@ var serverStartCmd = &cobra.Command{
 			return err
 		}
 
-		if mgr.IsRunning() {
+		if mgr.IsReady() {
 			fmt.Println("Server already running")
 			return nil
 		}
@@ -770,6 +784,9 @@ var serverStatusCmd = &cobra.Command{
 			fmt.Printf("Status: running on port %d", port)
 			if pid > 0 {
 				fmt.Printf(" (PID %d)", pid)
+			}
+			if !mgr.IsReady() {
+				fmt.Print(" (restart required)")
 			}
 			fmt.Println()
 		} else {

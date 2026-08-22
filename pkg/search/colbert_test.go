@@ -212,7 +212,7 @@ func TestAdaptiveSegments(t *testing.T) {
 
 	t.Run("long content compresses below legacy cap", func(t *testing.T) {
 		var b strings.Builder
-		for i := 0; i < 64; i++ {
+		for i := 0; i < 16; i++ {
 			fmt.Fprintf(&b, "// handler %d\nfunc handler%d() error {\n\tif err := step%d(); err != nil {\n\t\treturn err\n\t}\n\treturn nil\n}\n\n", i, i, i)
 		}
 		content := b.String()

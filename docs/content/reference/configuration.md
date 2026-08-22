@@ -12,7 +12,7 @@ sgrep works without configuration. Environment variables are intended for altern
 |----------|---------|---------|
 | `SGREP_HOME` | `~/.sgrep` | Models, repository indexes, and managed-server state |
 | `SGREP_DIMS` | `768` | Embedding dimensions; changing it requires reindexing |
-| `SGREP_CONTEXT_TOKENS` | `512` | Per-slot embedding context; changing it requires reindexing |
+| `SGREP_CONTEXT_TOKENS` | `1280` | Per-slot code context; conversation chunks remain at 512 by default. An explicit value applies to both and requires reindexing |
 | `SGREP_MAX_TOKENS` | context budget minus reserve | Optional source-chunk budget override |
 
 The model format adds `search_query:` to queries and `search_document:` to indexed material. Index metadata records the format and context budget so incompatible indexes fail validation instead of mixing embeddings.

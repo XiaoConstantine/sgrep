@@ -30,6 +30,7 @@ type Manager struct {
 	port         int
 	host         string
 	processCheck func(pid int) bool // test hook; nil uses OS process inspection
+	launchCheck  func(pid int) bool // test hook; nil inspects managed process arguments
 }
 
 type launchConfig struct {
@@ -62,8 +63,21 @@ func NewManager() (*Manager, error) {
 // the llama.cpp embedding endpoint. A generic HTTP 200 from another service is
 // deliberately insufficient.
 func (m *Manager) IsRunning() bool {
+	return m.isRunning(false)
+}
+
+// IsReady reports whether the managed server is running with launch arguments
+// compatible with the current embedding configuration.
+func (m *Manager) IsReady() bool {
+	return m.isRunning(true)
+}
+
+func (m *Manager) isRunning(requireCompatible bool) bool {
 	pid, err := m.readPID()
 	if err != nil || !processAlive(pid) || !m.ownsProcess(pid) {
+		return false
+	}
+	if requireCompatible && !m.launchCompatible(pid) {
 		return false
 	}
 	return m.embeddingReady()
@@ -137,11 +151,45 @@ func (m *Manager) portResponding() bool {
 	return true
 }
 
+func (m *Manager) launchCompatible(pid int) bool {
+	if m.launchCheck != nil {
+		return m.launchCheck(pid)
+	}
+	// processCheck replaces OS process inspection in tests. Unless a test also
+	// supplies launchCheck, preserve the previous assumption that it is ready.
+	if m.processCheck != nil {
+		return true
+	}
+	output, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	if err != nil {
+		return false
+	}
+	_, _, contextSize := launchResources(runtime.NumCPU())
+	return containsArgValue(strings.Fields(strings.TrimSpace(string(output))), "-c", strconv.Itoa(contextSize))
+}
+
+func containsArgValue(args []string, key, value string) bool {
+	for i, arg := range args {
+		if arg == key && i+1 < len(args) && args[i+1] == value {
+			return true
+		}
+		if arg == key+"="+value {
+			return true
+		}
+	}
+	return false
+}
+
 // Start starts the llama.cpp server if not already running.
 func (m *Manager) Start() error {
 	m.cleanStalePID()
-	if m.IsRunning() {
+	if m.IsReady() {
 		return nil
+	}
+	if pid, err := m.readPID(); err == nil && processAlive(pid) && m.ownsProcess(pid) {
+		if err := m.Stop(); err != nil {
+			return err
+		}
 	}
 	if m.portResponding() {
 		return fmt.Errorf("port %d is occupied by a process that is not the managed embedding server; set SGREP_PORT or SGREP_ENDPOINT", m.port)
@@ -159,24 +207,7 @@ func (m *Manager) Start() error {
 		return fmt.Errorf("model not found at %s. Run 'sgrep setup' first", modelPath)
 	}
 
-	// Calculate optimal settings based on CPU
-	// Reference: https://github.com/ggml-org/llama.cpp/discussions/4130
-	numCPU := runtime.NumCPU()
-
-	// Threads: use most CPUs for embedding workload
-	threads := numCPU
-	if threads > 16 {
-		threads = 16
-	}
-
-	// Keep enough per-slot context for the same document budget used by the
-	// chunker and embedder. Sixteen slots retain indexing throughput without
-	// truncating medium-sized functions.
-	parallelSlots := 16
-	if numCPU < 8 {
-		parallelSlots = 8
-	}
-	contextSize := parallelSlots * modelcfg.ContextTokens()
+	threads, parallelSlots, contextSize := launchResources(runtime.NumCPU())
 
 	var startErrs []string
 	for _, cfg := range m.launchConfigs() {
@@ -189,6 +220,17 @@ func (m *Manager) Start() error {
 	}
 
 	return fmt.Errorf("failed to start llama-server: %s", strings.Join(startErrs, "; "))
+}
+
+func launchResources(numCPU int) (threads, parallelSlots, contextSize int) {
+	// Reference: https://github.com/ggml-org/llama.cpp/discussions/4130
+	threads = min(numCPU, 16)
+	parallelSlots = 16
+	if numCPU < 8 {
+		parallelSlots = 8
+	}
+	contextSize = parallelSlots * modelcfg.ContextTokens()
+	return
 }
 
 func (m *Manager) startWithConfig(llamaPath, modelPath string, threads, parallelSlots, contextSize int, cfg launchConfig) error {
@@ -362,9 +404,9 @@ func (m *Manager) Endpoint() string {
 	return fmt.Sprintf("http://%s:%d", m.host, m.port)
 }
 
-// EnsureRunning starts the server if not running, used by embedder.
+// EnsureRunning starts or restarts the server until it is ready for embedding.
 func (m *Manager) EnsureRunning() error {
-	if m.IsRunning() {
+	if m.IsReady() {
 		return nil
 	}
 	return m.Start()
@@ -433,7 +475,7 @@ func (m *Manager) cleanStalePID() {
 func (m *Manager) waitForReady() error {
 	deadline := time.Now().Add(StartupTimeout)
 	for time.Now().Before(deadline) {
-		if m.IsRunning() {
+		if m.IsReady() {
 			return nil
 		}
 		time.Sleep(HealthInterval)

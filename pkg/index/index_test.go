@@ -745,7 +745,7 @@ func TestApplyPQCodecSizeGate_DowngradesSmallCorpus(t *testing.T) {
 }
 
 func TestApplyPQCodecSizeGate_KeepsPQForLargeCorpus(t *testing.T) {
-	chunks := make([]store.ChunkInfo, 600)
+	chunks := make([]store.ChunkInfo, 700)
 	for i := range chunks {
 		chunks[i] = store.ChunkInfo{
 			ID:      fmt.Sprintf("chunk-%d", i),

@@ -12,10 +12,26 @@ func TestContextBudgets(t *testing.T) {
 			if got := ContextTokens(); got != mustAtoi(value) {
 				t.Fatalf("ContextTokens = %d, want %s", got, value)
 			}
+			if got := ConversationContextTokens(); got != mustAtoi(value) {
+				t.Fatalf("ConversationContextTokens = %d, want %s", got, value)
+			}
 			if DocumentTokenBudget() >= ContextTokens() {
 				t.Fatalf("document budget %d must reserve prefix space below context %d", DocumentTokenBudget(), ContextTokens())
 			}
 		})
+	}
+}
+
+func TestDefaultContextBudgetsKeepConversationChunkingStable(t *testing.T) {
+	t.Setenv("SGREP_CONTEXT_TOKENS", "")
+	if got := ContextTokens(); got != 1280 {
+		t.Fatalf("ContextTokens = %d, want 1280", got)
+	}
+	if got := ConversationContextTokens(); got != 512 {
+		t.Fatalf("ConversationContextTokens = %d, want 512", got)
+	}
+	if got := ConversationDocumentTokenBudget(); got != 448 {
+		t.Fatalf("ConversationDocumentTokenBudget = %d, want 448", got)
 	}
 }
 

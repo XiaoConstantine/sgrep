@@ -10,6 +10,7 @@ var (
 	lexicalIdentifierPattern = regexp.MustCompile(`[A-Za-z][A-Za-z0-9_-]*`)
 	camelAcronymBoundary     = regexp.MustCompile(`([A-Z]{2,})([A-Z][a-z])`)
 	camelWordBoundary        = regexp.MustCompile(`([a-z0-9])([A-Z])`)
+	lexicalSeparatorReplacer = strings.NewReplacer("_", " ", "-", " ")
 )
 
 // buildLexicalText supplements raw source FTS with AST descriptions, path
@@ -33,7 +34,7 @@ func buildLexicalText(path, description, content string) string {
 
 	for _, identifier := range identifiers {
 		add(identifier)
-		expanded := strings.NewReplacer("_", " ", "-", " ").Replace(identifier)
+		expanded := lexicalSeparatorReplacer.Replace(identifier)
 		expanded = camelAcronymBoundary.ReplaceAllString(expanded, `$1 $2`)
 		expanded = camelWordBoundary.ReplaceAllString(expanded, `$1 $2`)
 		for _, part := range strings.Fields(expanded) {

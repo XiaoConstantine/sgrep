@@ -186,8 +186,8 @@ func (s *Store) validateEmbeddingFormat() error {
 	if err := s.db.QueryRow(`SELECT CAST(value AS INTEGER) FROM conv_metadata WHERE key = ?`, convEmbeddingContextTokensKey).Scan(&contextTokens); err != nil {
 		return fmt.Errorf("conversation embedding context is unknown; run 'sgrep conv index --force'")
 	}
-	if contextTokens != modelcfg.ContextTokens() {
-		return fmt.Errorf("conversation embedding context is %d tokens, need %d; run 'sgrep conv index --force'", contextTokens, modelcfg.ContextTokens())
+	if contextTokens != modelcfg.ConversationContextTokens() {
+		return fmt.Errorf("conversation embedding context is %d tokens, need %d; run 'sgrep conv index --force'", contextTokens, modelcfg.ConversationContextTokens())
 	}
 	return nil
 }
@@ -212,7 +212,7 @@ func (s *Store) finalizeEmbeddingFormat(ctx context.Context) error {
 	defer func() { _ = tx.Rollback() }()
 	for key, value := range map[string]int{
 		convEmbeddingFormatVersionKey: modelcfg.EmbeddingFormatVersion,
-		convEmbeddingContextTokensKey: modelcfg.ContextTokens(),
+		convEmbeddingContextTokensKey: modelcfg.ConversationContextTokens(),
 	} {
 		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO conv_metadata (key, value) VALUES (?, ?)`, key, value); err != nil {
 			return fmt.Errorf("finalize conversation embedding metadata: %w", err)
@@ -600,7 +600,7 @@ func (s *Store) initSchema() error {
 	var embeddingVersion, embeddingContext int
 	_ = s.db.QueryRow(`SELECT CAST(value AS INTEGER) FROM conv_metadata WHERE key = ?`, convEmbeddingFormatVersionKey).Scan(&embeddingVersion)
 	_ = s.db.QueryRow(`SELECT CAST(value AS INTEGER) FROM conv_metadata WHERE key = ?`, convEmbeddingContextTokensKey).Scan(&embeddingContext)
-	if embeddingVersion != modelcfg.EmbeddingFormatVersion || embeddingContext != modelcfg.ContextTokens() {
+	if embeddingVersion != modelcfg.EmbeddingFormatVersion || embeddingContext != modelcfg.ConversationContextTokens() {
 		if _, err := s.db.Exec(`DELETE FROM conv_turn_embeddings`); err != nil {
 			return fmt.Errorf("clear incompatible conversation embeddings: %w", err)
 		}
@@ -620,7 +620,7 @@ func (s *Store) initSchema() error {
 		}
 		if _, err := s.db.Exec(`
 			INSERT OR REPLACE INTO conv_metadata (key, value) VALUES (?, ?)
-		`, convEmbeddingContextTokensKey, modelcfg.ContextTokens()); err != nil {
+		`, convEmbeddingContextTokensKey, modelcfg.ConversationContextTokens()); err != nil {
 			return fmt.Errorf("store conversation context migration state: %w", err)
 		}
 	}

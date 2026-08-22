@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	// MaxTurnTokens documents the default 512-token slot budget after reserve.
-	// NewChunker reads the runtime SGREP_CONTEXT_TOKENS setting.
+	// MaxTurnTokens documents the conversation's default 512-token budget after
+	// reserve. NewChunker honors an explicit SGREP_CONTEXT_TOKENS override.
 	MaxTurnTokens = 448
 	MaxTurnChars  = MaxTurnTokens * 2
 	OverlapChars  = 100
@@ -25,7 +25,7 @@ type Chunker struct {
 
 // NewChunker creates a new chunker with default settings.
 func NewChunker() *Chunker {
-	maxTokens := modelcfg.DocumentTokenBudget()
+	maxTokens := modelcfg.ConversationDocumentTokenBudget()
 	return &Chunker{
 		maxTokens:    maxTokens,
 		maxChars:     maxTokens * 2,

@@ -181,7 +181,7 @@ func (e *Embedder) ensureServer() error {
 	}
 
 	e.startOnce.Do(func() {
-		if !e.serverMgr.IsRunning() {
+		if !e.serverMgr.IsReady() {
 			// Emit event if eventBox is configured
 			if e.eventBox != nil {
 				e.eventBox.Set(util.EvtServerStarting, nil)

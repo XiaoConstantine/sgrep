@@ -642,7 +642,7 @@ func AdaptiveSegmentBudgetFromRawCount(rawCount int) int {
 }
 
 const (
-	legacyMaxDocumentSegments   = 10
+	legacyMaxDocumentSegments   = 8
 	adaptiveMinDocumentSegments = 3
 	adaptiveMaxDocumentSegments = legacyMaxDocumentSegments
 )

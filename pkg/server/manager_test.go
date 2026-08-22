@@ -46,6 +46,19 @@ func TestManager_IsRunning(t *testing.T) {
 	}
 }
 
+func TestManager_IncompatibleServerIsRunningButNotReady(t *testing.T) {
+	mgr, closeServer := runningTestManager(t, http.StatusOK)
+	defer closeServer()
+	mgr.launchCheck = func(int) bool { return false }
+
+	if !mgr.IsRunning() {
+		t.Fatal("healthy managed server should still be reported as running")
+	}
+	if mgr.IsReady() {
+		t.Fatal("server with incompatible launch arguments should not be ready")
+	}
+}
+
 func TestManager_IsRunning_False(t *testing.T) {
 	mgr := &Manager{port: 59999, host: "localhost"}
 	if mgr.IsRunning() {
@@ -263,6 +276,27 @@ func TestManager_BuildArgs_UsesDeviceAndGPULayers(t *testing.T) {
 	}
 	if !containsPair(args, "--device", "none") {
 		t.Fatalf("args missing device override: %v", args)
+	}
+}
+
+func TestLaunchResourcesUseConfiguredContext(t *testing.T) {
+	t.Setenv("SGREP_CONTEXT_TOKENS", "1280")
+	threads, slots, contextSize := launchResources(16)
+	if threads != 16 || slots != 16 || contextSize != 20480 {
+		t.Fatalf("launchResources(16) = %d, %d, %d; want 16, 16, 20480", threads, slots, contextSize)
+	}
+}
+
+func TestContainsArgValue(t *testing.T) {
+	args := []string{"llama-server", "-c", "20480", "--port=8080"}
+	if !containsArgValue(args, "-c", "20480") {
+		t.Fatalf("expected context argument in %v", args)
+	}
+	if containsArgValue(args, "-c", "8192") {
+		t.Fatalf("unexpected old context argument in %v", args)
+	}
+	if !containsArgValue(args, "--port", "8080") {
+		t.Fatalf("expected equals-form port argument in %v", args)
 	}
 }
 

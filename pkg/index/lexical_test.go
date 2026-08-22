@@ -13,3 +13,17 @@ func TestBuildLexicalTextSplitsCodeIdentifiersAndPaths(t *testing.T) {
 		}
 	}
 }
+
+func BenchmarkBuildLexicalText(b *testing.B) {
+	content := strings.Repeat(`
+func (idx *Indexer) buildColBERTChunkSegments(ctx context.Context, chunks []store.ChunkInfo) error {
+	combinedText := util.CombineDescriptionContent(chunk.Content, chunk.Description)
+	return segmentStore.StoreColBERTSegmentsBatch(ctx, chunkSegments)
+}
+`, 8)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(content)))
+	for b.Loop() {
+		buildLexicalText("pkg/index/colbert_segments.go", "Go method buildColBERTChunkSegments", content)
+	}
+}

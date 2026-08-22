@@ -184,6 +184,9 @@ Located in `internal/bench/` and `bench/`:
 
 - **Vector operations**: L2Distance, batch distance, TopK selection
 - **Store operations**: Search at various document counts (1k, 10k, 50k)
+- **Indexing microbenchmarks**: Synthetic chunking and sqlite-vec writes. These
+  exclude repository traversal, llama.cpp inference, compact artifact writes,
+  and the default ColBERT precompute.
 - **Chunking**: File parsing and chunking performance
 - **End-to-end**: Full search pipeline benchmarks
 
@@ -197,6 +200,15 @@ go tool pprof -http=:8080 bench/results/profiles/cpu_*.prof
 
 # View memory profile
 go tool pprof -http=:8081 bench/results/profiles/mem_*.prof
+```
+
+`make bench-profile` profiles the Go-side indexing microbenchmarks. CPU time in
+the external llama.cpp process is outside Go's pprof boundary. To inspect the
+real indexing wall-time breakdown, run the CLI with summary timing enabled on a
+pinned corpus and a warmed embedding server:
+
+```bash
+/usr/bin/time -p sgrep -d index /path/to/pinned/corpus
 ```
 
 ### Regression Detection

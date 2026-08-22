@@ -16,23 +16,45 @@ const (
 	// DefaultContextTokens is the per-slot llama.cpp context budget. Code chunks
 	// reserve a small amount of this budget for retrieval task prefixes and model
 	// token-estimation variance.
-	DefaultContextTokens = 512
-	contextReserveTokens = 64
+	DefaultContextTokens             = 1280
+	DefaultConversationContextTokens = 512
+	contextReserveTokens             = 64
 )
 
 // ContextTokens returns the configured per-slot embedding context budget.
 func ContextTokens() int {
-	if value := strings.TrimSpace(os.Getenv("SGREP_CONTEXT_TOKENS")); value != "" {
-		if tokens, err := strconv.Atoi(value); err == nil && tokens >= 128 {
-			return tokens
-		}
+	if tokens, ok := configuredContextTokens(); ok {
+		return tokens
 	}
 	return DefaultContextTokens
+}
+
+// ConversationContextTokens keeps the established conversation chunk size
+// unless SGREP_CONTEXT_TOKENS explicitly overrides all embedding inputs.
+func ConversationContextTokens() int {
+	if tokens, ok := configuredContextTokens(); ok {
+		return tokens
+	}
+	return DefaultConversationContextTokens
+}
+
+func configuredContextTokens() (int, bool) {
+	tokens, err := strconv.Atoi(strings.TrimSpace(os.Getenv("SGREP_CONTEXT_TOKENS")))
+	return tokens, err == nil && tokens >= 128
 }
 
 // DocumentTokenBudget returns the maximum unprefixed document chunk budget.
 func DocumentTokenBudget() int {
 	budget := ContextTokens() - contextReserveTokens
+	if budget < 96 {
+		return 96
+	}
+	return budget
+}
+
+// ConversationDocumentTokenBudget returns the conversation chunk budget.
+func ConversationDocumentTokenBudget() int {
+	budget := ConversationContextTokens() - contextReserveTokens
 	if budget < 96 {
 		return 96
 	}

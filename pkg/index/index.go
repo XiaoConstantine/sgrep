@@ -54,7 +54,7 @@ const (
 	colbertPQMinWorthwhileSegments     = 5000
 	colbertTQMSEBits                   = 4
 	colbertTQMSESeed                   = 42
-	colbertPreindexChunkFetchBatchSize = 64
+	colbertPreindexChunkFetchBatchSize = 128
 	colbertRewriteChunkBatchSize       = 128
 )
 

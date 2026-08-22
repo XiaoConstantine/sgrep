@@ -56,8 +56,10 @@ run_with_profile() {
     
     echo -e "${GREEN}Running benchmarks with profiling...${NC}"
     
-    # CPU profile
-    go test ./internal/bench -run=^$ -bench=BenchmarkSearchEndToEnd -benchmem \
+    # Profile the indexing benchmarks in bench/. The previous target package did
+    # not define BenchmarkSearchEndToEnd, so this command succeeded without
+    # running or profiling a benchmark.
+    go test ./bench -run=^$ -bench='^BenchmarkIndexing$' -benchmem \
         -tags=sqlite_vec -cpuprofile="$PROFILE_DIR/cpu_$timestamp.prof" \
         -memprofile="$PROFILE_DIR/mem_$timestamp.prof"
     
