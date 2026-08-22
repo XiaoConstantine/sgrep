@@ -471,7 +471,7 @@ var indexCmd = &cobra.Command{
 			if err != nil {
 				return fmt.Errorf("failed to compute ColBERT segments: %w", err)
 			}
-			util.Debugf(util.DebugSummary, "ColBERT precompute wall time: %v", time.Since(colbertStart).Round(time.Millisecond))
+			fmt.Printf("ColBERT precompute wall time: %v\n", time.Since(colbertStart).Round(time.Millisecond))
 			fmt.Printf("Computed segments for %d chunks\n", processed)
 
 			// Export to MMap for faster query-time access
