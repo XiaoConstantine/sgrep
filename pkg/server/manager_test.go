@@ -279,11 +279,36 @@ func TestManager_BuildArgs_UsesDeviceAndGPULayers(t *testing.T) {
 	}
 }
 
+func TestManager_BuildArgs_UsesPerSlotContextForBatchGeometry(t *testing.T) {
+	mgr := &Manager{port: 8080, host: "localhost"}
+	args := mgr.buildArgs("/tmp/model.gguf", 16, 16, 20480, launchConfig{gpuLayers: "0"})
+
+	if !containsPair(args, "-b", "1280") || !containsPair(args, "-ub", "1280") {
+		t.Fatalf("args do not size embedding batches to the per-slot context: %v", args)
+	}
+}
+
 func TestLaunchResourcesUseConfiguredContext(t *testing.T) {
 	t.Setenv("SGREP_CONTEXT_TOKENS", "1280")
 	threads, slots, contextSize := launchResources(16)
 	if threads != 16 || slots != 16 || contextSize != 20480 {
 		t.Fatalf("launchResources(16) = %d, %d, %d; want 16, 16, 20480", threads, slots, contextSize)
+	}
+}
+
+func TestLaunchArgsCompatibleRequiresCurrentBatchGeometry(t *testing.T) {
+	current := []string{"llama-server", "-c", "20480", "-b", "1280", "-ub", "1280"}
+	if !launchArgsCompatible(current, 16, 20480) {
+		t.Fatalf("current launch arguments reported incompatible: %v", current)
+	}
+
+	for _, args := range [][]string{
+		{"llama-server", "-c", "20480", "-b", "2048", "-ub", "1280"},
+		{"llama-server", "-c", "20480", "-b", "1280", "-ub", "2048"},
+	} {
+		if launchArgsCompatible(args, 16, 20480) {
+			t.Fatalf("old batch geometry reported compatible: %v", args)
+		}
 	}
 }
 

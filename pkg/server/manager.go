@@ -164,8 +164,15 @@ func (m *Manager) launchCompatible(pid int) bool {
 	if err != nil {
 		return false
 	}
-	_, _, contextSize := launchResources(runtime.NumCPU())
-	return containsArgValue(strings.Fields(strings.TrimSpace(string(output))), "-c", strconv.Itoa(contextSize))
+	_, parallelSlots, contextSize := launchResources(runtime.NumCPU())
+	return launchArgsCompatible(strings.Fields(strings.TrimSpace(string(output))), parallelSlots, contextSize)
+}
+
+func launchArgsCompatible(args []string, parallelSlots, contextSize int) bool {
+	batchSize := strconv.Itoa(contextSize / parallelSlots)
+	return containsArgValue(args, "-c", strconv.Itoa(contextSize)) &&
+		containsArgValue(args, "-b", batchSize) &&
+		containsArgValue(args, "-ub", batchSize)
 }
 
 func containsArgValue(args []string, key, value string) bool {
@@ -280,14 +287,16 @@ func (m *Manager) startWithConfig(llamaPath, modelPath string, threads, parallel
 }
 
 func (m *Manager) buildArgs(modelPath string, threads, parallelSlots, contextSize int, cfg launchConfig) []string {
+	// Do not size embedding graphs beyond the largest input a slot can accept.
+	batchSize := strconv.Itoa(contextSize / parallelSlots)
 	args := []string{
 		"-m", modelPath,
 		"--embedding",
 		"--port", strconv.Itoa(m.port),
 		"--host", m.host,
 		"-c", strconv.Itoa(contextSize),
-		"-b", "2048", // batch size (match typical input)
-		"-ub", "2048", // microbatch (equal to -b for embeddings)
+		"-b", batchSize,
+		"-ub", batchSize,
 		"--threads", strconv.Itoa(threads),
 		"-ngl", cfg.gpuLayers,
 		"-np", strconv.Itoa(parallelSlots),
