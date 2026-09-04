@@ -285,7 +285,7 @@ func TestRerankerSupervisorRetainsLifecycleLockUntilPublication(t *testing.T) {
 			Args:          []string{"30"},
 			Environment:   os.Environ(),
 			Stdout:        io.Discard,
-			Stderr:        io.Discard,
+			Stderr:        os.Stderr,
 			LifecycleLock: supervisorLock,
 			BeforePublish: func() {
 				close(publicationReached)
@@ -828,7 +828,7 @@ func TestRerankerSupervisorUnadoptedLaunchCleansUp(t *testing.T) {
 			Args:            []string{"30"},
 			Environment:     os.Environ(),
 			Stdout:          io.Discard,
-			Stderr:          io.Discard,
+			Stderr:          os.Stderr,
 			AdoptionTimeout: 500 * time.Millisecond,
 		})
 	}()
@@ -872,7 +872,7 @@ func TestRerankerSupervisorUncommittedAdoptionCleansUp(t *testing.T) {
 			Args:            []string{"30"},
 			Environment:     os.Environ(),
 			Stdout:          io.Discard,
-			Stderr:          io.Discard,
+			Stderr:          os.Stderr,
 			AdoptionTimeout: time.Second,
 			AdoptionLease:   300 * time.Millisecond,
 		})
@@ -929,7 +929,7 @@ func TestRerankerManagerStartAdoptsPublishedSupervisor(t *testing.T) {
 				"GO_RERANKER_HELPER_READY="+ready,
 			),
 			Stdout:          io.Discard,
-			Stderr:          io.Discard,
+			Stderr:          os.Stderr,
 			AdoptionTimeout: 400 * time.Millisecond,
 		})
 	}()
@@ -984,7 +984,7 @@ func TestRerankerManagerFailedAdoptionStopsSupervisor(t *testing.T) {
 				"GO_RERANKER_HELPER_READY="+ready,
 			),
 			Stdout:          io.Discard,
-			Stderr:          io.Discard,
+			Stderr:          os.Stderr,
 			AdoptionTimeout: 2 * time.Second,
 		})
 	}()
@@ -1038,7 +1038,7 @@ func TestRerankerSupervisorSIGKILLTerminatesReexecutedRoot(t *testing.T) {
 	supervisor, done, err := launchRerankerSupervisor(currentSupervisorRegistration(t), dir, control, token, port, os.Args[0], []string{
 		"-test.run=TestRerankerHelperProcess", "--",
 		"--port", strconv.Itoa(port), "--pooling", "rank",
-	}, io.Discard)
+	}, os.Stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1113,7 +1113,7 @@ func TestRerankerSupervisorSIGKILLTerminatesForkConfinedChild(t *testing.T) {
 	supervisor, done, err := launchRerankerSupervisor(currentSupervisorRegistration(t), dir, control, token, port, os.Args[0], []string{
 		"-test.run=TestRerankerDescendantHelper", "--",
 		"--port", strconv.Itoa(port), "--pooling", "rank",
-	}, io.Discard)
+	}, os.Stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1180,7 +1180,7 @@ func TestRerankerSupervisorStopPreventsDetachedDescendants(t *testing.T) {
 	supervisor, done, err := launchRerankerSupervisor(currentSupervisorRegistration(t), dir, control, token, port, os.Args[0], []string{
 		"-test.run=TestRerankerDescendantHelper", "--",
 		"--port", strconv.Itoa(port), "--pooling", "rank",
-	}, io.Discard)
+	}, os.Stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1239,7 +1239,7 @@ func TestRerankerSupervisorGuardianFailureTerminatesChild(t *testing.T) {
 	supervisor, done, err := launchRerankerSupervisor(currentSupervisorRegistration(t), dir, control, token, port, os.Args[0], []string{
 		"-test.run=TestRerankerHelperProcess", "--",
 		"--port", strconv.Itoa(port), "--pooling", "rank",
-	}, io.Discard)
+	}, os.Stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1450,7 +1450,7 @@ func TestRerankerSupervisorDoesNotInheritHostDescriptors(t *testing.T) {
 	supervisor, done, err := launchRerankerSupervisor(currentSupervisorRegistration(t), dir, control, token, port, os.Args[0], []string{
 		"-test.run=TestRerankerFDHelper", "--",
 		"--port", strconv.Itoa(port), "--pooling", "rank",
-	}, io.Discard)
+	}, os.Stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1639,7 +1639,7 @@ func startTestRerankerSupervisor(t *testing.T, ignoreTerm bool) (rerankerPIDStat
 			Args:        []string{"-test.run=TestRerankerHelperProcess", "--", "--port", strconv.Itoa(port), "--pooling", "rank"},
 			Environment: environment,
 			Stdout:      io.Discard,
-			Stderr:      io.Discard,
+			Stderr:      os.Stderr,
 		})
 	}()
 

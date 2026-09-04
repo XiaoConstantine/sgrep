@@ -10,6 +10,7 @@ jobs:
   test:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           # Linux: use sqlite-vec (go-libsql doesn't have Linux prebuilts)
@@ -46,6 +47,17 @@ jobs:
           CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
           CGO_LDFLAGS: "-lm"
         run: go test ${{ matrix.tags }} -v -short -race -coverprofile=coverage.txt -covermode=atomic ./...
+
+      - name: Upload macOS crash reports
+        if: failure() && runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-crash-reports-${{ github.run_attempt }}
+          path: |
+            ~/Library/Logs/DiagnosticReports/
+            /Library/Logs/DiagnosticReports/
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Test portable SIMD kernels
         if: runner.os == 'Linux'
