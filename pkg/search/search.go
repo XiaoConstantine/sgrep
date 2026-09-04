@@ -464,7 +464,7 @@ func deduplicateResults(results []Result) []Result {
 		isWorktree bool
 	})
 
-	var dedupedResults []Result
+	dedupedResults := make([]Result, 0, len(results))
 
 	for _, r := range results {
 		canonical := canonicalPath(r.FilePath)
@@ -486,6 +486,11 @@ func deduplicateResults(results []Result) []Result {
 		overlapsIdx := -1
 		for _, chunk := range chunks {
 			if chunksOverlap(r.StartLine, r.EndLine, chunk.start, chunk.end) {
+				existing := dedupedResults[chunk.idx]
+				if r.FilePath == existing.FilePath && r.StartLine == existing.StartLine &&
+					r.EndLine == existing.EndLine && r.Content != existing.Content {
+					continue
+				}
 				overlapsIdx = chunk.idx
 				break
 			}

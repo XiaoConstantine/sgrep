@@ -12,7 +12,7 @@ func chunkTreeSitter(path string, content string, cfg *Config, langCfg *Language
 	parser := tree_sitter.NewParser()
 	defer parser.Close()
 
-	lang := NewLanguage(langCfg.Language())
+	lang := NewLanguage(langCfg.Language(path))
 	if err := parser.SetLanguage(lang); err != nil {
 		return chunkBySize(path, content, cfg)
 	}
@@ -25,15 +25,13 @@ func chunkTreeSitter(path string, content string, cfg *Config, langCfg *Language
 
 	var chunks []Chunk
 	root := tree.RootNode()
-
-	// Build set of node types to extract
-	nodeTypeSet := make(map[string]NodeTypeConfig)
-	for _, nt := range langCfg.NodeTypes {
-		nodeTypeSet[nt.Type] = nt
+	if root.HasError() {
+		return chunkBySize(path, content, cfg)
 	}
 
 	// Walk tree and extract semantic units
-	walkTree(root, []byte(content), path, langCfg.Name, nodeTypeSet, cfg, &chunks)
+	var ancestorNames [8]string
+	walkTree(root, []byte(content), path, langCfg.Name, langCfg.nodeTypes, cfg, ancestorNames[:0], nil, false, &chunks)
 
 	if len(chunks) == 0 {
 		return chunkBySize(path, content, cfg)
@@ -44,16 +42,50 @@ func chunkTreeSitter(path string, content string, cfg *Config, langCfg *Language
 
 // walkTree recursively walks the AST and extracts chunks.
 func walkTree(node *tree_sitter.Node, content []byte, path, lang string,
-	nodeTypes map[string]NodeTypeConfig, cfg *Config, chunks *[]Chunk) {
+	nodeTypes map[string]NodeTypeConfig, cfg *Config, ancestorNames []string,
+	commentAnchor *tree_sitter.Node, skipCurrent bool, chunks *[]Chunk) {
 
 	nodeType := node.Kind()
+	if isTransparentDeclarationWrapper(nodeType) && commentAnchor == nil {
+		commentAnchor = node
+	}
+	ntCfg, configured := nodeTypes[nodeType]
+	var semanticNode *tree_sitter.Node
+	var semanticCfg NodeTypeConfig
+	semantic := false
+	if configured {
+		if ntCfg.UnwrapField != "" || ntCfg.UnwrapChild {
+			semanticNode, semanticCfg, semantic = resolveSemanticNode(node, ntCfg, nodeTypes)
+		} else {
+			semanticNode, semanticCfg, semantic = node, ntCfg, ntCfg.Kind != ""
+		}
+	}
 
-	if ntCfg, ok := nodeTypes[nodeType]; ok {
-		chunk := extractChunk(node, content, path, lang, ntCfg)
+	localName := ""
+	if semantic && !skipCurrent {
+		localName = extractNodeName(semanticNode, content, semanticCfg)
+	}
+	if configured && semantic && !skipCurrent {
+		chunk := extractChunk(
+			node, semanticNode, commentAnchor, content, path, lang, localName, ancestorNames, semanticCfg,
+		)
 		// Lower threshold for tree-sitter since semantic units are meaningful even if small
 		if chunk != nil && estimateTokens(chunk.Content) >= 10 {
 			*chunks = append(*chunks, *chunk)
 		}
+	}
+
+	var wrappedChild *tree_sitter.Node
+	if configured && (ntCfg.UnwrapField != "" || ntCfg.UnwrapChild) {
+		wrappedChild = directWrappedChild(node, ntCfg, nodeTypes)
+	}
+	childAncestorNames := ancestorNames
+	if semantic && localName != "" && !skipCurrent {
+		childAncestorNames = append(childAncestorNames, localName)
+	}
+	childCommentAnchor := commentAnchor
+	if semantic && !skipCurrent {
+		childCommentAnchor = nil
 	}
 
 	// Recurse into children
@@ -61,17 +93,67 @@ func walkTree(node *tree_sitter.Node, content []byte, path, lang string,
 	for i := uint(0); i < uint(childCount); i++ {
 		child := node.NamedChild(uint(i))
 		if child != nil {
-			walkTree(child, content, path, lang, nodeTypes, cfg, chunks)
+			skipChild := wrappedChild != nil && wrappedChild.Id() == child.Id()
+			walkTree(
+				child, content, path, lang, nodeTypes, cfg, childAncestorNames, childCommentAnchor, skipChild, chunks,
+			)
 		}
 	}
 }
 
+func isTransparentDeclarationWrapper(nodeType string) bool {
+	return nodeType == "export_statement" || nodeType == "ambient_declaration"
+}
+
+func resolveSemanticNode(node *tree_sitter.Node, cfg NodeTypeConfig,
+	nodeTypes map[string]NodeTypeConfig) (*tree_sitter.Node, NodeTypeConfig, bool) {
+	current := node
+	currentCfg := cfg
+
+	for currentCfg.UnwrapField != "" || currentCfg.UnwrapChild {
+		child := directWrappedChild(current, currentCfg, nodeTypes)
+		if child == nil {
+			return nil, NodeTypeConfig{}, false
+		}
+		childCfg, ok := nodeTypes[child.Kind()]
+		if !ok {
+			return nil, NodeTypeConfig{}, false
+		}
+		current = child
+		currentCfg = childCfg
+	}
+
+	return current, currentCfg, currentCfg.Kind != ""
+}
+
+func directWrappedChild(node *tree_sitter.Node, cfg NodeTypeConfig,
+	nodeTypes map[string]NodeTypeConfig) *tree_sitter.Node {
+	if cfg.UnwrapField != "" {
+		return node.ChildByFieldName(cfg.UnwrapField)
+	}
+	if !cfg.UnwrapChild {
+		return nil
+	}
+
+	for i := uint(0); i < node.NamedChildCount(); i++ {
+		child := node.NamedChild(i)
+		if child != nil {
+			if _, ok := nodeTypes[child.Kind()]; ok {
+				return child
+			}
+		}
+	}
+	return nil
+}
+
 // extractChunk extracts a chunk from a node.
-func extractChunk(node *tree_sitter.Node, content []byte, path, lang string, ntCfg NodeTypeConfig) *Chunk {
-	startByte := node.StartByte()
-	endByte := node.EndByte()
-	startPoint := node.StartPosition()
-	endPoint := node.EndPosition()
+func extractChunk(node, semanticNode, commentAnchor *tree_sitter.Node, content []byte,
+	path, lang, name string, ancestorNames []string, ntCfg NodeTypeConfig) *Chunk {
+	rangeNode := semanticRangeNode(node, semanticNode, ntCfg)
+	startByte := rangeNode.StartByte()
+	endByte := rangeNode.EndByte()
+	startPoint := rangeNode.StartPosition()
+	endPoint := rangeNode.EndPosition()
 
 	if startByte >= uint(len(content)) || endByte > uint(len(content)) {
 		return nil
@@ -79,29 +161,30 @@ func extractChunk(node *tree_sitter.Node, content []byte, path, lang string, ntC
 
 	chunkContent := string(content[startByte:endByte])
 
-	// Extract name if available
-	name := ""
-	if ntCfg.NameField != "" {
-		if nameNode := node.ChildByFieldName(ntCfg.NameField); nameNode != nil {
-			nameStart := nameNode.StartByte()
-			nameEnd := nameNode.EndByte()
-			if nameStart < uint(len(content)) && nameEnd <= uint(len(content)) {
-				name = string(content[nameStart:nameEnd])
-			}
-		}
-	}
-
 	// Extract docstring if available
 	docstring := ""
 	if ntCfg.DocstringField != "" && ntCfg.DocstringType != "" {
 		// Python-style: docstring inside body
-		docstring = extractDocstring(node, content, ntCfg)
+		docstring = extractDocstring(semanticNode, content, ntCfg)
 	} else if ntCfg.LeadingComment {
-		// JS/Rust-style: doc comment before the node
-		docstring = extractLeadingComment(node, content)
+		anchor := rangeNode
+		if commentAnchor != nil {
+			anchor = commentAnchor
+		}
+		var commentStart uint
+		var commentLine int
+		var ok bool
+		docstring, commentStart, commentLine, ok = extractLeadingComment(
+			anchor, content, lang, startByte, startPoint.Row,
+		)
+		if ok {
+			startByte = commentStart
+			startPoint.Row = uint(commentLine - 1)
+			chunkContent = string(content[startByte:endByte])
+		}
 	}
 
-	description := buildTreeSitterDescription(lang, ntCfg.Kind, name, path, docstring)
+	description := buildTreeSitterDescription(lang, ntCfg.Kind, ancestorNames, name, path, docstring)
 
 	return &Chunk{
 		Content:     chunkContent,
@@ -110,6 +193,112 @@ func extractChunk(node *tree_sitter.Node, content []byte, path, lang string, ntC
 		FilePath:    path,
 		Description: description,
 	}
+}
+
+func semanticRangeNode(node, semanticNode *tree_sitter.Node, cfg NodeTypeConfig) *tree_sitter.Node {
+	if !cfg.InferNameFromParent || node.Id() != semanticNode.Id() {
+		return node
+	}
+
+	parent := semanticNode.Parent()
+	for parent != nil {
+		switch parent.Kind() {
+		case "parenthesized_expression", "as_expression", "satisfies_expression",
+			"type_assertion", "non_null_expression":
+			parent = parent.Parent()
+			continue
+		case "variable_declarator":
+			declaration := parent.Parent()
+			if declaration != nil && (declaration.Kind() == "lexical_declaration" ||
+				declaration.Kind() == "variable_declaration") &&
+				countNamedChildren(declaration, "variable_declarator") == 1 {
+				return declaration
+			}
+			return parent
+		case "pair", "assignment_expression", "public_field_definition", "field_definition":
+			return parent
+		default:
+			return node
+		}
+	}
+	return node
+}
+
+func countNamedChildren(node *tree_sitter.Node, kind string) int {
+	count := 0
+	for i := uint(0); i < node.NamedChildCount(); i++ {
+		child := node.NamedChild(i)
+		if child != nil && child.Kind() == kind {
+			count++
+		}
+	}
+	return count
+}
+
+func extractNodeName(node *tree_sitter.Node, content []byte, cfg NodeTypeConfig) string {
+	var name string
+	if cfg.NameField != "" {
+		nameNode := node.ChildByFieldName(cfg.NameField)
+		if cfg.NameField == "declarator" {
+			nameNode = innermostDeclarator(nameNode)
+		}
+		name = nodeText(nameNode, content)
+	}
+	if name == "" && cfg.InferNameFromParent {
+		name = inferAssignedName(node, content)
+	}
+	return strings.TrimSpace(name)
+}
+
+func innermostDeclarator(node *tree_sitter.Node) *tree_sitter.Node {
+	for node != nil {
+		child := node.ChildByFieldName("declarator")
+		if child == nil {
+			return node
+		}
+		node = child
+	}
+	return nil
+}
+
+func inferAssignedName(node *tree_sitter.Node, content []byte) string {
+	parent := node.Parent()
+	for parent != nil {
+		var fields []string
+		switch parent.Kind() {
+		case "variable_declarator", "public_field_definition", "field_definition":
+			fields = []string{"name", "property"}
+		case "pair":
+			fields = []string{"key"}
+		case "assignment_expression":
+			fields = []string{"left"}
+		case "parenthesized_expression", "as_expression", "satisfies_expression",
+			"type_assertion", "non_null_expression":
+			parent = parent.Parent()
+			continue
+		default:
+			return ""
+		}
+
+		for _, field := range fields {
+			if name := nodeText(parent.ChildByFieldName(field), content); name != "" {
+				return name
+			}
+		}
+		return ""
+	}
+	return ""
+}
+
+func nodeText(node *tree_sitter.Node, content []byte) string {
+	if node == nil {
+		return ""
+	}
+	startByte, endByte := node.StartByte(), node.EndByte()
+	if startByte >= uint(len(content)) || endByte > uint(len(content)) {
+		return ""
+	}
+	return strings.TrimSpace(string(content[startByte:endByte]))
 }
 
 // extractDocstring extracts a docstring from a function/class body.
@@ -158,73 +347,87 @@ func extractDocstring(node *tree_sitter.Node, content []byte, ntCfg NodeTypeConf
 	return docstring
 }
 
-// extractLeadingComment extracts JSDoc or Rust doc comments before a node.
-func extractLeadingComment(node *tree_sitter.Node, content []byte) string {
-	// Get the previous sibling - doc comments appear right before the function
-	prevSibling := node.PrevSibling()
-	if prevSibling == nil {
-		return ""
+// extractLeadingComment extracts consecutive documentation comments directly before a node.
+func extractLeadingComment(node *tree_sitter.Node, content []byte, lang string,
+	nodeStartByte, nodeStartRow uint) (string, uint, int, bool) {
+	var comments []string
+	startByte := nodeStartByte
+	startLine := int(nodeStartRow) + 1
+	nextRow := nodeStartRow
+
+	for sibling := node.PrevNamedSibling(); sibling != nil; sibling = sibling.PrevNamedSibling() {
+		if sibling.StartByte() >= uint(len(content)) || sibling.EndByte() > uint(len(content)) {
+			break
+		}
+		rawComment := string(content[sibling.StartByte():sibling.EndByte()])
+		endsWithNewline := strings.HasSuffix(rawComment, "\n")
+		if (endsWithNewline && sibling.EndPosition().Row != nextRow) ||
+			(!endsWithNewline && sibling.EndPosition().Row+1 != nextRow) {
+			break
+		}
+		comment := strings.TrimSpace(rawComment)
+		if !isDocumentationComment(sibling.Kind(), comment, lang) {
+			break
+		}
+
+		comments = append([]string{cleanComment(comment)}, comments...)
+		startByte = sibling.StartByte()
+		startLine = int(sibling.StartPosition().Row) + 1
+		nextRow = sibling.StartPosition().Row
 	}
 
-	kind := prevSibling.Kind()
+	if len(comments) == 0 {
+		return "", 0, 0, false
+	}
+	return limitSummary(strings.Join(comments, " "), 200), startByte, startLine, true
+}
 
-	// Check for comment types
-	isDocComment := false
+func limitSummary(summary string, maxLength int) string {
+	if len(summary) <= maxLength {
+		return summary
+	}
+	if boundary := strings.LastIndexByte(summary[:maxLength], ' '); boundary > 0 {
+		return summary[:boundary]
+	}
+	return summary[:maxLength]
+}
+
+func isDocumentationComment(kind, comment, lang string) bool {
 	switch kind {
-	case "comment":
-		// JS/TS: Could be JSDoc /** ... */ or regular comment
-		isDocComment = true
-	case "line_comment":
-		// Rust: /// doc comment
-		isDocComment = true
-	case "block_comment":
-		// Rust: /** ... */ or /* ... */
-		isDocComment = true
+	case "comment", "line_comment", "block_comment":
+	default:
+		return false
 	}
 
-	if !isDocComment {
-		return ""
+	comment = strings.TrimSpace(comment)
+	switch lang {
+	case "rust":
+		return strings.HasPrefix(comment, "///") || strings.HasPrefix(comment, "//!") ||
+			strings.HasPrefix(comment, "/**") || strings.HasPrefix(comment, "/*!")
+	case "c", "cpp":
+		return strings.HasPrefix(comment, "/**") || strings.HasPrefix(comment, "/*!") ||
+			strings.HasPrefix(comment, "///") || strings.HasPrefix(comment, "//!")
+	default:
+		return strings.HasPrefix(comment, "/**") || strings.HasPrefix(comment, "///")
 	}
-
-	startByte := prevSibling.StartByte()
-	endByte := prevSibling.EndByte()
-	if startByte >= uint(len(content)) || endByte > uint(len(content)) {
-		return ""
-	}
-
-	comment := string(content[startByte:endByte])
-
-	// Clean up the comment
-	return cleanComment(comment)
 }
 
 // cleanComment removes comment markers and cleans up.
 func cleanComment(s string) string {
-	// Remove JSDoc style /** ... */
-	if strings.HasPrefix(s, "/**") {
-		s = strings.TrimPrefix(s, "/**")
-		s = strings.TrimSuffix(s, "*/")
-	} else if strings.HasPrefix(s, "/*") {
-		s = strings.TrimPrefix(s, "/*")
-		s = strings.TrimSuffix(s, "*/")
-	}
-
-	// Remove Rust doc comment ///
-	if strings.HasPrefix(s, "///") {
-		s = strings.TrimPrefix(s, "///")
-	} else if strings.HasPrefix(s, "//!") {
-		s = strings.TrimPrefix(s, "//!")
-	} else if strings.HasPrefix(s, "//") {
-		s = strings.TrimPrefix(s, "//")
-	}
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "/**")
+	s = strings.TrimPrefix(s, "/*!")
+	s = strings.TrimPrefix(s, "/*")
+	s = strings.TrimSuffix(s, "*/")
 
 	// Clean up JSDoc annotations and asterisks
 	lines := strings.Split(s, "\n")
 	var cleaned []string
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		// Remove leading asterisks from JSDoc
-		line = strings.TrimPrefix(line, "* ")
+		line = strings.TrimPrefix(line, "///")
+		line = strings.TrimPrefix(line, "//!")
+		line = strings.TrimPrefix(line, "//")
 		line = strings.TrimPrefix(line, "*")
 		line = strings.TrimSpace(line)
 
@@ -281,18 +484,35 @@ func cleanDocstring(s string) string {
 }
 
 // buildTreeSitterDescription builds a description for embeddings.
-func buildTreeSitterDescription(lang, kind, name, path, docstring string) string {
+func buildTreeSitterDescription(lang, kind string, ancestorNames []string, name, path, docstring string) string {
+	baseName := filepath.Base(path)
+	descriptionLen := len(lang) + 1 + len(kind) + len(" in ") + len(baseName)
+	if name != "" {
+		descriptionLen += 1 + len(name)
+		for _, ancestorName := range ancestorNames {
+			descriptionLen += len(ancestorName) + 1
+		}
+	}
+	if docstring != "" {
+		descriptionLen += len(". ") + len(docstring)
+	}
+
 	var b strings.Builder
+	b.Grow(descriptionLen)
 	b.WriteString(strings.ToUpper(lang[:1]))
 	b.WriteString(lang[1:])
 	b.WriteString(" ")
 	b.WriteString(kind)
 	if name != "" {
 		b.WriteString(" ")
+		for _, ancestorName := range ancestorNames {
+			b.WriteString(ancestorName)
+			b.WriteByte('.')
+		}
 		b.WriteString(name)
 	}
 	b.WriteString(" in ")
-	b.WriteString(filepath.Base(path))
+	b.WriteString(baseName)
 
 	// Append docstring if available
 	if docstring != "" {

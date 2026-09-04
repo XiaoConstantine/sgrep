@@ -3,6 +3,7 @@ package search
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -730,6 +731,40 @@ func TestDeduplicateResults_KeepsNonOverlapping(t *testing.T) {
 	}
 }
 
+func TestDeduplicateResults_KeepsDistinctSameLineContent(t *testing.T) {
+	results := []Result{
+		{
+			FilePath:  "/callbacks.js",
+			StartLine: 1,
+			EndLine:   1,
+			Score:     0.2,
+			Content:   "onSuccess = response => publish(response)",
+		},
+		{
+			FilePath:  "/callbacks.js",
+			StartLine: 1,
+			EndLine:   1,
+			Score:     0.3,
+			Content:   "onError = error => recover(error)",
+		},
+		{
+			FilePath:  "/callbacks.js",
+			StartLine: 1,
+			EndLine:   1,
+			Score:     0.4,
+			Content:   "onSuccess = response => publish(response)",
+		},
+	}
+
+	deduped := deduplicateResults(results)
+	if len(deduped) != 2 {
+		t.Fatalf("got %d results, want two distinct same-line symbols: %+v", len(deduped), deduped)
+	}
+	if deduped[0].Content != results[0].Content || deduped[1].Content != results[1].Content {
+		t.Fatalf("unexpected deduplicated results: %+v", deduped)
+	}
+}
+
 func TestDeduplicateResults_Empty(t *testing.T) {
 	results := deduplicateResults(nil)
 	if len(results) != 0 {
@@ -913,4 +948,52 @@ func TestChunksOverlap(t *testing.T) {
 			}
 		})
 	}
+}
+
+var benchmarkDeduplicatedResultCount int
+
+func BenchmarkDeduplicateResults(b *testing.B) {
+	b.Run("TypicalOverlaps", func(b *testing.B) {
+		benchmarkDeduplication(b, false)
+	})
+	b.Run("DistinctSameLineSymbols", func(b *testing.B) {
+		benchmarkDeduplication(b, true)
+	})
+}
+
+func benchmarkDeduplication(b *testing.B, distinctSameLineContent bool) {
+	results := make([]Result, 0, 700)
+	for file := 0; file < 100; file++ {
+		path := fmt.Sprintf("/src/package_%03d/callbacks.js", file)
+		for chunk := 0; chunk < 5; chunk++ {
+			startLine := chunk*20 + 1
+			results = append(results, Result{
+				FilePath:  path,
+				StartLine: startLine,
+				EndLine:   startLine + 9,
+				Score:     float64(file*5+chunk) / 1000,
+				Content:   "function processRequest() { return normalizeRequest(); }",
+			})
+		}
+		results = append(results,
+			Result{
+				FilePath: path, StartLine: 120, EndLine: 120, Score: 0.2,
+				Content: "onSuccess = response => publish(response)",
+			},
+			Result{
+				FilePath: path, StartLine: 120, EndLine: 120, Score: 0.3,
+				Content: "onSuccess = response => publish(response)",
+			},
+		)
+		if distinctSameLineContent {
+			results[len(results)-1].Content = "onError = error => recover(error)"
+		}
+	}
+
+	deduplicated := deduplicateResults(results)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		benchmarkDeduplicatedResultCount = len(deduplicateResults(results))
+	}
+	b.ReportMetric(float64(len(deduplicated)), "results/op")
 }

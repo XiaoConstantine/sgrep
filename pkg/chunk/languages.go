@@ -12,18 +12,22 @@ import (
 type LanguageConfig struct {
 	Name       string
 	Extensions []string
-	Language   func() unsafe.Pointer // Returns tree-sitter language pointer
-	NodeTypes  []NodeTypeConfig      // Semantic units to extract
+	Language   func(path string) unsafe.Pointer // Returns the tree-sitter language pointer for a path
+	NodeTypes  []NodeTypeConfig                 // Semantic units to extract
+	nodeTypes  map[string]NodeTypeConfig
 }
 
 // NodeTypeConfig defines a semantic unit to extract from the AST.
 type NodeTypeConfig struct {
-	Type           string // tree-sitter node type (e.g., "function_definition")
-	Kind           string // Human-readable kind (e.g., "function", "class")
-	NameField      string // Field name for the identifier (e.g., "name")
-	DocstringField string // Field name for docstring (e.g., "body" for Python where first child may be string)
-	DocstringType  string // Node type for docstring (e.g., "expression_statement" containing "string")
-	LeadingComment bool   // If true, look for doc comments before the node (JS/TS JSDoc, Rust ///)
+	Type                string // tree-sitter node type (e.g., "function_definition")
+	Kind                string // Human-readable kind (e.g., "function", "class")
+	NameField           string // Field name for the identifier (e.g., "name")
+	DocstringField      string // Field name for docstring (e.g., "body" for Python where first child may be string)
+	DocstringType       string // Node type for docstring (e.g., "expression_statement" containing "string")
+	LeadingComment      bool   // If true, include an adjacent documentation comment
+	InferNameFromParent bool   // Infer names for assigned expressions such as const handler = () => {}
+	UnwrapField         string // Field containing the declaration represented by a wrapper node
+	UnwrapChild         bool   // Use the first configured child declaration represented by a wrapper node
 }
 
 // Registry holds all supported languages.
@@ -34,6 +38,10 @@ var extensionMap = map[string]*LanguageConfig{}
 
 // RegisterLanguage adds a language to the registry.
 func RegisterLanguage(cfg *LanguageConfig) {
+	cfg.nodeTypes = make(map[string]NodeTypeConfig, len(cfg.NodeTypes))
+	for _, nodeType := range cfg.NodeTypes {
+		cfg.nodeTypes[nodeType.Type] = nodeType
+	}
 	Registry[cfg.Name] = cfg
 	for _, ext := range cfg.Extensions {
 		extensionMap[ext] = cfg

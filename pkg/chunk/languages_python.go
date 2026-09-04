@@ -10,11 +10,11 @@ func init() {
 	RegisterLanguage(&LanguageConfig{
 		Name:       "python",
 		Extensions: []string{".py", ".pyw", ".pyi"},
-		Language:   func() unsafe.Pointer { return tree_sitter_python.Language() },
+		Language:   func(string) unsafe.Pointer { return tree_sitter_python.Language() },
 		NodeTypes: []NodeTypeConfig{
 			{Type: "function_definition", Kind: "function", NameField: "name", DocstringField: "body", DocstringType: "expression_statement"},
 			{Type: "class_definition", Kind: "class", NameField: "name", DocstringField: "body", DocstringType: "expression_statement"},
-			{Type: "decorated_definition", Kind: "decorated", NameField: ""},
+			{Type: "decorated_definition", UnwrapField: "definition"},
 		},
 	})
 }
