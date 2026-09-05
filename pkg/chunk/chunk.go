@@ -160,7 +160,7 @@ func chunkGo(path string, content string, cfg *Config) ([]Chunk, error) {
 	var finalChunks []Chunk
 	for _, chunk := range chunks {
 		if estimateTokens(chunk.Content) > cfg.MaxTokens {
-			subChunks := splitOversized(chunk, cfg)
+			subChunks := SplitChunk(chunk, cfg)
 			finalChunks = append(finalChunks, subChunks...)
 		} else {
 			finalChunks = append(finalChunks, chunk)
@@ -260,7 +260,11 @@ func chunkBySize(path string, content string, cfg *Config) ([]Chunk, error) {
 	return chunks, nil
 }
 
-func splitOversized(chunk Chunk, cfg *Config) []Chunk {
+// SplitChunk splits an existing chunk without extracting or discarding source.
+// It keeps syntax groups together when they fit, with line/word splitting as a
+// fallback. MaxTokens includes the description; an indivisible oversized word or
+// description is preserved so the embedding validator can reject it explicitly.
+func SplitChunk(chunk Chunk, cfg *Config) []Chunk {
 	lines := strings.Split(chunk.Content, "\n")
 	var chunks []Chunk
 	var currentLines []string
@@ -270,12 +274,20 @@ func splitOversized(chunk Chunk, cfg *Config) []Chunk {
 	// Reserve tokens for description overhead (description + "\n\n" separator)
 	descTokens := estimateTokens(chunk.Description) + 10 // +10 buffer for separator and part suffix
 	effectiveMax := cfg.MaxTokens - descTokens
-	if effectiveMax < 100 {
-		effectiveMax = 100 // Minimum content size
+	if effectiveMax <= 0 {
+		return []Chunk{chunk}
 	}
 
+	lineCosts := make([]int, len(lines))
 	for i, line := range lines {
-		lineTokens := estimateTokens(line)
+		// Include separators and per-line rounding: the word-based estimate rounds
+		// down, so summing bare line estimates can undercount the joined content.
+		lineCosts[i] = estimateTokens(line+"\n") + 1
+	}
+	groupCosts := treeSitterGroupTokens(chunk.FilePath, chunk.Content, lineCosts, effectiveMax)
+
+	for i, line := range lines {
+		lineTokens := lineCosts[i]
 
 		// Handle single lines that exceed the limit
 		if lineTokens > effectiveMax {
@@ -309,7 +321,11 @@ func splitOversized(chunk Chunk, cfg *Config) []Chunk {
 			continue
 		}
 
-		if currentTokens+lineTokens > effectiveMax && len(currentLines) > 0 {
+		nextTokens := lineTokens
+		if len(groupCosts) > 0 && groupCosts[i] > nextTokens {
+			nextTokens = groupCosts[i]
+		}
+		if currentTokens+nextTokens > effectiveMax && len(currentLines) > 0 {
 			c := Chunk{
 				Content:     strings.Join(currentLines, "\n"),
 				StartLine:   startLine,

@@ -1155,33 +1155,11 @@ func (idx *Indexer) validateAndRechunk(chunks []chunk.Chunk) []chunk.Chunk {
 			continue
 		}
 
-		// Re-chunk this oversized chunk with a smaller limit
-		// Use a conservative limit that accounts for description
-		smallerCfg := &chunk.Config{
-			MaxTokens:    maxEmbedTokens() - chunk.EstimateTokens(c.Description) - 20,
-			ContextLines: idx.chunkCfg.ContextLines,
-			Overlap:      idx.chunkCfg.Overlap,
-		}
-		if smallerCfg.MaxTokens < 100 {
-			smallerCfg.MaxTokens = 100
-		}
-
-		// Re-chunk the content
-		subChunks, err := chunk.ChunkFile(c.FilePath, c.Content, smallerCfg)
-		if err != nil || len(subChunks) == 0 {
-			// Preserve the original so embedding fails loudly rather than silently
-			// dropping or truncating source content.
-			result = append(result, c)
-			continue
-		}
-
-		// Preserve original description with part suffix
-		for i, sc := range subChunks {
-			sc.Description = c.Description + fmt.Sprintf(" (part %d)", i+1)
-			sc.StartLine = c.StartLine + sc.StartLine - 1
-			sc.EndLine = c.StartLine + sc.EndLine - 1
-			result = append(result, sc)
-		}
+		// This is already a semantic chunk, possibly an incomplete function
+		// fragment. Re-running ChunkFile can extract only nested callbacks and
+		// silently discard the statements between them. Split the existing source
+		// instead, retaining its description and absolute line ranges.
+		result = append(result, chunk.SplitChunk(c, &chunk.Config{MaxTokens: maxEmbedTokens()})...)
 	}
 
 	return result

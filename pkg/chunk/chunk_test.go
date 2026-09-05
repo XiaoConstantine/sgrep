@@ -327,7 +327,7 @@ func TestSplitOversized(t *testing.T) {
 		Overlap:   0,
 	}
 
-	chunks := splitOversized(chunk, cfg)
+	chunks := SplitChunk(chunk, cfg)
 
 	if len(chunks) <= 1 {
 		t.Error("expected multiple chunks after splitting")
@@ -724,7 +724,7 @@ func TestSplitOversized_WithVeryLongLine(t *testing.T) {
 		Overlap:   0,
 	}
 
-	chunks := splitOversized(chunk, cfg)
+	chunks := SplitChunk(chunk, cfg)
 
 	if len(chunks) == 0 {
 		t.Error("expected at least one chunk")
@@ -770,5 +770,65 @@ func TestChunkBySize_SmallMaxTokens(t *testing.T) {
 
 	if len(chunks) < 2 {
 		t.Errorf("expected multiple chunks with small MaxTokens, got %d", len(chunks))
+	}
+}
+
+func TestSplitOversizedKeepsControlFlowTogether(t *testing.T) {
+	tests := []struct {
+		path, header, padding, body, footer string
+	}{
+		{"refresh.ts", "export function refresh() {\n", "    const note = \"", "    if (changed) {\n        updateValue(computedValues);\n        previousValue = computedValues;\n    } else {\n        updateValue(originalValues);\n    }", "\n}"},
+		{"fragment.ts", ");\n", "    const note = \"", "    if (changed) {\n        updateValue(computedValues);\n        previousValue = computedValues;\n    } else {\n        updateValue(originalValues);\n    }", "\n"},
+		{"refresh.tsx", "export function Refresh() {\n", "    const note = \"", "    if (changed) {\n        updateValue(computedValues);\n        return <button>Updated</button>;\n    } else {\n        return <span>Unchanged</span>;\n    }", "\n}"},
+		{"refresh.py", "def refresh():\n", "    note = \"", "    if changed:\n        update_value(computed_values)\n        previous_value = computed_values\n    else:\n        update_value(original_values)", ""},
+		{"refresh.rs", "fn refresh() {\n", "    let note = \"", "    if changed {\n        update_value(computed_values);\n        previous_value = computed_values;\n    } else {\n        update_value(original_values);\n    }", "\n}"},
+		{"refresh.cpp", "void refresh() {\n", "    const char *note = \"", "    if (changed) {\n        updateValue(computedValues);\n        previousValue = computedValues;\n    } else {\n        updateValue(originalValues);\n    }", "\n}"},
+	}
+	for _, test := range tests {
+		t.Run(test.path, func(t *testing.T) {
+			content := test.header + strings.Repeat(test.padding+strings.Repeat("x", 70)+"\";\n", 4) + test.body + test.footer
+			original := Chunk{Content: content, StartLine: 41, EndLine: 41 + strings.Count(content, "\n"), FilePath: test.path, Description: "refresh handler"}
+			for _, budget := range []int{160, 200, 240} {
+				parts := SplitChunk(original, &Config{MaxTokens: budget})
+				var contents []string
+				found := false
+				line := original.StartLine
+				for _, part := range parts {
+					contents = append(contents, part.Content)
+					found = found || strings.Contains(part.Content, test.body)
+					if part.StartLine != line || part.EndLine != line+strings.Count(part.Content, "\n") {
+						t.Errorf("budget %d: incorrect line range %d-%d", budget, part.StartLine, part.EndLine)
+					}
+					line = part.EndLine + 1
+					if estimateTokens(part.Description+"\n\n"+part.Content) > budget {
+						t.Errorf("budget %d: chunk exceeds token budget", budget)
+					}
+				}
+				if !found {
+					t.Errorf("budget %d: condition and body were separated", budget)
+				}
+				if strings.Join(contents, "\n") != content {
+					t.Errorf("budget %d: splitting changed source content", budget)
+				}
+			}
+		})
+	}
+}
+
+func TestSplitChunkAccountsForJoinedTokenEstimates(t *testing.T) {
+	content := strings.Repeat("a b c d e f\n", 100)
+	original := Chunk{Content: content, FilePath: "words.txt", StartLine: 1, EndLine: 101, Description: "short words"}
+	for _, budget := range []int{80, 120, 256} {
+		parts := SplitChunk(original, &Config{MaxTokens: budget})
+		var contents []string
+		for _, part := range parts {
+			contents = append(contents, part.Content)
+			if estimateTokens(part.Description+"\n\n"+part.Content) > budget {
+				t.Errorf("joined chunk exceeds budget %d", budget)
+			}
+		}
+		if strings.Join(contents, "\n") != content {
+			t.Fatal("splitting changed source content")
+		}
 	}
 }

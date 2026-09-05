@@ -528,10 +528,69 @@ func splitOversizedChunks(chunks []Chunk, cfg *Config) []Chunk {
 	var result []Chunk
 	for _, chunk := range chunks {
 		if estimateTokens(chunk.Content) > cfg.MaxTokens {
-			result = append(result, splitOversized(chunk, cfg)...)
+			result = append(result, SplitChunk(chunk, cfg)...)
 		} else {
 			result = append(result, chunk)
 		}
 	}
 	return result
+}
+
+// treeSitterGroupTokens marks the largest syntax groups that fit the budget.
+// Costs are indexed by their starting line. Unlike semantic extraction, this
+// only guides split boundaries: every source line is still emitted by SplitChunk.
+func treeSitterGroupTokens(path, content string, lineCosts []int, maxTokens int) []int {
+	lang := GetLanguageByPath(path)
+	if lang == nil {
+		return nil
+	}
+	parser := tree_sitter.NewParser()
+	defer parser.Close()
+	if err := parser.SetLanguage(NewLanguage(lang.Language(path))); err != nil {
+		return nil
+	}
+	tree := parser.Parse([]byte(content), nil)
+	if tree == nil {
+		return nil
+	}
+	defer tree.Close()
+
+	prefix := make([]int, len(lineCosts)+1)
+	for i, cost := range lineCosts {
+		prefix[i+1] = prefix[i] + cost
+	}
+	protected := make([]bool, len(lineCosts))
+	var visit func(*tree_sitter.Node)
+	visit = func(node *tree_sitter.Node) {
+		start, end := int(node.StartPosition().Row), int(node.EndPosition().Row)+1
+		if node.EndPosition().Column == 0 && end > start+1 {
+			end--
+		}
+		if !node.HasError() && prefix[end]-prefix[start] <= maxTokens {
+			for cut := start + 1; cut < end; cut++ {
+				protected[cut] = true
+			}
+			return
+		}
+		// Oversized or incomplete fragments may still contain complete statements.
+		for i := uint(0); i < node.NamedChildCount(); i++ {
+			visit(node.NamedChild(i))
+		}
+	}
+	visit(tree.RootNode())
+
+	groups := make([]int, len(lineCosts))
+	for start := 0; start < len(lineCosts); {
+		end := start + 1
+		for end < len(lineCosts) && protected[end] {
+			end++
+		}
+		// Sibling nodes can overlap on a line. Keep their union only if it fits;
+		// otherwise retain the bounded line-splitting fallback.
+		if cost := prefix[end] - prefix[start]; cost <= maxTokens {
+			groups[start] = cost
+		}
+		start = end
+	}
+	return groups
 }

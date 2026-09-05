@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/XiaoConstantine/sgrep/pkg/chunk"
 	searchpkg "github.com/XiaoConstantine/sgrep/pkg/search"
 	"github.com/XiaoConstantine/sgrep/pkg/store"
 	"github.com/XiaoConstantine/sgrep/pkg/util"
@@ -1519,5 +1520,33 @@ func TestIgnoreRules_AnchoredPattern(t *testing.T) {
 	}
 	if ir.ShouldIgnorePath(filepath.Join(dir, "pkg", "generated"), true) {
 		t.Fatal("anchored pattern should not match nested directory")
+	}
+}
+
+func TestValidateAndRechunkPreservesStatementsBetweenCallbacks(t *testing.T) {
+	t.Setenv("SGREP_CONTEXT_TOKENS", "256")
+	content := strings.Repeat("initializeControl(settings);\n", 20) +
+		"const callback = () => {\n    updateValue(computedValues);\n};\n" +
+		"finalizeControl(settings);"
+	original := chunk.Chunk{
+		Content: content, FilePath: "useForm.ts", Description: "form initialization",
+		StartLine: 41, EndLine: 41 + strings.Count(content, "\n"),
+	}
+	idx := &Indexer{chunkCfg: chunk.DefaultConfig()}
+	parts := idx.validateAndRechunk([]chunk.Chunk{original})
+	var contents []string
+	line := original.StartLine
+	for _, part := range parts {
+		contents = append(contents, part.Content)
+		if part.StartLine != line || part.EndLine != line+strings.Count(part.Content, "\n") {
+			t.Errorf("incorrect source range: %d-%d, expected start %d", part.StartLine, part.EndLine, line)
+		}
+		line = part.EndLine + 1
+		if chunk.EstimateTokens(util.CombineDescriptionContent(part.Content, part.Description)) > maxEmbedTokens() {
+			t.Error("re-chunked input exceeds embedding budget")
+		}
+	}
+	if strings.Join(contents, "\n") != content {
+		t.Fatal("re-chunking discarded or changed source between callbacks")
 	}
 }
