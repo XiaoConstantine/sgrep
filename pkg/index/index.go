@@ -1159,7 +1159,10 @@ func (idx *Indexer) validateAndRechunk(chunks []chunk.Chunk) []chunk.Chunk {
 		// fragment. Re-running ChunkFile can extract only nested callbacks and
 		// silently discard the statements between them. Split the existing source
 		// instead, retaining its description and absolute line ranges.
-		result = append(result, chunk.SplitChunk(c, &chunk.Config{MaxTokens: maxEmbedTokens()})...)
+		result = append(result, chunk.SplitChunk(c, &chunk.Config{
+			MaxTokens: maxEmbedTokens(),
+			Overlap:   idx.chunkCfg.Overlap,
+		})...)
 	}
 
 	return result

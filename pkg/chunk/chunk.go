@@ -160,7 +160,9 @@ func chunkGo(path string, content string, cfg *Config) ([]Chunk, error) {
 	var finalChunks []Chunk
 	for _, chunk := range chunks {
 		if estimateTokens(chunk.Content) > cfg.MaxTokens {
-			subChunks := SplitChunk(chunk, cfg)
+			// Go's native AST path keeps its established line-based boundaries.
+			// Embedding validation handles any remaining description overhead.
+			subChunks := splitOversized(chunk, cfg, false)
 			finalChunks = append(finalChunks, subChunks...)
 		} else {
 			finalChunks = append(finalChunks, chunk)
@@ -261,10 +263,37 @@ func chunkBySize(path string, content string, cfg *Config) ([]Chunk, error) {
 }
 
 // SplitChunk splits an existing chunk without extracting or discarding source.
-// It keeps syntax groups together when they fit, with line/word splitting as a
-// fallback. MaxTokens includes the description; an indivisible oversized word or
-// description is preserved so the embedding validator can reject it explicitly.
+// It keeps syntax groups together when they fit, while Go retains its established
+// size-only rechunking with overlap. MaxTokens includes the description; an
+// indivisible oversized word or description is preserved so the embedding
+// validator can reject it explicitly.
 func SplitChunk(chunk Chunk, cfg *Config) []Chunk {
+	if strings.EqualFold(filepath.Ext(chunk.FilePath), ".go") {
+		// Go declaration fragments previously fell back to chunkBySize because
+		// they lack a package clause. Use that splitter directly: re-parsing a
+		// complete Go fragment could instead discard package-level statements.
+		sizeCfg := *cfg
+		sizeCfg.MaxTokens = max(100, cfg.MaxTokens-estimateTokens(chunk.Description)-20)
+		parts, _ := chunkBySize(chunk.FilePath, chunk.Content, &sizeCfg)
+		var result []Chunk
+		for i, part := range parts {
+			part.Description = chunk.Description + fmt.Sprintf(" (part %d)", i+1)
+			part.StartLine += chunk.StartLine - 1
+			part.EndLine += chunk.StartLine - 1
+			if estimateTokens(part.Description+"\n\n"+part.Content) > cfg.MaxTokens {
+				// Keep legacy boundaries where safe, but never let overlap or
+				// per-line rounding bypass the embedding budget.
+				result = append(result, splitOversized(part, cfg, true)...)
+			} else {
+				result = append(result, part)
+			}
+		}
+		return result
+	}
+	return splitOversized(chunk, cfg, true)
+}
+
+func splitOversized(chunk Chunk, cfg *Config, syntaxAware bool) []Chunk {
 	lines := strings.Split(chunk.Content, "\n")
 	var chunks []Chunk
 	var currentLines []string
@@ -274,17 +303,25 @@ func SplitChunk(chunk Chunk, cfg *Config) []Chunk {
 	// Reserve tokens for description overhead (description + "\n\n" separator)
 	descTokens := estimateTokens(chunk.Description) + 10 // +10 buffer for separator and part suffix
 	effectiveMax := cfg.MaxTokens - descTokens
-	if effectiveMax <= 0 {
+	if !syntaxAware {
+		effectiveMax = max(100, effectiveMax)
+	} else if effectiveMax <= 0 {
 		return []Chunk{chunk}
 	}
 
 	lineCosts := make([]int, len(lines))
 	for i, line := range lines {
-		// Include separators and per-line rounding: the word-based estimate rounds
-		// down, so summing bare line estimates can undercount the joined content.
-		lineCosts[i] = estimateTokens(line+"\n") + 1
+		lineCosts[i] = estimateTokens(line)
+		if syntaxAware {
+			// Include separators and per-line rounding: summing bare line
+			// estimates can undercount the joined content.
+			lineCosts[i] = estimateTokens(line+"\n") + 1
+		}
 	}
-	groupCosts := treeSitterGroupTokens(chunk.FilePath, chunk.Content, lineCosts, effectiveMax)
+	var groupCosts []int
+	if syntaxAware {
+		groupCosts = treeSitterGroupTokens(chunk.FilePath, chunk.Content, lineCosts, effectiveMax)
+	}
 
 	for i, line := range lines {
 		lineTokens := lineCosts[i]

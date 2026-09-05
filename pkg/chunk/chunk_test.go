@@ -832,3 +832,44 @@ func TestSplitChunkAccountsForJoinedTokenEstimates(t *testing.T) {
 		}
 	}
 }
+
+func TestChunkGoPreservesEstablishedSplitBoundaries(t *testing.T) {
+	content := "package example\n\nfunc process() {\n" +
+		strings.Repeat("    println(\"processing an input value\")\n", 80) + "}\n"
+	chunks, err := ChunkFile("example.go", content, &Config{MaxTokens: 256, Overlap: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := [][2]int{{3, 13}, {14, 24}, {25, 35}, {36, 46}, {47, 57}, {58, 68}, {69, 79}, {80, 84}}
+	if len(chunks) != len(want) {
+		t.Fatalf("got %d chunks, want %d", len(chunks), len(want))
+	}
+	lines := strings.Split(content, "\n")
+	for i, c := range chunks {
+		if c.StartLine != want[i][0] || c.EndLine != want[i][1] {
+			t.Errorf("chunk %d range = %d-%d, want %v", i, c.StartLine, c.EndLine, want[i])
+		}
+		if c.Content != strings.Join(lines[c.StartLine-1:c.EndLine], "\n") {
+			t.Errorf("chunk %d changed source", i)
+		}
+	}
+}
+
+func TestSplitChunkGoEnforcesBudgetAfterSizeFallback(t *testing.T) {
+	// The legacy size splitter does not count blank-line separators. Preserve
+	// its boundaries only when the complete embedding input still fits.
+	content := "func work() {\n" + strings.Repeat("\n", 600) + "return\n}"
+	original := Chunk{Content: content, FilePath: "example.go", Description: "Go function work",
+		StartLine: 41, EndLine: 41 + strings.Count(content, "\n")}
+	parts := SplitChunk(original, &Config{MaxTokens: 256, Overlap: 3})
+	var contents []string
+	for _, part := range parts {
+		contents = append(contents, part.Content)
+		if estimateTokens(part.Description+"\n\n"+part.Content) > 256 {
+			t.Error("size fallback exceeds embedding budget")
+		}
+	}
+	if strings.Join(contents, "\n") != content {
+		t.Fatal("budget correction changed source")
+	}
+}

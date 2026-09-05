@@ -1550,3 +1550,39 @@ func TestValidateAndRechunkPreservesStatementsBetweenCallbacks(t *testing.T) {
 		t.Fatal("re-chunking discarded or changed source between callbacks")
 	}
 }
+
+func TestValidateAndRechunkGoPreservesSizeBoundariesAndSource(t *testing.T) {
+	t.Setenv("SGREP_CONTEXT_TOKENS", "512")
+	// Include a package clause: parsing this as a new file would succeed but
+	// semantic extraction would discard the package and variable declarations.
+	content := "package example\n\nvar before = 1\n\nfunc process() {\n" +
+		strings.Repeat("    println(\"processing an input value\")\n", 80) + "}\n\nvar after = 2"
+	original := chunk.Chunk{Content: content, FilePath: "example.go", Description: "Go initialization",
+		StartLine: 41, EndLine: 41 + strings.Count(content, "\n")}
+	idx := &Indexer{chunkCfg: chunk.DefaultConfig()}
+	parts := idx.validateAndRechunk([]chunk.Chunk{original})
+	// A plain-text path exercises the established size-only fallback, without
+	// permitting semantic extraction. Its overlap and boundaries are intentional.
+	cfg := *idx.chunkCfg
+	cfg.MaxTokens = maxEmbedTokens() - chunk.EstimateTokens(original.Description) - 20
+	want, err := chunk.ChunkFile("example.txt", content, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parts) != len(want) {
+		t.Fatalf("got %d chunks, want %d", len(parts), len(want))
+	}
+	for i, part := range parts {
+		if part.Content != want[i].Content || part.StartLine != original.StartLine+want[i].StartLine-1 ||
+			part.EndLine != original.StartLine+want[i].EndLine-1 ||
+			part.Description != fmt.Sprintf("%s (part %d)", original.Description, i+1) {
+			t.Errorf("chunk %d differs from established size-only fallback", i)
+		}
+		if chunk.EstimateTokens(util.CombineDescriptionContent(part.Content, part.Description)) > maxEmbedTokens() {
+			t.Errorf("chunk %d exceeds embedding budget", i)
+		}
+	}
+	if !strings.Contains(parts[0].Content, "var before = 1") || !strings.Contains(parts[len(parts)-1].Content, "var after = 2") {
+		t.Fatal("re-chunking discarded source outside functions")
+	}
+}
