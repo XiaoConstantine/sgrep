@@ -3,9 +3,12 @@ package index
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1584,5 +1587,137 @@ func TestValidateAndRechunkGoPreservesSizeBoundariesAndSource(t *testing.T) {
 	}
 	if !strings.Contains(parts[0].Content, "var before = 1") || !strings.Contains(parts[len(parts)-1].Content, "var after = 2") {
 		t.Fatal("re-chunking discarded source outside functions")
+	}
+}
+
+func TestIndexSearchPreservesSameLineFragments(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Content json.RawMessage `json:"content"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		var texts []string
+		if err := json.Unmarshal(request.Content, &texts); err != nil {
+			var text string
+			if err := json.Unmarshal(request.Content, &text); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			texts = []string{text}
+		}
+		response := make([]map[string]any, len(texts))
+		for i := range texts {
+			vector := make([]float32, 64)
+			vector[0] = 1
+			response[i] = map[string]any{"index": i, "embedding": [][]float32{vector}}
+		}
+		_ = json.NewEncoder(w).Encode(response)
+	}))
+	defer server.Close()
+	t.Setenv("SGREP_ENDPOINT", server.URL)
+	t.Setenv("SGREP_HOME", t.TempDir())
+	t.Setenv("SGREP_DIMS", "64")
+	t.Setenv("SGREP_CONTEXT_TOKENS", "256")
+	root := t.TempDir()
+	var body strings.Builder
+	body.WriteString("func Literal() string { return `")
+	for i := range 180 {
+		fmt.Fprintf(&body, "word%03d  \t雪\u2003", i)
+	}
+	body.WriteString("` }")
+	path := filepath.Join(root, "literal.go")
+	if err := os.WriteFile(path, []byte("package fixture\n"+body.String()+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultIndexConfig()
+	cfg.Workers, cfg.EmbedBatchSize = 1, 4
+	idx, err := NewWithConfig(root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = idx.Close() }()
+	idx.chunkCfg.MaxTokens = 512 // Force the actual index validation/rechunk path.
+	items, err := idx.readAndChunkFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) < 2 {
+		t.Fatal("fixture did not split")
+	}
+	var reconstructed strings.Builder
+	ids := make([]string, len(items))
+	want := make(map[string]int)
+	for i, item := range items {
+		c := item.chunk
+		if c.StartLine != 2 || c.EndLine != 2 {
+			t.Fatalf("fragment lines: %+v", c)
+		}
+		if chunk.EstimateTokens(util.CombineDescriptionContent(c.Content, c.Description)) > maxEmbedTokens() {
+			t.Fatal("fragment exceeds embedding budget")
+		}
+		reconstructed.WriteString(c.Content)
+		ids[i] = fmt.Sprintf("literal.go:chunk_%d", i+1)
+		want[c.Content]++
+	}
+	if reconstructed.String() != body.String() {
+		t.Fatal("rechunked literal changed source bytes")
+	}
+	ctx := context.Background()
+	if err := idx.Index(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.OpenForSearch(filepath.Join(os.Getenv("SGREP_HOME"), "repos", hashPath(root), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	stored, err := s.(store.FileChunkLoader).GetChunksByFilePath(ctx, "literal.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	docs := make(map[string]*store.Document, len(stored))
+	for _, doc := range stored {
+		docs[doc.ID] = doc
+	}
+	reconstructed.Reset()
+	for _, id := range ids {
+		doc := docs[id]
+		if doc == nil {
+			t.Fatalf("missing document %s", id)
+		}
+		reconstructed.WriteString(doc.Content)
+	}
+	if reconstructed.String() != body.String() {
+		t.Fatal("stored literal changed source bytes")
+	}
+	opts := searchpkg.DefaultSearchOptions()
+	opts.Limit, opts.Threshold = len(items)+10, 2
+	results, err := searchpkg.New(s).SearchWithOptions(ctx, "literal", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(results)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded []searchpkg.Result
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string]int)
+	for _, result := range decoded {
+		if result.StartLine != 2 || result.EndLine != 2 {
+			t.Fatalf("search lines: %+v", result)
+		}
+		got[result.Content]++
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("search/JSON lost distinct same-line fragments: got %d, want %d", len(decoded), len(items))
 	}
 }

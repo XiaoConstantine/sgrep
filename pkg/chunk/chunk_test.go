@@ -1,9 +1,14 @@
 package chunk
 
 import (
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -871,5 +876,165 @@ func TestSplitChunkGoEnforcesBudgetAfterSizeFallback(t *testing.T) {
 	}
 	if strings.Join(contents, "\n") != content {
 		t.Fatal("budget correction changed source")
+	}
+}
+
+// This gate checks exact source slices and complete, nonduplicated declaration
+// coverage independently of retrieval scores. Imports and inter-declaration
+// whitespace are intentionally outside the declaration coverage contract.
+func TestGoDeclarationSourceCoverage(t *testing.T) {
+	declarations := []string{
+		"const Answer = 42",
+		"var Default = \"keep  two spaces\"",
+		"type Tiny int",
+		"func init() {}",
+		"func Identity[T any](value T) T { return value }",
+		"// Values documents the group.\nconst (\n First = iota\n Second\n)",
+		"var (\n Before = 1\n After = func() int { return Before + 1 }()\n)",
+		"type (\n // First type documentation.\n First struct{}\n // Second type documentation.\n Second interface { Run() }\n)",
+		"// Types documents the group.\ntype (\n // First type documentation.\n First struct{}\n // Second type documentation.\n Second interface { Run() }\n)",
+	}
+	var entries strings.Builder
+	entries.WriteString("// A group larger than the small test budget.\nconst (\n")
+	for i := 0; i < 60; i++ {
+		fmt.Fprintf(&entries, " Value%d = %d\n", i, i)
+	}
+	entries.WriteString(")")
+	declarations = append(declarations, entries.String())
+	neighbor := "func Larger(input int) int {\n result := input * input + input\n return result + 17\n}"
+	for i, declaration := range declarations {
+		for _, surrounding := range []bool{false, true} {
+			for _, budget := range []int{256, 1216} {
+				t.Run(fmt.Sprintf("declaration%d/neighbors=%v/budget=%d", i, surrounding, budget), func(t *testing.T) {
+					source := "package example\n\n" + declaration + "\n"
+					if surrounding {
+						source = "package example\n\n" + strings.ReplaceAll(neighbor, "Larger", "NeighborBefore") + "\n\n" + declaration + "\n\n" + neighbor + "\n"
+					}
+					fs := token.NewFileSet()
+					file, err := parser.ParseFile(fs, "example.go", source, parser.ParseComments)
+					if err != nil {
+						t.Fatal(err)
+					}
+					parts, err := ChunkFile("example.go", source, &Config{MaxTokens: budget})
+					if err != nil {
+						t.Fatal(err)
+					}
+					lines := strings.Split(source, "\n")
+					coverage := make([]int, len(lines))
+					for _, part := range parts {
+						if part.StartLine < 1 || part.EndLine < part.StartLine || part.EndLine > len(lines) {
+							t.Fatalf("invalid range: %+v", part)
+						}
+						if part.Content != strings.Join(lines[part.StartLine-1:part.EndLine], "\n") {
+							t.Errorf("changed source at %d-%d", part.StartLine, part.EndLine)
+						}
+						for line := part.StartLine; line <= part.EndLine; line++ {
+							coverage[line-1]++
+						}
+					}
+					for _, decl := range file.Decls {
+						start := decl.Pos()
+						switch d := decl.(type) {
+						case *ast.FuncDecl:
+							if d.Doc != nil {
+								start = d.Doc.Pos()
+							}
+						case *ast.GenDecl:
+							if d.Tok == token.IMPORT {
+								continue
+							}
+							if d.Doc != nil {
+								start = d.Doc.Pos()
+							}
+						}
+						for line := fs.Position(start).Line; line <= fs.Position(decl.End()).Line; line++ {
+							if coverage[line-1] != 1 {
+								t.Errorf("declaration line %d emitted %d times, want 1", line, coverage[line-1])
+							}
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestSplitLongLinePreservesSourceBytes(t *testing.T) {
+	for _, line := range []string{
+		"", strings.Repeat(" \t", 80),
+		strings.Repeat("alpha  beta\tγ\u2003界\u00a0", 40),
+		"return \"" + strings.Repeat("alpha  beta  ", 40) + "\"",
+		"return `" + strings.Repeat("alpha\t\tbeta  ", 40) + "`",
+	} {
+		parts := splitLongLine(line, 16)
+		if strings.Join(parts, "") != line {
+			t.Errorf("splitting changed bytes of %q", line)
+		}
+		for _, part := range parts {
+			if !utf8.ValidString(part) || estimateTokens(part) > 16 {
+				t.Errorf("invalid or oversized fragment %q", part)
+			}
+		}
+	}
+	word := strings.Repeat("x", 100)
+	parts := splitLongLine(" \t"+word+"  ", 16)
+	if strings.Join(parts, "") != " \t"+word+"  " {
+		t.Fatal("indivisible input changed")
+	}
+	found := false
+	for _, part := range parts {
+		found = found || part == word
+	}
+	if !found {
+		t.Fatal("indivisible oversized word must survive for validation to reject")
+	}
+}
+
+func FuzzSplitLongLinePreservesBytes(f *testing.F) {
+	for _, line := range []string{"", " \t ", "return `a  b\t界`", strings.Repeat("a\u2003", 100)} {
+		f.Add(line, uint8(16))
+	}
+	f.Fuzz(func(t *testing.T, line string, budget uint8) {
+		parts := splitLongLine(line, int(budget)+1)
+		if strings.Join(parts, "") != line {
+			t.Fatal("split changed source bytes")
+		}
+		if utf8.ValidString(line) {
+			for _, part := range parts {
+				if !utf8.ValidString(part) {
+					t.Fatal("split inside UTF-8 encoding")
+				}
+			}
+		}
+	})
+}
+
+func TestGoPacksAdjacentSmallDeclarationsWithoutDuplicatingSource(t *testing.T) {
+	var declarations strings.Builder
+	for i := 0; i < 80; i++ {
+		fmt.Fprintf(&declarations, "const V%d = %d\n", i, i)
+	}
+	source := "package example\n\n" + declarations.String()
+	parts, err := ChunkFile("example.go", source, &Config{MaxTokens: 128})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parts) < 2 || len(parts) >= 40 {
+		t.Fatalf("got %d chunks for 80 tiny declarations", len(parts))
+	}
+	var contents []string
+	line := 3
+	for _, part := range parts {
+		if part.StartLine != line || part.EndLine != line+strings.Count(part.Content, "\n") {
+			t.Fatalf("noncontiguous source range: %+v", part)
+		}
+		if estimateTokens(part.Description+"\n\n"+part.Content) > 128 {
+			t.Error("packed chunk exceeds budget")
+		}
+		contents = append(contents, part.Content)
+		line = part.EndLine + 1
+	}
+	if strings.Join(contents, "\n") != strings.TrimSuffix(declarations.String(), "\n") {
+		t.Fatal("packing changed declaration bytes")
 	}
 }

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/XiaoConstantine/sgrep/pkg/modelcfg"
 )
@@ -86,69 +88,58 @@ func chunkGo(path string, content string, cfg *Config) ([]Chunk, error) {
 	var chunks []Chunk
 	baseName := filepath.Base(path)
 	pkgName := file.Name.Name
+	var packedStart token.Pos
+	previousSmall := false
 
 	for _, decl := range file.Decls {
+		start := decl.Pos()
+		var description string
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
-			startPos := fset.Position(d.Pos())
-			endPos := fset.Position(d.End())
-
-			// Include doc comments
-			var chunkContent string
 			if d.Doc != nil {
-				docPos := fset.Position(d.Doc.Pos())
-				chunkContent = content[d.Doc.Pos()-1 : d.End()-1]
-				startPos = docPos
-			} else {
-				chunkContent = content[d.Pos()-1 : d.End()-1]
+				start = d.Doc.Pos()
 			}
-
-			// Skip if too small
-			if estimateTokens(chunkContent) < 20 {
+			description = buildFuncDescription(baseName, pkgName, d)
+		case *ast.GenDecl:
+			if d.Tok != token.TYPE && d.Tok != token.CONST && d.Tok != token.VAR {
+				previousSmall = false
 				continue
 			}
-
-			chunk := Chunk{
-				Content:     chunkContent,
-				StartLine:   startPos.Line,
-				EndLine:     endPos.Line,
-				FilePath:    path,
-				Description: buildFuncDescription(baseName, pkgName, d),
+			// Keep declarations whole, including grouped specs and their comments.
+			// Slicing each type from the group doc duplicated earlier specs, while
+			// slicing from TypeSpec.Pos lost spec docs and the declaration keyword.
+			if d.Doc != nil {
+				start = d.Doc.Pos()
 			}
-			chunks = append(chunks, chunk)
-
-		case *ast.GenDecl:
-			if d.Tok == token.TYPE {
-				for _, spec := range d.Specs {
-					if ts, ok := spec.(*ast.TypeSpec); ok {
-						startPos := fset.Position(ts.Pos())
-						endPos := fset.Position(ts.End())
-
-						var chunkContent string
-						if d.Doc != nil {
-							docPos := fset.Position(d.Doc.Pos())
-							chunkContent = content[d.Doc.Pos()-1 : ts.End()-1]
-							startPos = docPos
-						} else {
-							chunkContent = content[ts.Pos()-1 : ts.End()-1]
-						}
-
-						if estimateTokens(chunkContent) < 20 {
-							continue
-						}
-
-						chunk := Chunk{
-							Content:     chunkContent,
-							StartLine:   startPos.Line,
-							EndLine:     endPos.Line,
-							FilePath:    path,
-							Description: buildTypeDescription(baseName, pkgName, ts),
-						}
-						chunks = append(chunks, chunk)
-					}
-				}
+			description = fmt.Sprintf("Go %s declarations in package %s (%s)", d.Tok, pkgName, baseName)
+			if d.Tok == token.TYPE && len(d.Specs) == 1 {
+				description = buildTypeDescription(baseName, pkgName, d.Specs[0].(*ast.TypeSpec))
+			}
+		default:
+			previousSmall = false
+			continue
+		}
+		text := content[start-1 : decl.End()-1]
+		small := estimateTokens(text) < 20
+		if small && previousSmall {
+			// Pack consecutive small declarations instead of dropping them or
+			// producing a vector for each tiny symbol. Include the real intervening
+			// source, not synthetic separators or repeated declaration headers.
+			packed := content[packedStart-1 : decl.End()-1]
+			desc := fmt.Sprintf("Go declarations in package %s (%s)", pkgName, baseName)
+			if estimateTokens(desc+"\n\n"+packed)+10 <= cfg.MaxTokens {
+				previous := &chunks[len(chunks)-1]
+				previous.Content = packed
+				previous.EndLine = fset.Position(decl.End()).Line
+				previous.Description = desc
+				continue
 			}
 		}
+		chunks = append(chunks, Chunk{
+			Content: text, StartLine: fset.Position(start).Line,
+			EndLine: fset.Position(decl.End()).Line, FilePath: path, Description: description,
+		})
+		packedStart, previousSmall = start, small
 	}
 
 	// If no AST chunks, fall back to size-based
@@ -398,41 +389,34 @@ func splitOversized(chunk Chunk, cfg *Config, syntaxAware bool) []Chunk {
 	return chunks
 }
 
-// splitLongLine splits a single line that exceeds the token limit at word boundaries.
+// splitLongLine returns contiguous source slices, never reconstructed words.
+// Whitespace is source too (including inside literals). Boundaries on either
+// side of whitespace allow long whitespace runs to split without cutting UTF-8.
+// An indivisible oversized word is retained for the embedding validator.
 func splitLongLine(line string, maxTokens int) []string {
-	words := strings.Fields(line)
-	if len(words) == 0 {
+	if line == "" {
 		return []string{line}
 	}
-
 	var result []string
-	var current strings.Builder
-	currentTokens := 0
-
-	for _, word := range words {
-		wordTokens := estimateTokens(word + " ")
-
-		// If a single word exceeds the limit, include it anyway (unavoidable)
-		if wordTokens > maxTokens && current.Len() == 0 {
-			result = append(result, word)
-			continue
+	start, end := 0, 0
+	extend := func(next int) {
+		if next == end {
+			return
 		}
-
-		if currentTokens+wordTokens > maxTokens && current.Len() > 0 {
-			result = append(result, strings.TrimSpace(current.String()))
-			current.Reset()
-			currentTokens = 0
+		if end > start && estimateTokens(line[start:next]) > maxTokens {
+			result = append(result, line[start:end])
+			start = end
 		}
-
-		current.WriteString(word)
-		current.WriteString(" ")
-		currentTokens += wordTokens
+		end = next
 	}
-
-	if current.Len() > 0 {
-		result = append(result, strings.TrimSpace(current.String()))
+	for i, r := range line {
+		if unicode.IsSpace(r) {
+			extend(i)
+			extend(i + utf8.RuneLen(r))
+		}
 	}
-
+	extend(len(line))
+	result = append(result, line[start:end])
 	return result
 }
 
