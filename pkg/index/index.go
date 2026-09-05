@@ -1146,8 +1146,12 @@ func (idx *Indexer) validateAndRechunk(chunks []chunk.Chunk) []chunk.Chunk {
 	var result []chunk.Chunk
 
 	for _, c := range chunks {
-		// Calculate total tokens including description
-		totalText := util.CombineDescriptionContent(c.Content, c.Description)
+		// Match the untrimmed dense input used by readAndChunkFile and
+		// prepareFile. Whitespace-only source fragments still consume budget.
+		totalText := c.Content
+		if c.Description != "" {
+			totalText = c.Description + "\n\n" + c.Content
+		}
 		tokens := chunk.EstimateTokens(totalText)
 
 		if tokens <= maxEmbedTokens() {

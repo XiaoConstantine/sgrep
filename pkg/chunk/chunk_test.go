@@ -1038,3 +1038,28 @@ func TestGoPacksAdjacentSmallDeclarationsWithoutDuplicatingSource(t *testing.T) 
 		t.Fatal("packing changed declaration bytes")
 	}
 }
+
+func TestGoLineDirectivesKeepPhysicalSourceRanges(t *testing.T) {
+	for _, target := range []int{1, 9000} {
+		source := fmt.Sprintf("package p\nconst A=1\n//line x:%d\nconst B=2\nfunc Larger(input int) int {\n return input * input + input + 17\n}\ntype T struct { Value string }\n", target)
+		parts, err := ChunkFile("physical.go", source, &Config{MaxTokens: 1216})
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(source, "\n")
+		if len(parts) != 3 {
+			t.Fatalf("got %d chunks, want packed constants, function, type", len(parts))
+		}
+		for _, part := range parts {
+			if part.StartLine < 1 || part.EndLine < part.StartLine || part.EndLine > len(lines) {
+				t.Fatalf("directive %d produced invalid range %d-%d", target, part.StartLine, part.EndLine)
+			}
+			if part.Content != strings.Join(lines[part.StartLine-1:part.EndLine], "\n") {
+				t.Fatalf("directive %d changed source provenance", target)
+			}
+		}
+		if parts[0].StartLine != 2 || parts[0].EndLine != 4 {
+			t.Fatal("packed declaration range is not physical")
+		}
+	}
+}

@@ -130,14 +130,14 @@ func chunkGo(path string, content string, cfg *Config) ([]Chunk, error) {
 			if estimateTokens(desc+"\n\n"+packed)+10 <= cfg.MaxTokens {
 				previous := &chunks[len(chunks)-1]
 				previous.Content = packed
-				previous.EndLine = fset.Position(decl.End()).Line
+				previous.EndLine = fset.PositionFor(decl.End(), false).Line
 				previous.Description = desc
 				continue
 			}
 		}
 		chunks = append(chunks, Chunk{
-			Content: text, StartLine: fset.Position(start).Line,
-			EndLine: fset.Position(decl.End()).Line, FilePath: path, Description: description,
+			Content: text, StartLine: fset.PositionFor(start, false).Line,
+			EndLine: fset.PositionFor(decl.End(), false).Line, FilePath: path, Description: description,
 		})
 		packedStart, previousSmall = start, small
 	}

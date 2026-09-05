@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/XiaoConstantine/sgrep/pkg/chunk"
+	"github.com/XiaoConstantine/sgrep/pkg/modelcfg"
 	searchpkg "github.com/XiaoConstantine/sgrep/pkg/search"
 	"github.com/XiaoConstantine/sgrep/pkg/store"
 	"github.com/XiaoConstantine/sgrep/pkg/util"
@@ -1655,8 +1656,11 @@ func TestIndexSearchPreservesSameLineFragments(t *testing.T) {
 		if c.StartLine != 2 || c.EndLine != 2 {
 			t.Fatalf("fragment lines: %+v", c)
 		}
-		if chunk.EstimateTokens(util.CombineDescriptionContent(c.Content, c.Description)) > maxEmbedTokens() {
+		if chunk.EstimateTokens(item.text) > maxEmbedTokens() {
 			t.Fatal("fragment exceeds embedding budget")
+		}
+		if err := modelcfg.ValidateInput(modelcfg.DocumentText(item.text)); err != nil {
+			t.Fatal(err)
 		}
 		reconstructed.WriteString(c.Content)
 		ids[i] = fmt.Sprintf("literal.go:chunk_%d", i+1)
@@ -1719,5 +1723,33 @@ func TestIndexSearchPreservesSameLineFragments(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("search/JSON lost distinct same-line fragments: got %d, want %d", len(decoded), len(items))
+	}
+}
+
+func TestRechunkValidatesUntrimmedDenseInput(t *testing.T) {
+	t.Setenv("SGREP_CONTEXT_TOKENS", "128")
+	root := t.TempDir()
+	body := "func F() { _ = \"" + strings.Repeat(" ", 1000) + "\" }"
+	path := filepath.Join(root, "spaces.go")
+	if err := os.WriteFile(path, []byte("package p\n"+body+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	idx := &Indexer{rootPath: root, chunkCfg: &chunk.Config{MaxTokens: 96}}
+	items, err := idx.readAndChunkFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reconstructed strings.Builder
+	for _, item := range items {
+		reconstructed.WriteString(item.chunk.Content)
+		if chunk.EstimateTokens(item.text) > maxEmbedTokens() {
+			t.Errorf("actual dense input estimate %d exceeds %d", chunk.EstimateTokens(item.text), maxEmbedTokens())
+		}
+		if err := modelcfg.ValidateInput(modelcfg.DocumentText(item.text)); err != nil {
+			t.Error(err)
+		}
+	}
+	if reconstructed.String() != body {
+		t.Fatal("validation changed literal bytes")
 	}
 }
