@@ -70,6 +70,8 @@ func enableRerankerExecTrace() error {
 	// PT_TRACE_ME stops this process at each following exec before the new
 	// image can execute user code. The supervisor refreshes the guardian's
 	// audit-token handle while the configured image is stopped.
+	// Darwin applies this to the calling thread; runConstrainedReranker
+	// locks the OS thread before arming and keeps it through exec.
 	//nolint:staticcheck // x/sys exposes Darwin ptrace constants but no trace-me wrapper.
 	_, _, errno := unix.Syscall6(unix.SYS_PTRACE, unix.PT_TRACE_ME, 0, 0, 0, 0, 0)
 	if errno != 0 {
@@ -78,8 +80,14 @@ func enableRerankerExecTrace() error {
 	return nil
 }
 
-func waitForStoppedRerankerExec(pid int, expectedDevice, expectedInode uint64) (rerankerPIDState, func() error, bool, error) {
+func waitForStoppedRerankerExec(pid int, expectedDevice, expectedInode uint64, authorize func() error) (rerankerPIDState, func() error, bool, error) {
 	deadline := time.Now().Add(supervisorSetupTimeout)
+	if authorize != nil {
+		if err := authorize(); err != nil {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			return rerankerPIDState{}, nil, false, err
+		}
+	}
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -96,7 +104,7 @@ func waitForStoppedRerankerExec(pid int, expectedDevice, expectedInode uint64) (
 		state, inspectErr := inspectRerankerProcess(pid)
 		if inspectErr == nil && state.ExecutableDevice == expectedDevice && state.ExecutableInode == expectedInode {
 			return state, func() error {
-				if err := unix.PtraceDetach(pid); err != nil {
+				if err := detachDarwinTrace(pid); err != nil {
 					return fmt.Errorf("detach constrained reranker exec trace: %w", err)
 				}
 				return nil
@@ -151,8 +159,18 @@ func waitForDarwinTraceEvent(pid int, timeout time.Duration) (syscall.WaitStatus
 }
 
 func continueDarwinTrace(pid int) error {
+	return ptraceDarwin(unix.PT_CONTINUE, pid)
+}
+
+func detachDarwinTrace(pid int) error {
+	// x/sys's PtraceDetach passes addr=0. Darwin treats that like a null PC
+	// on detach and delivers the exec-stop SIGTRAP as a fatal trace/BPT trap.
+	return ptraceDarwin(unix.PT_DETACH, pid)
+}
+
+func ptraceDarwin(request, pid int) error {
 	//nolint:staticcheck // x/sys exposes attach/detach but no Darwin PT_CONTINUE wrapper.
-	_, _, errno := unix.Syscall6(unix.SYS_PTRACE, unix.PT_CONTINUE, uintptr(pid), 1, 0, 0, 0)
+	_, _, errno := unix.Syscall6(unix.SYS_PTRACE, uintptr(request), uintptr(pid), 1, 0, 0, 0)
 	if errno != 0 {
 		return errno
 	}

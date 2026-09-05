@@ -699,6 +699,41 @@ func TestLibSQLStore_FTSUpdateRemovesOldTerms(t *testing.T) {
 	}
 }
 
+func TestLibSQLStore_CloseMakesMetadataVisibleToImmutableSearch(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "index.db")
+	s, err := OpenLibSQL(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	doc := &Document{
+		ID: "visible.go:chunk_1", FilePath: "visible.go", Content: "func visible() {}",
+		StartLine: 1, EndLine: 1,
+	}
+	if err := s.StoreMetadataBatch(ctx, []*Document{doc}); err != nil {
+		_ = s.Close()
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	metadata, err := OpenSQLiteMetadata(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = metadata.Close() }()
+	got, err := metadata.GetChunksByFilePath(ctx, doc.FilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != doc.ID || got[0].Content != doc.Content {
+		t.Fatalf("immutable metadata after Close = %+v, want %s", got, doc.ID)
+	}
+}
+
 func TestLibSQLStore_GetChunksForColBERT_IncludesCompactMetadataRows(t *testing.T) {
 	dir := t.TempDir()
 	s, err := OpenLibSQL(filepath.Join(dir, "test.db"))

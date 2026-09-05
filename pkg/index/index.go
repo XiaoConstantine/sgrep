@@ -738,6 +738,9 @@ func (idx *Indexer) Index(ctx context.Context) error {
 	if debugLevel >= util.DebugSummary {
 		stats.PrintSummary()
 	}
+	if err := idx.Checkpoint(ctx); err != nil {
+		return fmt.Errorf("checkpoint index: %w", err)
+	}
 	if err := writeRepoMetadata(idx.repoDir, idx.rootPath); err != nil {
 		return fmt.Errorf("finalize index metadata: %w", err)
 	}

@@ -1291,9 +1291,23 @@ func (s *LibSQLStore) ExportFileEmbeddings(ctx context.Context) ([]string, [][]f
 	return filePaths, vecs, nil
 }
 
-// Close closes the database.
+// Close checkpoints WAL into the main DB, then closes the database.
+//
+// Search opens the same file with modernc sqlite and immutable=1, which does
+// not read leftover WAL. Compact metadata writes must be visible after Close.
 func (s *LibSQLStore) Close() error {
-	return s.db.Close()
+	var checkpointErr error
+	if !s.readOnly {
+		checkpointErr = s.Checkpoint(context.Background())
+	}
+	closeErr := s.db.Close()
+	if checkpointErr != nil {
+		if closeErr != nil {
+			return fmt.Errorf("%w; close: %v", checkpointErr, closeErr)
+		}
+		return checkpointErr
+	}
+	return closeErr
 }
 
 // Checkpoint flushes WAL data into the main DB and truncates sidecar growth.

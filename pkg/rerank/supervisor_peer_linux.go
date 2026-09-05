@@ -44,7 +44,12 @@ func enableRerankerExecTrace() error {
 	return nil
 }
 
-func waitForStoppedRerankerExec(pid int, expectedDevice, expectedInode uint64) (rerankerPIDState, func() error, bool, error) {
+func waitForStoppedRerankerExec(pid int, expectedDevice, expectedInode uint64, authorize func() error) (rerankerPIDState, func() error, bool, error) {
+	if authorize != nil {
+		if err := authorize(); err != nil {
+			return rerankerPIDState{}, nil, false, err
+		}
+	}
 	state, err := waitForRerankerExec(pid, expectedDevice, expectedInode)
 	return state, func() error { return nil }, false, err
 }
