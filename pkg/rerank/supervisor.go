@@ -1,6 +1,7 @@
 package rerank
 
 import (
+	"bufio"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -366,8 +367,9 @@ func runGuardianFromEnvironment(args []string) error {
 		return fmt.Errorf("announce reranker guardian: %w", io.ErrShortWrite)
 	}
 
+	reader := bufio.NewReaderSize(lifetime, guardianRegistrationLimit)
 	var command [1]byte
-	if _, err := io.ReadFull(lifetime, command[:]); err != nil {
+	if _, err := io.ReadFull(reader, command[:]); err != nil {
 		return killAbandonedRerankerGroup(rootPID, err)
 	}
 	if command[0] == guardianCleanShutdown {
@@ -376,8 +378,8 @@ func runGuardianFromEnvironment(args []string) error {
 	if command[0] != guardianRegister {
 		return killAbandonedRerankerGroup(rootPID, fmt.Errorf("invalid reranker guardian registration command"))
 	}
-	var registration guardianRegistration
-	if err := json.NewDecoder(io.LimitReader(lifetime, guardianRegistrationLimit)).Decode(&registration); err != nil {
+	registration, err := readGuardianRegistration(reader)
+	if err != nil {
 		return killAbandonedRerankerGroup(rootPID, fmt.Errorf("decode reranker guardian registration: %w", err))
 	}
 	if registration.Protocol != supervisorProtocolVersion || registration.PID != rootPID || registration.Started == "" {
@@ -395,7 +397,7 @@ func runGuardianFromEnvironment(args []string) error {
 
 	var readErr error
 	for {
-		_, readErr = io.ReadFull(lifetime, command[:])
+		_, readErr = io.ReadFull(reader, command[:])
 		if readErr != nil {
 			break
 		}
@@ -403,8 +405,8 @@ func runGuardianFromEnvironment(args []string) error {
 		case guardianCleanShutdown:
 			return nil
 		case guardianRefresh:
-			var refresh guardianRegistration
-			if err := json.NewDecoder(io.LimitReader(lifetime, guardianRegistrationLimit)).Decode(&refresh); err != nil {
+			refresh, err := readGuardianRegistration(reader)
+			if err != nil {
 				readErr = fmt.Errorf("decode reranker guardian handle refresh: %w", err)
 				break
 			}
@@ -446,6 +448,20 @@ func runGuardianFromEnvironment(args []string) error {
 		}
 	}
 	return errors.Join(fmt.Errorf("reranker guardian terminated abandoned process"), readErr, refreshErr)
+}
+
+func readGuardianRegistration(reader *bufio.Reader) (guardianRegistration, error) {
+	var registration guardianRegistration
+	// sendRegistration writes one newline-terminated JSON record after its
+	// command byte. Consume exactly that frame through the shared bounded reader:
+	// a temporary JSON decoder can leave the newline unread or swallow bytes
+	// belonging to the next command, depending on socket read boundaries.
+	frame, err := reader.ReadSlice('\n')
+	if err != nil {
+		return registration, err
+	}
+	err = json.Unmarshal(frame, &registration)
+	return registration, err
 }
 
 func killAbandonedRerankerGroup(rootPID int, reason error) error {

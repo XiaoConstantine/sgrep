@@ -1,6 +1,7 @@
 package rerank
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -1291,6 +1293,64 @@ func TestRerankerSupervisorGuardianFailureTerminatesChild(t *testing.T) {
 	}
 	if rerankerProcessAlive(state.PID) {
 		t.Fatal("guardian failure left the retained child alive")
+	}
+}
+
+func TestGuardianRegistrationFraming(t *testing.T) {
+	registration := guardianRegistration{Protocol: supervisorProtocolVersion, PID: 123, Started: "generation"}
+	refresh := registration
+	refresh.Handle = "reopen"
+	var wire strings.Builder
+	for i, value := range []guardianRegistration{registration, refresh, refresh} {
+		command := guardianRefresh
+		if i == 0 {
+			command = guardianRegister
+		}
+		wire.WriteByte(command)
+		if err := json.NewEncoder(&wire).Encode(value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wire.WriteByte(guardianCleanShutdown)
+	for _, fragmented := range []bool{false, true} {
+		t.Run(fmt.Sprintf("fragmented=%v", fragmented), func(t *testing.T) {
+			var input io.Reader = strings.NewReader(wire.String())
+			if fragmented {
+				input = iotest.OneByteReader(input)
+			}
+			reader := bufio.NewReaderSize(input, guardianRegistrationLimit)
+			for i, want := range []guardianRegistration{registration, refresh, refresh} {
+				command, err := reader.ReadByte()
+				wantCommand := guardianRefresh
+				if i == 0 {
+					wantCommand = guardianRegister
+				}
+				if err != nil || command != wantCommand {
+					t.Fatalf("command %d = %#x, %v; want %#x", i, command, err, wantCommand)
+				}
+				got, err := readGuardianRegistration(reader)
+				if err != nil || got != want {
+					t.Fatalf("registration %d = %+v, %v; want %+v", i, got, err, want)
+				}
+			}
+			if command, err := reader.ReadByte(); err != nil || command != guardianCleanShutdown {
+				t.Fatalf("shutdown = %#x, %v", command, err)
+			}
+		})
+	}
+}
+
+func TestGuardianRegistrationRejectsInvalidFrames(t *testing.T) {
+	for _, frame := range []string{
+		`{"pid":123}`, // Missing frame terminator, even though JSON is complete.
+		"{\n",         // Malformed JSON.
+		"{}{}\n",      // More than one value in a frame.
+		strings.Repeat(" ", guardianRegistrationLimit) + "{}\n",
+	} {
+		reader := bufio.NewReaderSize(strings.NewReader(frame), guardianRegistrationLimit)
+		if _, err := readGuardianRegistration(reader); err == nil {
+			t.Errorf("accepted invalid frame of %d bytes", len(frame))
+		}
 	}
 }
 
