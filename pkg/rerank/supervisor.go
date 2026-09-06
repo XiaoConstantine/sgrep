@@ -288,9 +288,6 @@ func runConstrainedReranker(args []string) error {
 	if len(args) < 3 || args[1] != "--" {
 		return fmt.Errorf("invalid constrained reranker command")
 	}
-	// Darwin PT_TRACE_ME is thread-local. Stay on this OS thread through
-	// syscall.Exec so the traced exec stop is delivered to the supervisor.
-	runtime.LockOSThread()
 	identity := os.NewFile(3, "reranker-identity")
 	if identity == nil {
 		return fmt.Errorf("reranker identity descriptor is unavailable")

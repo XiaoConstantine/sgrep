@@ -13,9 +13,8 @@ import (
 const rerankerSandboxProfile = "(version 1) (allow default) (deny process-fork) (deny syscall-unix (syscall-number SYS_setpgid SYS_setsid SYS_posix_spawn))"
 
 func preserveRerankerIdentityAfterExec() bool {
-	// Darwin has no pidfd. Keeping the private socket open across exec lets
-	// the supervisor obtain the audit token while the new image is ptrace-
-	// stopped, then transfer that generation-bound handle to the guardian.
+	// Darwin has no pidfd. Keep the private socket open across exec so the
+	// supervisor can read the post-exec audit token without PT_TRACE_ME.
 	return true
 }
 
