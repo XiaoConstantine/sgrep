@@ -18,16 +18,17 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func rerankerProcessExecutableIdentity(pid int) (uint64, uint64, error) {
-	type uniqueIdentifierInfo struct {
-		UUID           [16]byte
-		UniqueID       uint64
-		ParentUniqueID uint64
-		IDVersion      int32
-		Reserved2      uint32
-		Reserved3      uint64
-		Reserved4      uint64
-	}
+type uniqueIdentifierInfo struct {
+	UUID           [16]byte
+	UniqueID       uint64
+	ParentUniqueID uint64
+	IDVersion      int32
+	Reserved2      uint32
+	Reserved3      uint64
+	Reserved4      uint64
+}
+
+func darwinProcessIdentity(pid int) (uniqueIdentifierInfo, error) {
 	var identity uniqueIdentifierInfo
 	const (
 		procInfoCallPIDInfo         = 0x2
@@ -44,10 +45,18 @@ func rerankerProcessExecutableIdentity(pid int) (uint64, uint64, error) {
 		unsafe.Sizeof(identity),
 	)
 	if errno != 0 {
-		return 0, 0, errno
+		return identity, errno
 	}
 	if result != unsafe.Sizeof(identity) {
-		return 0, 0, fmt.Errorf("unexpected Darwin executable identity size %d", result)
+		return identity, fmt.Errorf("unexpected Darwin executable identity size %d", result)
+	}
+	return identity, nil
+}
+
+func rerankerProcessExecutableIdentity(pid int) (uint64, uint64, error) {
+	identity, err := darwinProcessIdentity(pid)
+	if err != nil {
+		return 0, 0, err
 	}
 	first := binary.LittleEndian.Uint64(identity.UUID[:8])
 	second := binary.LittleEndian.Uint64(identity.UUID[8:])
@@ -177,10 +186,20 @@ type rerankerProcessHandle struct {
 
 func openRerankerProcessHandle(pid int, started string, identity *os.File) (*rerankerProcessHandle, error) {
 	token, err := peerAuditToken(identity)
-	if err != nil {
+	if errors.Is(err, unix.ENOTCONN) {
+		// The executed program may close inherited descriptors before we
+		// observe its image. Darwin's proc_find_audit_token (used by signal)
+		// checks only PID and pidversion; obtain both from kernel process
+		// information rather than falling back to a racy kill(pid).
+		info, infoErr := darwinProcessIdentity(pid)
+		if infoErr != nil {
+			return nil, infoErr
+		}
+		token = [8]uint32{5: uint32(pid), 7: uint32(info.IDVersion)}
+	} else if err != nil {
 		return nil, err
 	}
-	if int(token[5]) != pid || rerankerProcessStartIdentity(pid) != started {
+	if int(token[5]) != pid || started == "" || rerankerProcessStartIdentity(pid) != started {
 		return nil, fmt.Errorf("reranker process generation changed while acquiring audit token")
 	}
 	return &rerankerProcessHandle{token: token}, nil
