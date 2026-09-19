@@ -46,6 +46,7 @@ cd your-repository
 sgrep index .
 
 sgrep "database connection error handling"              # balanced, the default
+sgrep --implementation-first "register and discover tools" # prefer source over prose
 sgrep --profile fast "request routing"                   # lowest latency
 sgrep --profile quality "JWT validation middleware"     # optional ColBERT reranking
 ```
@@ -55,6 +56,9 @@ sgrep --profile quality "JWT validation middleware"     # optional ColBERT reran
 | `fast` | Semantic | Quick exploration |
 | `balanced` | Semantic + BM25 | Recommended everyday profile; default |
 | `quality` | Semantic + BM25 + ColBERT | Optional reranking experiments |
+
+Use `--implementation-first` when you want implementation evidence rather than
+documentation, examples, or tests. The default ordering is unchanged.
 
 [Code-search guide →](https://xiaocui.me/sgrep/guides/code-search/)
 

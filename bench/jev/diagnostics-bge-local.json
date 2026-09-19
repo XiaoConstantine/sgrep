@@ -1,0 +1,118 @@
+{
+  "model": "bge-reranker-v2-m3-q4km",
+  "answerability_protocol": "Threshold raw model logit at 0.0 over the returned top 10; threshold fixed from the model card before observing these scores.",
+  "answerability_correct": 9,
+  "answerability_total": 10,
+  "answerability_cases": [
+    {
+      "query": "ReAct agent reasoning and action loop",
+      "expected_answer": true,
+      "predicted_any_answer": true,
+      "max_score": 3.943157196044922,
+      "correct": true
+    },
+    {
+      "query": "register and discover tools for LLM agents",
+      "expected_answer": true,
+      "predicted_any_answer": true,
+      "max_score": 0.2665932774543762,
+      "correct": true
+    },
+    {
+      "query": "bootstrap few shot examples from training data",
+      "expected_answer": true,
+      "predicted_any_answer": true,
+      "max_score": 1.7611407041549683,
+      "correct": true
+    },
+    {
+      "query": "intercept and modify module execution",
+      "expected_answer": true,
+      "predicted_any_answer": true,
+      "max_score": 2.8386096954345703,
+      "correct": true
+    },
+    {
+      "query": "configure logging and debugging",
+      "expected_answer": true,
+      "predicted_any_answer": true,
+      "max_score": 1.4894888401031494,
+      "correct": true
+    },
+    {
+      "query": "use anthropic claude models",
+      "expected_answer": true,
+      "predicted_any_answer": true,
+      "max_score": 2.823174476623535,
+      "correct": true
+    },
+    {
+      "query": "multimodal content handling for images and audio",
+      "expected_answer": true,
+      "predicted_any_answer": true,
+      "max_score": 1.8026859760284424,
+      "correct": true
+    },
+    {
+      "query": "self-refine answers through iteration",
+      "expected_answer": true,
+      "predicted_any_answer": false,
+      "max_score": -3.5997133255004883,
+      "correct": false
+    },
+    {
+      "query": "Kubernetes pod eviction controller implementation",
+      "expected_answer": false,
+      "predicted_any_answer": false,
+      "max_score": -3.663088083267212,
+      "correct": true
+    },
+    {
+      "query": "PostgreSQL WAL replication slot cleanup implementation",
+      "expected_answer": false,
+      "predicted_any_answer": false,
+      "max_score": -3.340630054473877,
+      "correct": true
+    }
+  ],
+  "implementation_vs_prose_protocol": "Six synthetic asymmetric pairs, prose at index 0 and implementation at index 1; expected implementation winner authored before scoring.",
+  "implementation_wins": 1,
+  "implementation_challenges": [
+    {
+      "query": "where is JWT signature validation implemented?",
+      "prose_score": -1.4943294525146484,
+      "implementation_score": -4.648314476013184,
+      "implementation_wins": false
+    },
+    {
+      "query": "implementation of retry with exponential backoff",
+      "prose_score": 2.234705924987793,
+      "implementation_score": -2.729422092437744,
+      "implementation_wins": false
+    },
+    {
+      "query": "code that closes idle database connections",
+      "prose_score": 1.2465503215789795,
+      "implementation_score": 1.3276877403259277,
+      "implementation_wins": true
+    },
+    {
+      "query": "request rate limiter implementation",
+      "prose_score": -2.4164681434631348,
+      "implementation_score": -8.150779724121094,
+      "implementation_wins": false
+    },
+    {
+      "query": "parse and validate configuration",
+      "prose_score": 2.7231016159057617,
+      "implementation_score": -1.284050464630127,
+      "implementation_wins": false
+    },
+    {
+      "query": "cancel worker goroutines on context cancellation",
+      "prose_score": -3.1477415561676025,
+      "implementation_score": -4.199755668640137,
+      "implementation_wins": false
+    }
+  ]
+}

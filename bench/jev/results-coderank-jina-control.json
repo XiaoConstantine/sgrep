@@ -1,0 +1,3744 @@
+{
+  "experiment": "isolated Jev code-search reranking",
+  "created_at": "2026-09-19T20:24:29Z",
+  "source_commit": "7acabf3faf912e8944e294e68f345c773f5b8013",
+  "corpus_commit": "87cb50fa0611ef8a3905494c8b16fb0aab7666d3",
+  "dataset": "dspy-go-jev-heldout",
+  "split": "heldout",
+  "jev_model": "jev-1.13.0",
+  "jev_shortlist": 10,
+  "jev_score_scale": 1,
+  "jev_price_per_million_input_tokens": 0.042,
+  "privacy": "Local-only run; no query or source content transmitted to TypeSafe.",
+  "runtime": "go1.27.0",
+  "live_jev": false,
+  "blocked_reason": "local alternatives run; no live Jev calls",
+  "failure_fallback_verified": false,
+  "arms": [
+    {
+      "name": "balanced baseline",
+      "queries": 10,
+      "answered_queries": 8,
+      "mrr": 0.6666666666666666,
+      "ndcg@10": 0.4988529192030594,
+      "recall@10": 0.4375,
+      "implementation_vs_prose_promotion_errors": 1,
+      "p50_end_to_end_latency_ms": 44.597,
+      "p95_end_to_end_latency_ms": 70.983,
+      "failures": 0,
+      "fallbacks": 0,
+      "records": [
+        {
+          "query": "ReAct agent reasoning and action loop",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.7136205775898136,
+            "recall@10": 0.6666666666666666,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 47.796,
+          "results": [
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 27,
+              "end_line": 34,
+              "score": -0.015932377049180328
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 903,
+              "end_line": 916,
+              "score": -0.015200918484500572
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 838,
+              "end_line": 846,
+              "score": -0.013836065573770491
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 540,
+              "end_line": 546,
+              "score": -0.013413983276996975
+            },
+            {
+              "file": "pkg/modules/react.go",
+              "start_line": 20,
+              "end_line": 31,
+              "score": -0.013010752688172044
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 1051,
+              "end_line": 1060,
+              "score": -0.01281936351411923
+            },
+            {
+              "file": "pkg/agents/README.md",
+              "start_line": 1,
+              "end_line": 87,
+              "score": -0.012764747690120825
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 675,
+              "end_line": 683,
+              "score": -0.01273809523809524
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 1515,
+              "end_line": 1531,
+              "score": -0.012301075268817204
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 1129,
+              "end_line": 1137,
+              "score": -0.012255344775669978
+            }
+          ]
+        },
+        {
+          "query": "register and discover tools for LLM agents",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 0.3333333333333333,
+            "ndcg@10": 0.421820340078341,
+            "recall@10": 0.5,
+            "implementation_vs_prose_promotion_errors": 1
+          },
+          "latency_ms": 70.983,
+          "results": [
+            {
+              "file": "docs/content/docs/guides/agents.md",
+              "start_line": 672,
+              "end_line": 763,
+              "score": -0.015169398907103825
+            },
+            {
+              "file": "pkg/tools/mcp_discovery.go",
+              "start_line": 51,
+              "end_line": 92,
+              "score": -0.014973262032085561
+            },
+            {
+              "file": "pkg/tools/smart_registry.go",
+              "start_line": 423,
+              "end_line": 459,
+              "score": -0.013118279569892474
+            },
+            {
+              "file": "pkg/tools/smart_registry.go",
+              "start_line": 59,
+              "end_line": 63,
+              "score": -0.012747252747252746
+            },
+            {
+              "file": "examples/smart_tool_registry/main.go",
+              "start_line": 178,
+              "end_line": 180,
+              "score": -0.012632978723404256
+            },
+            {
+              "file": "examples/ace_react/main.go",
+              "start_line": 434,
+              "end_line": 456,
+              "score": -0.012508884150675194
+            },
+            {
+              "file": "pkg/tools/smart_registry.go",
+              "start_line": 97,
+              "end_line": 124,
+              "score": -0.012337662337662338
+            },
+            {
+              "file": "pkg/tools/registry.go",
+              "start_line": 24,
+              "end_line": 43,
+              "score": -0.012136350279165441
+            },
+            {
+              "file": "pkg/agents/native/agent.go",
+              "start_line": 226,
+              "end_line": 232,
+              "score": -0.012008658995100832
+            },
+            {
+              "file": "docs/content/docs/guides/agents.md",
+              "start_line": 177,
+              "end_line": 277,
+              "score": -0.01122762148337596
+            }
+          ]
+        },
+        {
+          "query": "bootstrap few shot examples from training data",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.7984848580994977,
+            "recall@10": 0.6666666666666666,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 65.023,
+          "results": [
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 16,
+              "end_line": 19,
+              "score": -0.015826612903225807
+            },
+            {
+              "file": "compatibility_test/dspy_comparison.py",
+              "start_line": 203,
+              "end_line": 255,
+              "score": -0.015550351288056204
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 21,
+              "end_line": 26,
+              "score": -0.015253029223093371
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 28,
+              "end_line": 51,
+              "score": -0.014401858304297327
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 145,
+              "end_line": 157,
+              "score": -0.014354066985645932
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 53,
+              "end_line": 56,
+              "score": -0.01384493670886076
+            },
+            {
+              "file": "pkg/core/optimizer.go",
+              "start_line": 126,
+              "end_line": 131,
+              "score": -0.013776223776223777
+            },
+            {
+              "file": "compatibility_test/compare_results.py",
+              "start_line": 38,
+              "end_line": 72,
+              "score": -0.013552925030022303
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 187,
+              "end_line": 196,
+              "score": -0.013492063492063493
+            },
+            {
+              "file": "pkg/core/optimizer.go",
+              "start_line": 112,
+              "end_line": 116,
+              "score": -0.01347945205479452
+            }
+          ]
+        },
+        {
+          "query": "intercept and modify module execution",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.6735439182299786,
+            "recall@10": 0.3333333333333333,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 45.89,
+          "results": [
+            {
+              "file": "pkg/core/interceptor.go",
+              "start_line": 18,
+              "end_line": 21,
+              "score": -0.01597542242703533
+            },
+            {
+              "file": "docs/content/docs/guides/interceptors.md",
+              "start_line": 1,
+              "end_line": 87,
+              "score": -0.014920634920634921
+            },
+            {
+              "file": "pkg/interceptors/README.md",
+              "start_line": 1,
+              "end_line": 59,
+              "score": -0.014452113891285591
+            },
+            {
+              "file": "examples/xml_adapter/README.md",
+              "start_line": 67,
+              "end_line": 131,
+              "score": -0.012030360531309299
+            },
+            {
+              "file": "pkg/interceptors/standard.go",
+              "start_line": 77,
+              "end_line": 108,
+              "score": -0.011574445335471799
+            },
+            {
+              "file": "examples/gsm8k/main.go",
+              "start_line": 94,
+              "end_line": 147,
+              "score": -0.011458333333333334
+            },
+            {
+              "file": "pkg/interceptors/standard.go",
+              "start_line": 11,
+              "end_line": 31,
+              "score": -0.011355311355311357
+            },
+            {
+              "file": "pkg/modules/react.go",
+              "start_line": 33,
+              "end_line": 57,
+              "score": -0.00985807441503644
+            },
+            {
+              "file": "pkg/core/module.go",
+              "start_line": 34,
+              "end_line": 50,
+              "score": -0.009836065573770491
+            },
+            {
+              "file": "pkg/interceptors/security.go",
+              "start_line": 324,
+              "end_line": 330,
+              "score": -0.009375
+            }
+          ]
+        },
+        {
+          "query": "configure logging and debugging",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.6735439182299786,
+            "recall@10": 0.3333333333333333,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 39.271,
+          "results": [
+            {
+              "file": "pkg/logging/logger.go",
+              "start_line": 131,
+              "end_line": 134,
+              "score": -0.012361983113227972
+            },
+            {
+              "file": "pkg/config/manager.go",
+              "start_line": 180,
+              "end_line": 188,
+              "score": -0.012104454685099846
+            },
+            {
+              "file": "doc.go",
+              "start_line": 331,
+              "end_line": 382,
+              "score": -0.012072858648201113
+            },
+            {
+              "file": "cmd/dspy-cli/internal/runner/optimizer_runner.go",
+              "start_line": 205,
+              "end_line": 227,
+              "score": -0.011796427367711493
+            },
+            {
+              "file": "examples/others/mcp/main.go",
+              "start_line": 48,
+              "end_line": 51,
+              "score": -0.011351217088922005
+            },
+            {
+              "file": "pkg/config/sources.go",
+              "start_line": 294,
+              "end_line": 309,
+              "score": -0.011274131274131275
+            },
+            {
+              "file": "pkg/logging/logger.go",
+              "start_line": 38,
+              "end_line": 44,
+              "score": -0.01050420168067227
+            },
+            {
+              "file": "pkg/logging/severity.go",
+              "start_line": 6,
+              "end_line": 12,
+              "score": -0.010503317688946433
+            },
+            {
+              "file": "pkg/logging/logger.go",
+              "start_line": 201,
+              "end_line": 206,
+              "score": -0.009885844748858447
+            },
+            {
+              "file": "pkg/logging/logger.go",
+              "start_line": 46,
+              "end_line": 54,
+              "score": -0.009864131787189569
+            }
+          ]
+        },
+        {
+          "query": "use anthropic claude models",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.7098097413968654,
+            "recall@10": 1,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 49.81,
+          "results": [
+            {
+              "file": "pkg/core/llm.go",
+              "start_line": 667,
+              "end_line": 707,
+              "score": -0.01608118657298985
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 27,
+              "end_line": 68,
+              "score": -0.015989911727616643
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 25,
+              "end_line": 25,
+              "score": -0.015474520804114072
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 172,
+              "end_line": 196,
+              "score": -0.014302981466559226
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 84,
+              "end_line": 96,
+              "score": -0.014205231388329981
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 600,
+              "end_line": 654,
+              "score": -0.013241106719367589
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 19,
+              "end_line": 23,
+              "score": -0.01319116527037319
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 198,
+              "end_line": 261,
+              "score": -0.01277278562259307
+            },
+            {
+              "file": "docs/hugo_stats.json",
+              "start_line": 250,
+              "end_line": 330,
+              "score": -0.01271172228743921
+            },
+            {
+              "file": "docs/content/docs/reference/providers.md",
+              "start_line": 220,
+              "end_line": 302,
+              "score": -0.012373737373737374
+            }
+          ]
+        },
+        {
+          "query": "multimodal content handling for images and audio",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 0,
+            "ndcg@10": 0,
+            "recall@10": 0,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 44.597,
+          "results": [
+            {
+              "file": "docs/content/docs/guides/multimodal.md",
+              "start_line": 1,
+              "end_line": 76,
+              "score": -0.015633167023045853
+            },
+            {
+              "file": "examples/multimodal/README.md",
+              "start_line": 82,
+              "end_line": 162,
+              "score": -0.01544011544011544
+            },
+            {
+              "file": "docs/content/docs/guides/multimodal.md",
+              "start_line": 493,
+              "end_line": 542,
+              "score": -0.015238095238095238
+            },
+            {
+              "file": "examples/multimodal/README.md",
+              "start_line": 1,
+              "end_line": 84,
+              "score": -0.01492537313432836
+            },
+            {
+              "file": "docs/content/docs/guides/multimodal.md",
+              "start_line": 312,
+              "end_line": 399,
+              "score": -0.014884135472370767
+            },
+            {
+              "file": "examples/multimodal/main.go",
+              "start_line": 40,
+              "end_line": 49,
+              "score": -0.014805624483043837
+            },
+            {
+              "file": "examples/multimodal/utils.go",
+              "start_line": 111,
+              "end_line": 130,
+              "score": -0.013976833976833978
+            },
+            {
+              "file": "examples/multimodal/utils.go",
+              "start_line": 98,
+              "end_line": 102,
+              "score": -0.013741910925009516
+            },
+            {
+              "file": "examples/multimodal/config.yaml",
+              "start_line": 1,
+              "end_line": 57,
+              "score": -0.013413983276996975
+            },
+            {
+              "file": "docs/content/docs/guides/multimodal.md",
+              "start_line": 147,
+              "end_line": 231,
+              "score": -0.012996727442730248
+            }
+          ]
+        },
+        {
+          "query": "self-refine answers through iteration",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 0,
+            "ndcg@10": 0,
+            "recall@10": 0,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 30.925,
+          "results": [
+            {
+              "file": "cmd/dspy-cli/internal/interactive/models/wizard.go",
+              "start_line": 329,
+              "end_line": 372,
+              "score": -0.012617983109786388
+            },
+            {
+              "file": "cmd/dspy-cli/internal/viewer/types.go",
+              "start_line": 65,
+              "end_line": 75,
+              "score": -0.012058570198105082
+            },
+            {
+              "file": "pkg/modules/rlm/config.go",
+              "start_line": 215,
+              "end_line": 237,
+              "score": -0.010215623895369388
+            },
+            {
+              "file": "pkg/optimizers/gepa.go",
+              "start_line": 6250,
+              "end_line": 6275,
+              "score": -0.009836065573770491
+            },
+            {
+              "file": "pkg/agents/react/reflection.go",
+              "start_line": 537,
+              "end_line": 548,
+              "score": -0.00967741935483871
+            },
+            {
+              "file": "pkg/agents/react/reflection.go",
+              "start_line": 550,
+              "end_line": 579,
+              "score": -0.009523809523809523
+            },
+            {
+              "file": "pkg/agents/react/reflection.go",
+              "start_line": 158,
+              "end_line": 211,
+              "score": -0.009375
+            },
+            {
+              "file": "pkg/modules/rlm/signatures.go",
+              "start_line": 419,
+              "end_line": 467,
+              "score": -0.00923076923076923
+            },
+            {
+              "file": "pkg/modules/rlm/signatures.go",
+              "start_line": 411,
+              "end_line": 418,
+              "score": -0.00917596437684495
+            },
+            {
+              "file": "pkg/optimizers/copro.go",
+              "start_line": 359,
+              "end_line": 418,
+              "score": -0.00909090909090909
+            }
+          ]
+        },
+        {
+          "query": "Kubernetes pod eviction controller implementation",
+          "expected_answer": false,
+          "metrics": {
+            "mrr": 0,
+            "ndcg@10": 0,
+            "recall@10": 0,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 38.843,
+          "results": [
+            {
+              "file": "pkg/optimizers/mcp_optimizer.go",
+              "start_line": 457,
+              "end_line": 492,
+              "score": -0.015647568608570053
+            },
+            {
+              "file": "pkg/optimizers/mcp_optimizer.go",
+              "start_line": 443,
+              "end_line": 455,
+              "score": -0.015633167023045853
+            },
+            {
+              "file": "pkg/cache/sqlite_cache.go",
+              "start_line": 287,
+              "end_line": 328,
+              "score": -0.015079365079365078
+            },
+            {
+              "file": "pkg/cache/cache.go",
+              "start_line": 108,
+              "end_line": 118,
+              "score": -0.012873166522864538
+            },
+            {
+              "file": "pkg/agents/ace/doc.go",
+              "start_line": 61,
+              "end_line": 93,
+              "score": -0.011017079550700108
+            },
+            {
+              "file": "pkg/config/interceptors.go",
+              "start_line": 505,
+              "end_line": 510,
+              "score": -0.009375
+            },
+            {
+              "file": "pkg/core/interceptor.go",
+              "start_line": 111,
+              "end_line": 116,
+              "score": -0.00923076923076923
+            },
+            {
+              "file": "pkg/optimizers/simba.go",
+              "start_line": 1209,
+              "end_line": 1214,
+              "score": -0.00909090909090909
+            },
+            {
+              "file": "pkg/config/config.go",
+              "start_line": 729,
+              "end_line": 735,
+              "score": -0.008823529411764706
+            },
+            {
+              "file": "examples/xml_adapter/custom_config/custom_config.go",
+              "start_line": 236,
+              "end_line": 238,
+              "score": -0.008695652173913044
+            }
+          ]
+        },
+        {
+          "query": "PostgreSQL WAL replication slot cleanup implementation",
+          "expected_answer": false,
+          "metrics": {
+            "mrr": 0,
+            "ndcg@10": 0,
+            "recall@10": 0,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 38.368,
+          "results": [
+            {
+              "file": "pkg/agents/memory/sqlite_memory.go",
+              "start_line": 54,
+              "end_line": 90,
+              "score": -0.014786967418546366
+            },
+            {
+              "file": "pkg/interceptors/performance.go",
+              "start_line": 115,
+              "end_line": 139,
+              "score": -0.014433766723195778
+            },
+            {
+              "file": "pkg/cache/cache.go",
+              "start_line": 108,
+              "end_line": 118,
+              "score": -0.013128205128205127
+            },
+            {
+              "file": "pkg/config/config.go",
+              "start_line": 373,
+              "end_line": 380,
+              "score": -0.012423720857455797
+            },
+            {
+              "file": "pkg/interceptors/security.go",
+              "start_line": 675,
+              "end_line": 694,
+              "score": -0.011950146627565984
+            },
+            {
+              "file": "examples/native_agent_session/main.go",
+              "start_line": 306,
+              "end_line": 316,
+              "score": -0.011855072463768115
+            },
+            {
+              "file": "pkg/agents/react/memory_optimizer.go",
+              "start_line": 512,
+              "end_line": 539,
+              "score": -0.01065943992773261
+            },
+            {
+              "file": "pkg/agents/communication/server.go",
+              "start_line": 292,
+              "end_line": 339,
+              "score": -0.01035873265252684
+            },
+            {
+              "file": "pkg/agents/memory/sqlite_memory.go",
+              "start_line": 325,
+              "end_line": 347,
+              "score": -0.010202348945804443
+            },
+            {
+              "file": "pkg/cache/sqlite_cache.go",
+              "start_line": 346,
+              "end_line": 371,
+              "score": -0.010170397594386902
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "balanced + existing Jina",
+      "queries": 10,
+      "answered_queries": 8,
+      "mrr": 0.7291666666666666,
+      "ndcg@10": 0.5649682367708565,
+      "recall@10": 0.5,
+      "implementation_vs_prose_promotion_errors": 1,
+      "p50_end_to_end_latency_ms": 35.874,
+      "p95_end_to_end_latency_ms": 49.868,
+      "failures": 0,
+      "fallbacks": 0,
+      "records": [
+        {
+          "query": "ReAct agent reasoning and action loop",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.7136205775898136,
+            "recall@10": 0.6666666666666666,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 42.89,
+          "results": [
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 27,
+              "end_line": 34,
+              "score": -0.015932377049180328
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 903,
+              "end_line": 916,
+              "score": -0.015200918484500572
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 838,
+              "end_line": 846,
+              "score": -0.013836065573770491
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 540,
+              "end_line": 546,
+              "score": -0.013413983276996975
+            },
+            {
+              "file": "pkg/modules/react.go",
+              "start_line": 20,
+              "end_line": 31,
+              "score": -0.013010752688172044
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 1051,
+              "end_line": 1060,
+              "score": -0.01281936351411923
+            },
+            {
+              "file": "pkg/agents/README.md",
+              "start_line": 1,
+              "end_line": 87,
+              "score": -0.012764747690120825
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 675,
+              "end_line": 683,
+              "score": -0.01273809523809524
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 1515,
+              "end_line": 1531,
+              "score": -0.012301075268817204
+            },
+            {
+              "file": "pkg/agents/react/README.md",
+              "start_line": 1,
+              "end_line": 23,
+              "score": -0.012071580224446467
+            }
+          ]
+        },
+        {
+          "query": "register and discover tools for LLM agents",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 0.5,
+            "ndcg@10": 0.5571655791252315,
+            "recall@10": 0.5,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 49.868,
+          "results": [
+            {
+              "file": "pkg/tools/mcp_discovery.go",
+              "start_line": 51,
+              "end_line": 92,
+              "score": -0.014973262032085561
+            },
+            {
+              "file": "pkg/tools/smart_registry.go",
+              "start_line": 423,
+              "end_line": 459,
+              "score": -0.013118279569892474
+            },
+            {
+              "file": "pkg/tools/smart_registry.go",
+              "start_line": 59,
+              "end_line": 63,
+              "score": -0.012747252747252746
+            },
+            {
+              "file": "pkg/tools/smart_registry.go",
+              "start_line": 97,
+              "end_line": 124,
+              "score": -0.012337662337662338
+            },
+            {
+              "file": "pkg/tools/registry.go",
+              "start_line": 24,
+              "end_line": 43,
+              "score": -0.012136350279165441
+            },
+            {
+              "file": "pkg/agents/native/agent.go",
+              "start_line": 226,
+              "end_line": 232,
+              "score": -0.012008658995100832
+            },
+            {
+              "file": "pkg/core/registry.go",
+              "start_line": 51,
+              "end_line": 85,
+              "score": -0.011186853317102861
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 519,
+              "end_line": 538,
+              "score": -0.011027816137305189
+            },
+            {
+              "file": "pkg/llms/factory.go",
+              "start_line": 54,
+              "end_line": 106,
+              "score": -0.010313001605136436
+            },
+            {
+              "file": "pkg/tools/README.md",
+              "start_line": 1,
+              "end_line": 53,
+              "score": -0.008018807980683695
+            }
+          ]
+        },
+        {
+          "query": "bootstrap few shot examples from training data",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.7984848580994977,
+            "recall@10": 0.6666666666666666,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 44.931,
+          "results": [
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 16,
+              "end_line": 19,
+              "score": -0.015826612903225807
+            },
+            {
+              "file": "compatibility_test/dspy_comparison.py",
+              "start_line": 203,
+              "end_line": 255,
+              "score": -0.015550351288056204
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 21,
+              "end_line": 26,
+              "score": -0.015253029223093371
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 28,
+              "end_line": 51,
+              "score": -0.014401858304297327
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 145,
+              "end_line": 157,
+              "score": -0.014354066985645932
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 53,
+              "end_line": 56,
+              "score": -0.01384493670886076
+            },
+            {
+              "file": "pkg/core/optimizer.go",
+              "start_line": 126,
+              "end_line": 131,
+              "score": -0.013776223776223777
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 187,
+              "end_line": 196,
+              "score": -0.013492063492063493
+            },
+            {
+              "file": "pkg/core/optimizer.go",
+              "start_line": 112,
+              "end_line": 116,
+              "score": -0.01347945205479452
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 159,
+              "end_line": 185,
+              "score": -0.01304637971304638
+            }
+          ]
+        },
+        {
+          "query": "intercept and modify module execution",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.6735439182299786,
+            "recall@10": 0.3333333333333333,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 36.739,
+          "results": [
+            {
+              "file": "pkg/core/interceptor.go",
+              "start_line": 18,
+              "end_line": 21,
+              "score": -0.01597542242703533
+            },
+            {
+              "file": "pkg/interceptors/README.md",
+              "start_line": 1,
+              "end_line": 59,
+              "score": -0.014452113891285591
+            },
+            {
+              "file": "pkg/interceptors/standard.go",
+              "start_line": 77,
+              "end_line": 108,
+              "score": -0.011574445335471799
+            },
+            {
+              "file": "pkg/interceptors/standard.go",
+              "start_line": 11,
+              "end_line": 31,
+              "score": -0.011355311355311357
+            },
+            {
+              "file": "pkg/modules/react.go",
+              "start_line": 33,
+              "end_line": 57,
+              "score": -0.00985807441503644
+            },
+            {
+              "file": "pkg/core/module.go",
+              "start_line": 34,
+              "end_line": 50,
+              "score": -0.009836065573770491
+            },
+            {
+              "file": "pkg/interceptors/security.go",
+              "start_line": 324,
+              "end_line": 330,
+              "score": -0.009375
+            },
+            {
+              "file": "pkg/core/interceptor.go",
+              "start_line": 132,
+              "end_line": 137,
+              "score": -0.00909090909090909
+            },
+            {
+              "file": "pkg/interceptors/standard.go",
+              "start_line": 175,
+              "end_line": 214,
+              "score": -0.008966666666666666
+            },
+            {
+              "file": "pkg/optimizers/simba.go",
+              "start_line": 708,
+              "end_line": 737,
+              "score": -0.008940582959641256
+            }
+          ]
+        },
+        {
+          "query": "configure logging and debugging",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.6735439182299786,
+            "recall@10": 0.3333333333333333,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 32.575,
+          "results": [
+            {
+              "file": "pkg/logging/logger.go",
+              "start_line": 131,
+              "end_line": 134,
+              "score": -0.012361983113227972
+            },
+            {
+              "file": "pkg/config/manager.go",
+              "start_line": 180,
+              "end_line": 188,
+              "score": -0.012104454685099846
+            },
+            {
+              "file": "pkg/config/sources.go",
+              "start_line": 294,
+              "end_line": 309,
+              "score": -0.011274131274131275
+            },
+            {
+              "file": "pkg/logging/logger.go",
+              "start_line": 38,
+              "end_line": 44,
+              "score": -0.01050420168067227
+            },
+            {
+              "file": "pkg/logging/severity.go",
+              "start_line": 6,
+              "end_line": 12,
+              "score": -0.010503317688946433
+            },
+            {
+              "file": "pkg/logging/logger.go",
+              "start_line": 201,
+              "end_line": 206,
+              "score": -0.009885844748858447
+            },
+            {
+              "file": "pkg/logging/logger.go",
+              "start_line": 46,
+              "end_line": 54,
+              "score": -0.009864131787189569
+            },
+            {
+              "file": "pkg/core/config.go",
+              "start_line": 98,
+              "end_line": 118,
+              "score": -0.00938722294654498
+            },
+            {
+              "file": "pkg/config/config.go",
+              "start_line": 154,
+              "end_line": 167,
+              "score": -0.009375
+            },
+            {
+              "file": "pkg/modules/rlm/config.go",
+              "start_line": 359,
+              "end_line": 364,
+              "score": -0.009317073170731707
+            }
+          ]
+        },
+        {
+          "query": "use anthropic claude models",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.7098097413968654,
+            "recall@10": 1,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 33.133,
+          "results": [
+            {
+              "file": "pkg/core/llm.go",
+              "start_line": 667,
+              "end_line": 707,
+              "score": -0.01608118657298985
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 27,
+              "end_line": 68,
+              "score": -0.015989911727616643
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 25,
+              "end_line": 25,
+              "score": -0.015474520804114072
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 172,
+              "end_line": 196,
+              "score": -0.014302981466559226
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 84,
+              "end_line": 96,
+              "score": -0.014205231388329981
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 600,
+              "end_line": 654,
+              "score": -0.013241106719367589
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 19,
+              "end_line": 23,
+              "score": -0.01319116527037319
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 198,
+              "end_line": 261,
+              "score": -0.01277278562259307
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 70,
+              "end_line": 77,
+              "score": -0.012142857142857143
+            },
+            {
+              "file": "pkg/config/validation.go",
+              "start_line": 470,
+              "end_line": 491,
+              "score": -0.012136752136752136
+            }
+          ]
+        },
+        {
+          "query": "multimodal content handling for images and audio",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 0.3333333333333333,
+            "ndcg@10": 0.393577301495486,
+            "recall@10": 0.5,
+            "implementation_vs_prose_promotion_errors": 1
+          },
+          "latency_ms": 37.967,
+          "results": [
+            {
+              "file": "docs/content/docs/guides/multimodal.md",
+              "start_line": 1,
+              "end_line": 76,
+              "score": -0.015633167023045853
+            },
+            {
+              "file": "docs/content/docs/guides/multimodal.md",
+              "start_line": 493,
+              "end_line": 542,
+              "score": -0.015238095238095238
+            },
+            {
+              "file": "docs/content/docs/guides/multimodal.md",
+              "start_line": 312,
+              "end_line": 399,
+              "score": -0.014884135472370767
+            },
+            {
+              "file": "pkg/core/llm.go",
+              "start_line": 588,
+              "end_line": 613,
+              "score": -0.012406015037593985
+            },
+            {
+              "file": "pkg/core/llm.go",
+              "start_line": 512,
+              "end_line": 515,
+              "score": -0.01126466147950296
+            },
+            {
+              "file": "pkg/core/llm.go",
+              "start_line": 154,
+              "end_line": 157,
+              "score": -0.011263736263736264
+            },
+            {
+              "file": "pkg/core/llm.go",
+              "start_line": 84,
+              "end_line": 91,
+              "score": -0.010899814471243042
+            },
+            {
+              "file": "pkg/core/content_utils.go",
+              "start_line": 177,
+              "end_line": 225,
+              "score": -0.010803932909196068
+            },
+            {
+              "file": "pkg/core/llm.go",
+              "start_line": 159,
+              "end_line": 162,
+              "score": -0.01076873867150016
+            },
+            {
+              "file": "pkg/llms/ollama.go",
+              "start_line": 844,
+              "end_line": 865,
+              "score": -0.01054287962234461
+            }
+          ]
+        },
+        {
+          "query": "self-refine answers through iteration",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 0,
+            "ndcg@10": 0,
+            "recall@10": 0,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 35.874,
+          "results": [
+            {
+              "file": "pkg/modules/rlm/config.go",
+              "start_line": 215,
+              "end_line": 237,
+              "score": -0.010215623895369388
+            },
+            {
+              "file": "pkg/optimizers/gepa.go",
+              "start_line": 6250,
+              "end_line": 6275,
+              "score": -0.009836065573770491
+            },
+            {
+              "file": "pkg/agents/react/reflection.go",
+              "start_line": 537,
+              "end_line": 548,
+              "score": -0.00967741935483871
+            },
+            {
+              "file": "pkg/agents/react/reflection.go",
+              "start_line": 550,
+              "end_line": 579,
+              "score": -0.009523809523809523
+            },
+            {
+              "file": "pkg/agents/react/reflection.go",
+              "start_line": 158,
+              "end_line": 211,
+              "score": -0.009375
+            },
+            {
+              "file": "pkg/modules/rlm/signatures.go",
+              "start_line": 419,
+              "end_line": 467,
+              "score": -0.00923076923076923
+            },
+            {
+              "file": "pkg/modules/rlm/signatures.go",
+              "start_line": 411,
+              "end_line": 418,
+              "score": -0.00917596437684495
+            },
+            {
+              "file": "pkg/optimizers/copro.go",
+              "start_line": 359,
+              "end_line": 418,
+              "score": -0.00909090909090909
+            },
+            {
+              "file": "pkg/modules/rlm/rlm.go",
+              "start_line": 1712,
+              "end_line": 1724,
+              "score": -0.008976833976833977
+            },
+            {
+              "file": "pkg/optimizers/gepa.go",
+              "start_line": 482,
+              "end_line": 498,
+              "score": -0.008955223880597015
+            }
+          ]
+        },
+        {
+          "query": "Kubernetes pod eviction controller implementation",
+          "expected_answer": false,
+          "metrics": {
+            "mrr": 0,
+            "ndcg@10": 0,
+            "recall@10": 0,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 33.978,
+          "results": [
+            {
+              "file": "pkg/optimizers/mcp_optimizer.go",
+              "start_line": 457,
+              "end_line": 492,
+              "score": -0.015647568608570053
+            },
+            {
+              "file": "pkg/optimizers/mcp_optimizer.go",
+              "start_line": 443,
+              "end_line": 455,
+              "score": -0.015633167023045853
+            },
+            {
+              "file": "pkg/cache/sqlite_cache.go",
+              "start_line": 287,
+              "end_line": 328,
+              "score": -0.015079365079365078
+            },
+            {
+              "file": "pkg/cache/cache.go",
+              "start_line": 108,
+              "end_line": 118,
+              "score": -0.012873166522864538
+            },
+            {
+              "file": "pkg/agents/ace/doc.go",
+              "start_line": 61,
+              "end_line": 93,
+              "score": -0.011017079550700108
+            },
+            {
+              "file": "pkg/config/interceptors.go",
+              "start_line": 505,
+              "end_line": 510,
+              "score": -0.009375
+            },
+            {
+              "file": "pkg/core/interceptor.go",
+              "start_line": 111,
+              "end_line": 116,
+              "score": -0.00923076923076923
+            },
+            {
+              "file": "pkg/optimizers/simba.go",
+              "start_line": 1209,
+              "end_line": 1214,
+              "score": -0.00909090909090909
+            },
+            {
+              "file": "pkg/config/config.go",
+              "start_line": 729,
+              "end_line": 735,
+              "score": -0.008823529411764706
+            },
+            {
+              "file": "pkg/optimizers/gepa.go",
+              "start_line": 542,
+              "end_line": 561,
+              "score": -0.008450704225352112
+            }
+          ]
+        },
+        {
+          "query": "PostgreSQL WAL replication slot cleanup implementation",
+          "expected_answer": false,
+          "metrics": {
+            "mrr": 0,
+            "ndcg@10": 0,
+            "recall@10": 0,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 30.214,
+          "results": [
+            {
+              "file": "pkg/agents/memory/sqlite_memory.go",
+              "start_line": 54,
+              "end_line": 90,
+              "score": -0.014786967418546366
+            },
+            {
+              "file": "pkg/interceptors/performance.go",
+              "start_line": 115,
+              "end_line": 139,
+              "score": -0.014433766723195778
+            },
+            {
+              "file": "pkg/cache/cache.go",
+              "start_line": 108,
+              "end_line": 118,
+              "score": -0.013128205128205127
+            },
+            {
+              "file": "pkg/config/config.go",
+              "start_line": 373,
+              "end_line": 380,
+              "score": -0.012423720857455797
+            },
+            {
+              "file": "pkg/interceptors/security.go",
+              "start_line": 675,
+              "end_line": 694,
+              "score": -0.011950146627565984
+            },
+            {
+              "file": "pkg/agents/react/memory_optimizer.go",
+              "start_line": 512,
+              "end_line": 539,
+              "score": -0.01065943992773261
+            },
+            {
+              "file": "pkg/agents/communication/server.go",
+              "start_line": 292,
+              "end_line": 339,
+              "score": -0.01035873265252684
+            },
+            {
+              "file": "pkg/agents/memory/sqlite_memory.go",
+              "start_line": 325,
+              "end_line": 347,
+              "score": -0.010202348945804443
+            },
+            {
+              "file": "pkg/cache/sqlite_cache.go",
+              "start_line": 346,
+              "end_line": 371,
+              "score": -0.010170397594386902
+            },
+            {
+              "file": "pkg/config/config.go",
+              "start_line": 358,
+              "end_line": 371,
+              "score": -0.009704008992131884
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "quality / ColBERT",
+      "queries": 10,
+      "answered_queries": 8,
+      "mrr": 0.7291666666666666,
+      "ndcg@10": 0.5667106605325483,
+      "recall@10": 0.5,
+      "implementation_vs_prose_promotion_errors": 1,
+      "p50_end_to_end_latency_ms": 6923.261,
+      "p95_end_to_end_latency_ms": 9222.83,
+      "failures": 0,
+      "fallbacks": 0,
+      "records": [
+        {
+          "query": "ReAct agent reasoning and action loop",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.7136205775898136,
+            "recall@10": 0.6666666666666666,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 6267.722,
+          "results": [
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 27,
+              "end_line": 34,
+              "score": -0.015932377049180328
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 903,
+              "end_line": 916,
+              "score": -0.015200918484500572
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 838,
+              "end_line": 846,
+              "score": -0.013836065573770491
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 540,
+              "end_line": 546,
+              "score": -0.013413983276996975
+            },
+            {
+              "file": "pkg/modules/react.go",
+              "start_line": 20,
+              "end_line": 31,
+              "score": -0.013010752688172044
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 1051,
+              "end_line": 1060,
+              "score": -0.01281936351411923
+            },
+            {
+              "file": "pkg/agents/README.md",
+              "start_line": 1,
+              "end_line": 87,
+              "score": -0.012764747690120825
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 675,
+              "end_line": 683,
+              "score": -0.01273809523809524
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 1515,
+              "end_line": 1531,
+              "score": -0.012301075268817204
+            },
+            {
+              "file": "pkg/agents/react/README.md",
+              "start_line": 1,
+              "end_line": 23,
+              "score": -0.012071580224446467
+            }
+          ]
+        },
+        {
+          "query": "register and discover tools for LLM agents",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 0.5,
+            "ndcg@10": 0.5571655791252315,
+            "recall@10": 0.5,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 6923.261,
+          "results": [
+            {
+              "file": "pkg/tools/mcp_discovery.go",
+              "start_line": 51,
+              "end_line": 92,
+              "score": -0.014973262032085561
+            },
+            {
+              "file": "pkg/tools/smart_registry.go",
+              "start_line": 423,
+              "end_line": 459,
+              "score": -0.013118279569892474
+            },
+            {
+              "file": "pkg/tools/smart_registry.go",
+              "start_line": 59,
+              "end_line": 63,
+              "score": -0.012747252747252746
+            },
+            {
+              "file": "pkg/tools/smart_registry.go",
+              "start_line": 97,
+              "end_line": 124,
+              "score": -0.012337662337662338
+            },
+            {
+              "file": "pkg/tools/registry.go",
+              "start_line": 24,
+              "end_line": 43,
+              "score": -0.012136350279165441
+            },
+            {
+              "file": "pkg/agents/native/agent.go",
+              "start_line": 226,
+              "end_line": 232,
+              "score": -0.012008658995100832
+            },
+            {
+              "file": "pkg/core/registry.go",
+              "start_line": 51,
+              "end_line": 85,
+              "score": -0.011186853317102861
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 519,
+              "end_line": 538,
+              "score": -0.011027816137305189
+            },
+            {
+              "file": "pkg/llms/factory.go",
+              "start_line": 54,
+              "end_line": 106,
+              "score": -0.010313001605136436
+            },
+            {
+              "file": "pkg/tools/README.md",
+              "start_line": 1,
+              "end_line": 53,
+              "score": -0.008018807980683695
+            }
+          ]
+        },
+        {
+          "query": "bootstrap few shot examples from training data",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.8124242481930319,
+            "recall@10": 0.6666666666666666,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 8175.76,
+          "results": [
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 16,
+              "end_line": 19,
+              "score": -0.015826612903225807
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 21,
+              "end_line": 26,
+              "score": -0.015253029223093371
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 28,
+              "end_line": 51,
+              "score": -0.014401858304297327
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 145,
+              "end_line": 157,
+              "score": -0.014354066985645932
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 53,
+              "end_line": 56,
+              "score": -0.01384493670886076
+            },
+            {
+              "file": "pkg/core/optimizer.go",
+              "start_line": 126,
+              "end_line": 131,
+              "score": -0.013776223776223777
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 187,
+              "end_line": 196,
+              "score": -0.013492063492063493
+            },
+            {
+              "file": "pkg/core/optimizer.go",
+              "start_line": 112,
+              "end_line": 116,
+              "score": -0.01347945205479452
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 159,
+              "end_line": 185,
+              "score": -0.01304637971304638
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 198,
+              "end_line": 235,
+              "score": -0.011063218390804597
+            }
+          ]
+        },
+        {
+          "query": "intercept and modify module execution",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.6735439182299786,
+            "recall@10": 0.3333333333333333,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 7140.377,
+          "results": [
+            {
+              "file": "pkg/core/interceptor.go",
+              "start_line": 18,
+              "end_line": 21,
+              "score": -0.01597542242703533
+            },
+            {
+              "file": "pkg/interceptors/README.md",
+              "start_line": 1,
+              "end_line": 59,
+              "score": -0.014452113891285591
+            },
+            {
+              "file": "pkg/interceptors/standard.go",
+              "start_line": 77,
+              "end_line": 108,
+              "score": -0.011574445335471799
+            },
+            {
+              "file": "pkg/interceptors/standard.go",
+              "start_line": 11,
+              "end_line": 31,
+              "score": -0.011355311355311357
+            },
+            {
+              "file": "pkg/modules/react.go",
+              "start_line": 33,
+              "end_line": 57,
+              "score": -0.00985807441503644
+            },
+            {
+              "file": "pkg/core/module.go",
+              "start_line": 34,
+              "end_line": 50,
+              "score": -0.009836065573770491
+            },
+            {
+              "file": "pkg/interceptors/security.go",
+              "start_line": 324,
+              "end_line": 330,
+              "score": -0.009375
+            },
+            {
+              "file": "pkg/core/interceptor.go",
+              "start_line": 132,
+              "end_line": 137,
+              "score": -0.00909090909090909
+            },
+            {
+              "file": "pkg/interceptors/standard.go",
+              "start_line": 175,
+              "end_line": 214,
+              "score": -0.008966666666666666
+            },
+            {
+              "file": "pkg/optimizers/simba.go",
+              "start_line": 708,
+              "end_line": 737,
+              "score": -0.008940582959641256
+            }
+          ]
+        },
+        {
+          "query": "configure logging and debugging",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.6735439182299786,
+            "recall@10": 0.3333333333333333,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 5483.693,
+          "results": [
+            {
+              "file": "pkg/logging/logger.go",
+              "start_line": 131,
+              "end_line": 134,
+              "score": -0.012361983113227972
+            },
+            {
+              "file": "pkg/config/manager.go",
+              "start_line": 180,
+              "end_line": 188,
+              "score": -0.012104454685099846
+            },
+            {
+              "file": "pkg/config/sources.go",
+              "start_line": 294,
+              "end_line": 309,
+              "score": -0.011274131274131275
+            },
+            {
+              "file": "pkg/logging/logger.go",
+              "start_line": 38,
+              "end_line": 44,
+              "score": -0.01050420168067227
+            },
+            {
+              "file": "pkg/logging/severity.go",
+              "start_line": 6,
+              "end_line": 12,
+              "score": -0.010503317688946433
+            },
+            {
+              "file": "pkg/logging/logger.go",
+              "start_line": 201,
+              "end_line": 206,
+              "score": -0.009885844748858447
+            },
+            {
+              "file": "pkg/logging/logger.go",
+              "start_line": 46,
+              "end_line": 54,
+              "score": -0.009864131787189569
+            },
+            {
+              "file": "pkg/core/config.go",
+              "start_line": 98,
+              "end_line": 118,
+              "score": -0.00938722294654498
+            },
+            {
+              "file": "pkg/config/config.go",
+              "start_line": 154,
+              "end_line": 167,
+              "score": -0.009375
+            },
+            {
+              "file": "pkg/modules/rlm/config.go",
+              "start_line": 359,
+              "end_line": 364,
+              "score": -0.009317073170731707
+            }
+          ]
+        },
+        {
+          "query": "use anthropic claude models",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.7098097413968654,
+            "recall@10": 1,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 9222.83,
+          "results": [
+            {
+              "file": "pkg/core/llm.go",
+              "start_line": 667,
+              "end_line": 707,
+              "score": -0.01608118657298985
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 27,
+              "end_line": 68,
+              "score": -0.015989911727616643
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 25,
+              "end_line": 25,
+              "score": -0.015474520804114072
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 172,
+              "end_line": 196,
+              "score": -0.014302981466559226
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 84,
+              "end_line": 96,
+              "score": -0.014205231388329981
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 600,
+              "end_line": 654,
+              "score": -0.013241106719367589
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 19,
+              "end_line": 23,
+              "score": -0.01319116527037319
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 198,
+              "end_line": 261,
+              "score": -0.01277278562259307
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 70,
+              "end_line": 77,
+              "score": -0.012142857142857143
+            },
+            {
+              "file": "pkg/config/validation.go",
+              "start_line": 470,
+              "end_line": 491,
+              "score": -0.012136752136752136
+            }
+          ]
+        },
+        {
+          "query": "multimodal content handling for images and audio",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 0.3333333333333333,
+            "ndcg@10": 0.393577301495486,
+            "recall@10": 0.5,
+            "implementation_vs_prose_promotion_errors": 1
+          },
+          "latency_ms": 7175.773,
+          "results": [
+            {
+              "file": "docs/content/docs/guides/multimodal.md",
+              "start_line": 1,
+              "end_line": 76,
+              "score": -0.015633167023045853
+            },
+            {
+              "file": "pkg/core/llm.go",
+              "start_line": 588,
+              "end_line": 613,
+              "score": -0.012406015037593985
+            },
+            {
+              "file": "pkg/core/llm.go",
+              "start_line": 512,
+              "end_line": 515,
+              "score": -0.01126466147950296
+            },
+            {
+              "file": "pkg/core/llm.go",
+              "start_line": 154,
+              "end_line": 157,
+              "score": -0.011263736263736264
+            },
+            {
+              "file": "pkg/core/llm.go",
+              "start_line": 84,
+              "end_line": 91,
+              "score": -0.010899814471243042
+            },
+            {
+              "file": "pkg/core/content_utils.go",
+              "start_line": 177,
+              "end_line": 225,
+              "score": -0.010803932909196068
+            },
+            {
+              "file": "pkg/core/llm.go",
+              "start_line": 159,
+              "end_line": 162,
+              "score": -0.01076873867150016
+            },
+            {
+              "file": "pkg/llms/ollama.go",
+              "start_line": 844,
+              "end_line": 865,
+              "score": -0.01054287962234461
+            },
+            {
+              "file": "pkg/core/content_utils.go",
+              "start_line": 277,
+              "end_line": 326,
+              "score": -0.010326797385620916
+            },
+            {
+              "file": "pkg/core/llm.go",
+              "start_line": 517,
+              "end_line": 520,
+              "score": -0.010257896261953057
+            }
+          ]
+        },
+        {
+          "query": "self-refine answers through iteration",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 0,
+            "ndcg@10": 0,
+            "recall@10": 0,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 7744.786,
+          "results": [
+            {
+              "file": "pkg/modules/rlm/config.go",
+              "start_line": 215,
+              "end_line": 237,
+              "score": -0.010215623895369388
+            },
+            {
+              "file": "pkg/optimizers/gepa.go",
+              "start_line": 6250,
+              "end_line": 6275,
+              "score": -0.009836065573770491
+            },
+            {
+              "file": "pkg/agents/react/reflection.go",
+              "start_line": 537,
+              "end_line": 548,
+              "score": -0.00967741935483871
+            },
+            {
+              "file": "pkg/agents/react/reflection.go",
+              "start_line": 550,
+              "end_line": 579,
+              "score": -0.009523809523809523
+            },
+            {
+              "file": "pkg/agents/react/reflection.go",
+              "start_line": 158,
+              "end_line": 211,
+              "score": -0.009375
+            },
+            {
+              "file": "pkg/modules/rlm/signatures.go",
+              "start_line": 419,
+              "end_line": 467,
+              "score": -0.00923076923076923
+            },
+            {
+              "file": "pkg/modules/rlm/signatures.go",
+              "start_line": 411,
+              "end_line": 418,
+              "score": -0.00917596437684495
+            },
+            {
+              "file": "pkg/optimizers/copro.go",
+              "start_line": 359,
+              "end_line": 418,
+              "score": -0.00909090909090909
+            },
+            {
+              "file": "pkg/modules/rlm/rlm.go",
+              "start_line": 1712,
+              "end_line": 1724,
+              "score": -0.008976833976833977
+            },
+            {
+              "file": "pkg/optimizers/gepa.go",
+              "start_line": 482,
+              "end_line": 498,
+              "score": -0.008955223880597015
+            }
+          ]
+        },
+        {
+          "query": "Kubernetes pod eviction controller implementation",
+          "expected_answer": false,
+          "metrics": {
+            "mrr": 0,
+            "ndcg@10": 0,
+            "recall@10": 0,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 4595.78,
+          "results": [
+            {
+              "file": "pkg/optimizers/mcp_optimizer.go",
+              "start_line": 457,
+              "end_line": 492,
+              "score": -0.015647568608570053
+            },
+            {
+              "file": "pkg/optimizers/mcp_optimizer.go",
+              "start_line": 443,
+              "end_line": 455,
+              "score": -0.015633167023045853
+            },
+            {
+              "file": "pkg/cache/sqlite_cache.go",
+              "start_line": 287,
+              "end_line": 328,
+              "score": -0.015079365079365078
+            },
+            {
+              "file": "pkg/cache/cache.go",
+              "start_line": 108,
+              "end_line": 118,
+              "score": -0.012873166522864538
+            },
+            {
+              "file": "pkg/agents/ace/doc.go",
+              "start_line": 61,
+              "end_line": 93,
+              "score": -0.011017079550700108
+            },
+            {
+              "file": "pkg/config/interceptors.go",
+              "start_line": 505,
+              "end_line": 510,
+              "score": -0.009375
+            },
+            {
+              "file": "pkg/core/interceptor.go",
+              "start_line": 111,
+              "end_line": 116,
+              "score": -0.00923076923076923
+            },
+            {
+              "file": "pkg/optimizers/simba.go",
+              "start_line": 1209,
+              "end_line": 1214,
+              "score": -0.00909090909090909
+            },
+            {
+              "file": "pkg/config/config.go",
+              "start_line": 729,
+              "end_line": 735,
+              "score": -0.008823529411764706
+            },
+            {
+              "file": "pkg/optimizers/gepa.go",
+              "start_line": 542,
+              "end_line": 561,
+              "score": -0.008450704225352112
+            }
+          ]
+        },
+        {
+          "query": "PostgreSQL WAL replication slot cleanup implementation",
+          "expected_answer": false,
+          "metrics": {
+            "mrr": 0,
+            "ndcg@10": 0,
+            "recall@10": 0,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 6404.14,
+          "results": [
+            {
+              "file": "pkg/agents/memory/sqlite_memory.go",
+              "start_line": 54,
+              "end_line": 90,
+              "score": -0.014786967418546366
+            },
+            {
+              "file": "pkg/interceptors/performance.go",
+              "start_line": 115,
+              "end_line": 139,
+              "score": -0.014433766723195778
+            },
+            {
+              "file": "pkg/cache/cache.go",
+              "start_line": 108,
+              "end_line": 118,
+              "score": -0.013128205128205127
+            },
+            {
+              "file": "pkg/config/config.go",
+              "start_line": 373,
+              "end_line": 380,
+              "score": -0.012423720857455797
+            },
+            {
+              "file": "pkg/interceptors/security.go",
+              "start_line": 675,
+              "end_line": 694,
+              "score": -0.011950146627565984
+            },
+            {
+              "file": "pkg/agents/react/memory_optimizer.go",
+              "start_line": 512,
+              "end_line": 539,
+              "score": -0.01065943992773261
+            },
+            {
+              "file": "pkg/agents/communication/server.go",
+              "start_line": 292,
+              "end_line": 339,
+              "score": -0.01035873265252684
+            },
+            {
+              "file": "pkg/agents/memory/sqlite_memory.go",
+              "start_line": 325,
+              "end_line": 347,
+              "score": -0.010202348945804443
+            },
+            {
+              "file": "pkg/cache/sqlite_cache.go",
+              "start_line": 346,
+              "end_line": 371,
+              "score": -0.010170397594386902
+            },
+            {
+              "file": "pkg/config/config.go",
+              "start_line": 358,
+              "end_line": 371,
+              "score": -0.009704008992131884
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "balanced + jina-live-verified",
+      "queries": 10,
+      "answered_queries": 8,
+      "mrr": 0.6666666666666666,
+      "ndcg@10": 0.5034389434532374,
+      "recall@10": 0.4375,
+      "implementation_vs_prose_promotion_errors": 1,
+      "p50_end_to_end_latency_ms": 3681.711,
+      "p95_end_to_end_latency_ms": 5231.839,
+      "failures": 0,
+      "fallbacks": 0,
+      "records": [
+        {
+          "query": "ReAct agent reasoning and action loop",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.7136205775898136,
+            "recall@10": 0.6666666666666666,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 3073.345,
+          "results": [
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 27,
+              "end_line": 34,
+              "score": -0.015932377049180328
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 903,
+              "end_line": 916,
+              "score": -0.015200918484500572
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 838,
+              "end_line": 846,
+              "score": -0.013836065573770491
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 540,
+              "end_line": 546,
+              "score": -0.013413983276996975
+            },
+            {
+              "file": "pkg/modules/react.go",
+              "start_line": 20,
+              "end_line": 31,
+              "score": -0.013010752688172044
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 1051,
+              "end_line": 1060,
+              "score": -0.01281936351411923
+            },
+            {
+              "file": "pkg/agents/README.md",
+              "start_line": 1,
+              "end_line": 87,
+              "score": -0.012764747690120825
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 675,
+              "end_line": 683,
+              "score": -0.01273809523809524
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 1129,
+              "end_line": 1137,
+              "score": -0.012255344775669978
+            },
+            {
+              "file": "pkg/agents/react/README.md",
+              "start_line": 1,
+              "end_line": 23,
+              "score": -0.012071580224446467
+            }
+          ]
+        },
+        {
+          "query": "register and discover tools for LLM agents",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 0.3333333333333333,
+            "ndcg@10": 0.4585085340797653,
+            "recall@10": 0.5,
+            "implementation_vs_prose_promotion_errors": 1
+          },
+          "latency_ms": 3833.902,
+          "results": [
+            {
+              "file": "docs/content/docs/guides/agents.md",
+              "start_line": 672,
+              "end_line": 763,
+              "score": -0.015169398907103825
+            },
+            {
+              "file": "pkg/tools/mcp_discovery.go",
+              "start_line": 51,
+              "end_line": 92,
+              "score": -0.014973262032085561
+            },
+            {
+              "file": "pkg/tools/smart_registry.go",
+              "start_line": 423,
+              "end_line": 459,
+              "score": -0.013118279569892474
+            },
+            {
+              "file": "pkg/tools/smart_registry.go",
+              "start_line": 59,
+              "end_line": 63,
+              "score": -0.012747252747252746
+            },
+            {
+              "file": "pkg/tools/smart_registry.go",
+              "start_line": 97,
+              "end_line": 124,
+              "score": -0.012337662337662338
+            },
+            {
+              "file": "pkg/tools/registry.go",
+              "start_line": 24,
+              "end_line": 43,
+              "score": -0.012136350279165441
+            },
+            {
+              "file": "pkg/agents/native/agent.go",
+              "start_line": 226,
+              "end_line": 232,
+              "score": -0.012008658995100832
+            },
+            {
+              "file": "pkg/core/registry.go",
+              "start_line": 51,
+              "end_line": 85,
+              "score": -0.011186853317102861
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 519,
+              "end_line": 538,
+              "score": -0.011027816137305189
+            },
+            {
+              "file": "pkg/llms/factory.go",
+              "start_line": 54,
+              "end_line": 106,
+              "score": -0.010313001605136436
+            }
+          ]
+        },
+        {
+          "query": "bootstrap few shot examples from training data",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.7984848580994977,
+            "recall@10": 0.6666666666666666,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 4268.943,
+          "results": [
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 16,
+              "end_line": 19,
+              "score": -0.015826612903225807
+            },
+            {
+              "file": "compatibility_test/dspy_comparison.py",
+              "start_line": 203,
+              "end_line": 255,
+              "score": -0.015550351288056204
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 21,
+              "end_line": 26,
+              "score": -0.015253029223093371
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 28,
+              "end_line": 51,
+              "score": -0.014401858304297327
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 145,
+              "end_line": 157,
+              "score": -0.014354066985645932
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 53,
+              "end_line": 56,
+              "score": -0.01384493670886076
+            },
+            {
+              "file": "pkg/core/optimizer.go",
+              "start_line": 126,
+              "end_line": 131,
+              "score": -0.013776223776223777
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 187,
+              "end_line": 196,
+              "score": -0.013492063492063493
+            },
+            {
+              "file": "pkg/core/optimizer.go",
+              "start_line": 112,
+              "end_line": 116,
+              "score": -0.01347945205479452
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 159,
+              "end_line": 185,
+              "score": -0.01304637971304638
+            }
+          ]
+        },
+        {
+          "query": "intercept and modify module execution",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.6735439182299786,
+            "recall@10": 0.3333333333333333,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 3681.711,
+          "results": [
+            {
+              "file": "pkg/core/interceptor.go",
+              "start_line": 18,
+              "end_line": 21,
+              "score": -0.01597542242703533
+            },
+            {
+              "file": "pkg/interceptors/README.md",
+              "start_line": 1,
+              "end_line": 59,
+              "score": -0.014452113891285591
+            },
+            {
+              "file": "pkg/interceptors/standard.go",
+              "start_line": 77,
+              "end_line": 108,
+              "score": -0.011574445335471799
+            },
+            {
+              "file": "pkg/interceptors/standard.go",
+              "start_line": 11,
+              "end_line": 31,
+              "score": -0.011355311355311357
+            },
+            {
+              "file": "pkg/modules/react.go",
+              "start_line": 33,
+              "end_line": 57,
+              "score": -0.00985807441503644
+            },
+            {
+              "file": "pkg/core/module.go",
+              "start_line": 34,
+              "end_line": 50,
+              "score": -0.009836065573770491
+            },
+            {
+              "file": "pkg/interceptors/security.go",
+              "start_line": 324,
+              "end_line": 330,
+              "score": -0.009375
+            },
+            {
+              "file": "pkg/core/interceptor.go",
+              "start_line": 132,
+              "end_line": 137,
+              "score": -0.00909090909090909
+            },
+            {
+              "file": "pkg/interceptors/standard.go",
+              "start_line": 175,
+              "end_line": 214,
+              "score": -0.008966666666666666
+            },
+            {
+              "file": "pkg/core/interceptor.go",
+              "start_line": 111,
+              "end_line": 116,
+              "score": -0.008695652173913044
+            }
+          ]
+        },
+        {
+          "query": "configure logging and debugging",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.6735439182299786,
+            "recall@10": 0.3333333333333333,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 1943.098,
+          "results": [
+            {
+              "file": "pkg/logging/logger.go",
+              "start_line": 131,
+              "end_line": 134,
+              "score": -0.012361983113227972
+            },
+            {
+              "file": "pkg/config/manager.go",
+              "start_line": 180,
+              "end_line": 188,
+              "score": -0.012104454685099846
+            },
+            {
+              "file": "pkg/config/sources.go",
+              "start_line": 294,
+              "end_line": 309,
+              "score": -0.011274131274131275
+            },
+            {
+              "file": "pkg/logging/logger.go",
+              "start_line": 38,
+              "end_line": 44,
+              "score": -0.01050420168067227
+            },
+            {
+              "file": "pkg/logging/severity.go",
+              "start_line": 6,
+              "end_line": 12,
+              "score": -0.010503317688946433
+            },
+            {
+              "file": "pkg/logging/logger.go",
+              "start_line": 201,
+              "end_line": 206,
+              "score": -0.009885844748858447
+            },
+            {
+              "file": "pkg/logging/logger.go",
+              "start_line": 46,
+              "end_line": 54,
+              "score": -0.009864131787189569
+            },
+            {
+              "file": "pkg/core/config.go",
+              "start_line": 98,
+              "end_line": 118,
+              "score": -0.00938722294654498
+            },
+            {
+              "file": "pkg/config/config.go",
+              "start_line": 154,
+              "end_line": 167,
+              "score": -0.009375
+            },
+            {
+              "file": "pkg/modules/rlm/config.go",
+              "start_line": 359,
+              "end_line": 364,
+              "score": -0.009317073170731707
+            }
+          ]
+        },
+        {
+          "query": "use anthropic claude models",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.7098097413968654,
+            "recall@10": 1,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 3959.396,
+          "results": [
+            {
+              "file": "pkg/core/llm.go",
+              "start_line": 667,
+              "end_line": 707,
+              "score": -0.01608118657298985
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 27,
+              "end_line": 68,
+              "score": -0.015989911727616643
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 25,
+              "end_line": 25,
+              "score": -0.015474520804114072
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 172,
+              "end_line": 196,
+              "score": -0.014302981466559226
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 84,
+              "end_line": 96,
+              "score": -0.014205231388329981
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 600,
+              "end_line": 654,
+              "score": -0.013241106719367589
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 19,
+              "end_line": 23,
+              "score": -0.01319116527037319
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 198,
+              "end_line": 261,
+              "score": -0.01277278562259307
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 70,
+              "end_line": 77,
+              "score": -0.012142857142857143
+            },
+            {
+              "file": "pkg/config/validation.go",
+              "start_line": 470,
+              "end_line": 491,
+              "score": -0.012136752136752136
+            }
+          ]
+        },
+        {
+          "query": "multimodal content handling for images and audio",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 0,
+            "ndcg@10": 0,
+            "recall@10": 0,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 5032.194,
+          "results": [
+            {
+              "file": "docs/content/docs/guides/multimodal.md",
+              "start_line": 1,
+              "end_line": 76,
+              "score": -0.015633167023045853
+            },
+            {
+              "file": "docs/content/docs/guides/multimodal.md",
+              "start_line": 493,
+              "end_line": 542,
+              "score": -0.015238095238095238
+            },
+            {
+              "file": "docs/content/docs/guides/multimodal.md",
+              "start_line": 312,
+              "end_line": 399,
+              "score": -0.014884135472370767
+            },
+            {
+              "file": "docs/content/docs/guides/multimodal.md",
+              "start_line": 147,
+              "end_line": 231,
+              "score": -0.012996727442730248
+            },
+            {
+              "file": "docs/content/docs/guides/multimodal.md",
+              "start_line": 397,
+              "end_line": 495,
+              "score": -0.01249243799153055
+            },
+            {
+              "file": "pkg/core/llm.go",
+              "start_line": 588,
+              "end_line": 613,
+              "score": -0.012406015037593985
+            },
+            {
+              "file": "doc.go",
+              "start_line": 36,
+              "end_line": 86,
+              "score": -0.012190594059405941
+            },
+            {
+              "file": "docs/content/docs/guides/multimodal.md",
+              "start_line": 229,
+              "end_line": 314,
+              "score": -0.011933471933471933
+            },
+            {
+              "file": "pkg/core/llm.go",
+              "start_line": 512,
+              "end_line": 515,
+              "score": -0.01126466147950296
+            },
+            {
+              "file": "pkg/core/llm.go",
+              "start_line": 154,
+              "end_line": 157,
+              "score": -0.011263736263736264
+            }
+          ]
+        },
+        {
+          "query": "self-refine answers through iteration",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 0,
+            "ndcg@10": 0,
+            "recall@10": 0,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 5231.839,
+          "results": [
+            {
+              "file": "pkg/modules/rlm/config.go",
+              "start_line": 215,
+              "end_line": 237,
+              "score": -0.010215623895369388
+            },
+            {
+              "file": "pkg/optimizers/gepa.go",
+              "start_line": 6250,
+              "end_line": 6275,
+              "score": -0.009836065573770491
+            },
+            {
+              "file": "pkg/agents/react/reflection.go",
+              "start_line": 537,
+              "end_line": 548,
+              "score": -0.00967741935483871
+            },
+            {
+              "file": "pkg/agents/react/reflection.go",
+              "start_line": 550,
+              "end_line": 579,
+              "score": -0.009523809523809523
+            },
+            {
+              "file": "pkg/agents/react/reflection.go",
+              "start_line": 158,
+              "end_line": 211,
+              "score": -0.009375
+            },
+            {
+              "file": "pkg/modules/rlm/signatures.go",
+              "start_line": 419,
+              "end_line": 467,
+              "score": -0.00923076923076923
+            },
+            {
+              "file": "pkg/modules/rlm/signatures.go",
+              "start_line": 411,
+              "end_line": 418,
+              "score": -0.00917596437684495
+            },
+            {
+              "file": "pkg/optimizers/copro.go",
+              "start_line": 359,
+              "end_line": 418,
+              "score": -0.00909090909090909
+            },
+            {
+              "file": "pkg/modules/rlm/rlm.go",
+              "start_line": 1712,
+              "end_line": 1724,
+              "score": -0.008976833976833977
+            },
+            {
+              "file": "pkg/modules/rlm/signatures.go",
+              "start_line": 300,
+              "end_line": 359,
+              "score": -0.008823529411764706
+            }
+          ]
+        },
+        {
+          "query": "Kubernetes pod eviction controller implementation",
+          "expected_answer": false,
+          "metrics": {
+            "mrr": 0,
+            "ndcg@10": 0,
+            "recall@10": 0,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 2554.675,
+          "results": [
+            {
+              "file": "pkg/optimizers/mcp_optimizer.go",
+              "start_line": 457,
+              "end_line": 492,
+              "score": -0.015647568608570053
+            },
+            {
+              "file": "pkg/optimizers/mcp_optimizer.go",
+              "start_line": 443,
+              "end_line": 455,
+              "score": -0.015633167023045853
+            },
+            {
+              "file": "pkg/cache/sqlite_cache.go",
+              "start_line": 287,
+              "end_line": 328,
+              "score": -0.015079365079365078
+            },
+            {
+              "file": "pkg/cache/cache.go",
+              "start_line": 108,
+              "end_line": 118,
+              "score": -0.012873166522864538
+            },
+            {
+              "file": "pkg/agents/ace/doc.go",
+              "start_line": 61,
+              "end_line": 93,
+              "score": -0.011017079550700108
+            },
+            {
+              "file": "pkg/config/interceptors.go",
+              "start_line": 505,
+              "end_line": 510,
+              "score": -0.009375
+            },
+            {
+              "file": "pkg/core/interceptor.go",
+              "start_line": 111,
+              "end_line": 116,
+              "score": -0.00923076923076923
+            },
+            {
+              "file": "pkg/optimizers/simba.go",
+              "start_line": 1209,
+              "end_line": 1214,
+              "score": -0.00909090909090909
+            },
+            {
+              "file": "pkg/config/config.go",
+              "start_line": 729,
+              "end_line": 735,
+              "score": -0.008823529411764706
+            },
+            {
+              "file": "pkg/optimizers/gepa.go",
+              "start_line": 542,
+              "end_line": 561,
+              "score": -0.008450704225352112
+            }
+          ]
+        },
+        {
+          "query": "PostgreSQL WAL replication slot cleanup implementation",
+          "expected_answer": false,
+          "metrics": {
+            "mrr": 0,
+            "ndcg@10": 0,
+            "recall@10": 0,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 3029.996,
+          "results": [
+            {
+              "file": "pkg/agents/memory/sqlite_memory.go",
+              "start_line": 54,
+              "end_line": 90,
+              "score": -0.014786967418546366
+            },
+            {
+              "file": "pkg/interceptors/performance.go",
+              "start_line": 115,
+              "end_line": 139,
+              "score": -0.014433766723195778
+            },
+            {
+              "file": "pkg/cache/cache.go",
+              "start_line": 108,
+              "end_line": 118,
+              "score": -0.013128205128205127
+            },
+            {
+              "file": "pkg/config/config.go",
+              "start_line": 373,
+              "end_line": 380,
+              "score": -0.012423720857455797
+            },
+            {
+              "file": "pkg/interceptors/security.go",
+              "start_line": 675,
+              "end_line": 694,
+              "score": -0.011950146627565984
+            },
+            {
+              "file": "pkg/agents/react/memory_optimizer.go",
+              "start_line": 512,
+              "end_line": 539,
+              "score": -0.01065943992773261
+            },
+            {
+              "file": "pkg/agents/communication/server.go",
+              "start_line": 292,
+              "end_line": 339,
+              "score": -0.01035873265252684
+            },
+            {
+              "file": "pkg/agents/memory/sqlite_memory.go",
+              "start_line": 325,
+              "end_line": 347,
+              "score": -0.010202348945804443
+            },
+            {
+              "file": "pkg/cache/sqlite_cache.go",
+              "start_line": 346,
+              "end_line": 371,
+              "score": -0.010170397594386902
+            },
+            {
+              "file": "pkg/config/config.go",
+              "start_line": 358,
+              "end_line": 371,
+              "score": -0.009704008992131884
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ColBERT shortlist + jina-live-verified",
+      "queries": 10,
+      "answered_queries": 8,
+      "mrr": 0.6875,
+      "ndcg@10": 0.5175134978456125,
+      "recall@10": 0.4375,
+      "implementation_vs_prose_promotion_errors": 0,
+      "p50_end_to_end_latency_ms": 10498.078,
+      "p95_end_to_end_latency_ms": 14778.793,
+      "failures": 0,
+      "fallbacks": 0,
+      "records": [
+        {
+          "query": "ReAct agent reasoning and action loop",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.7136205775898136,
+            "recall@10": 0.6666666666666666,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 10498.078,
+          "results": [
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 903,
+              "end_line": 916,
+              "score": -0.015200918484500572
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 838,
+              "end_line": 846,
+              "score": -0.013836065573770491
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 540,
+              "end_line": 546,
+              "score": -0.013413983276996975
+            },
+            {
+              "file": "pkg/modules/react.go",
+              "start_line": 20,
+              "end_line": 31,
+              "score": -0.013010752688172044
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 1051,
+              "end_line": 1060,
+              "score": -0.01281936351411923
+            },
+            {
+              "file": "pkg/agents/README.md",
+              "start_line": 1,
+              "end_line": 87,
+              "score": -0.012764747690120825
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 675,
+              "end_line": 683,
+              "score": -0.01273809523809524
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 1129,
+              "end_line": 1137,
+              "score": -0.012255344775669978
+            },
+            {
+              "file": "pkg/agents/react/README.md",
+              "start_line": 1,
+              "end_line": 23,
+              "score": -0.012071580224446467
+            },
+            {
+              "file": "pkg/agents/react/README.md",
+              "start_line": 21,
+              "end_line": 61,
+              "score": -0.009017223910840932
+            }
+          ]
+        },
+        {
+          "query": "register and discover tools for LLM agents",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 0.5,
+            "ndcg@10": 0.5571655791252315,
+            "recall@10": 0.5,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 10108.21,
+          "results": [
+            {
+              "file": "pkg/tools/mcp_discovery.go",
+              "start_line": 51,
+              "end_line": 92,
+              "score": -0.014973262032085561
+            },
+            {
+              "file": "pkg/tools/smart_registry.go",
+              "start_line": 423,
+              "end_line": 459,
+              "score": -0.013118279569892474
+            },
+            {
+              "file": "pkg/tools/smart_registry.go",
+              "start_line": 59,
+              "end_line": 63,
+              "score": -0.012747252747252746
+            },
+            {
+              "file": "pkg/tools/smart_registry.go",
+              "start_line": 97,
+              "end_line": 124,
+              "score": -0.012337662337662338
+            },
+            {
+              "file": "pkg/tools/registry.go",
+              "start_line": 24,
+              "end_line": 43,
+              "score": -0.012136350279165441
+            },
+            {
+              "file": "pkg/agents/native/agent.go",
+              "start_line": 226,
+              "end_line": 232,
+              "score": -0.012008658995100832
+            },
+            {
+              "file": "pkg/core/registry.go",
+              "start_line": 51,
+              "end_line": 85,
+              "score": -0.011186853317102861
+            },
+            {
+              "file": "pkg/agents/react/react_agent.go",
+              "start_line": 519,
+              "end_line": 538,
+              "score": -0.011027816137305189
+            },
+            {
+              "file": "pkg/agents/subagent/registry.go",
+              "start_line": 24,
+              "end_line": 51,
+              "score": -0.008846966986501871
+            },
+            {
+              "file": "pkg/tools/util.go",
+              "start_line": 133,
+              "end_line": 161,
+              "score": -0.008806042101880122
+            }
+          ]
+        },
+        {
+          "query": "bootstrap few shot examples from training data",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.8124242481930319,
+            "recall@10": 0.6666666666666666,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 13297.788,
+          "results": [
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 16,
+              "end_line": 19,
+              "score": -0.015826612903225807
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 21,
+              "end_line": 26,
+              "score": -0.015253029223093371
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 28,
+              "end_line": 51,
+              "score": -0.014401858304297327
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 145,
+              "end_line": 157,
+              "score": -0.014354066985645932
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 53,
+              "end_line": 56,
+              "score": -0.01384493670886076
+            },
+            {
+              "file": "pkg/core/optimizer.go",
+              "start_line": 126,
+              "end_line": 131,
+              "score": -0.013776223776223777
+            },
+            {
+              "file": "pkg/core/optimizer.go",
+              "start_line": 112,
+              "end_line": 116,
+              "score": -0.01347945205479452
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 159,
+              "end_line": 185,
+              "score": -0.01304637971304638
+            },
+            {
+              "file": "pkg/optimizers/bootstrap_fewshot.go",
+              "start_line": 198,
+              "end_line": 235,
+              "score": -0.011063218390804597
+            },
+            {
+              "file": "pkg/config/config.go",
+              "start_line": 559,
+              "end_line": 572,
+              "score": -0.011044343141317862
+            }
+          ]
+        },
+        {
+          "query": "intercept and modify module execution",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.6735439182299786,
+            "recall@10": 0.3333333333333333,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 12860.88,
+          "results": [
+            {
+              "file": "pkg/core/interceptor.go",
+              "start_line": 18,
+              "end_line": 21,
+              "score": -0.01597542242703533
+            },
+            {
+              "file": "pkg/interceptors/README.md",
+              "start_line": 1,
+              "end_line": 59,
+              "score": -0.014452113891285591
+            },
+            {
+              "file": "pkg/interceptors/standard.go",
+              "start_line": 11,
+              "end_line": 31,
+              "score": -0.011355311355311357
+            },
+            {
+              "file": "pkg/modules/react.go",
+              "start_line": 33,
+              "end_line": 57,
+              "score": -0.00985807441503644
+            },
+            {
+              "file": "pkg/core/module.go",
+              "start_line": 34,
+              "end_line": 50,
+              "score": -0.009836065573770491
+            },
+            {
+              "file": "pkg/interceptors/security.go",
+              "start_line": 324,
+              "end_line": 330,
+              "score": -0.009375
+            },
+            {
+              "file": "pkg/optimizers/simba.go",
+              "start_line": 708,
+              "end_line": 737,
+              "score": -0.008940582959641256
+            },
+            {
+              "file": "pkg/interceptors/xml.go",
+              "start_line": 623,
+              "end_line": 634,
+              "score": -0.008823529411764706
+            },
+            {
+              "file": "pkg/optimizers/gepa.go",
+              "start_line": 3642,
+              "end_line": 3665,
+              "score": -0.008807588075880758
+            },
+            {
+              "file": "pkg/core/interceptor.go",
+              "start_line": 111,
+              "end_line": 116,
+              "score": -0.008695652173913044
+            }
+          ]
+        },
+        {
+          "query": "configure logging and debugging",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.6735439182299786,
+            "recall@10": 0.3333333333333333,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 9796.977,
+          "results": [
+            {
+              "file": "pkg/logging/logger.go",
+              "start_line": 131,
+              "end_line": 134,
+              "score": -0.012361983113227972
+            },
+            {
+              "file": "pkg/config/manager.go",
+              "start_line": 180,
+              "end_line": 188,
+              "score": -0.012104454685099846
+            },
+            {
+              "file": "pkg/config/sources.go",
+              "start_line": 294,
+              "end_line": 309,
+              "score": -0.011274131274131275
+            },
+            {
+              "file": "pkg/logging/logger.go",
+              "start_line": 38,
+              "end_line": 44,
+              "score": -0.01050420168067227
+            },
+            {
+              "file": "pkg/logging/severity.go",
+              "start_line": 6,
+              "end_line": 12,
+              "score": -0.010503317688946433
+            },
+            {
+              "file": "pkg/config/config.go",
+              "start_line": 154,
+              "end_line": 167,
+              "score": -0.009375
+            },
+            {
+              "file": "pkg/config/defaults.go",
+              "start_line": 235,
+              "end_line": 252,
+              "score": -0.00923076923076923
+            },
+            {
+              "file": "pkg/config/validation.go",
+              "start_line": 247,
+              "end_line": 259,
+              "score": -0.00909090909090909
+            },
+            {
+              "file": "pkg/config/defaults.go",
+              "start_line": 676,
+              "end_line": 707,
+              "score": -0.008333333333333333
+            },
+            {
+              "file": "pkg/logging/logger.go",
+              "start_line": 118,
+              "end_line": 129,
+              "score": -0.007664490205926669
+            }
+          ]
+        },
+        {
+          "query": "use anthropic claude models",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 1,
+            "ndcg@10": 0.7098097413968654,
+            "recall@10": 1,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 14778.793,
+          "results": [
+            {
+              "file": "pkg/core/llm.go",
+              "start_line": 667,
+              "end_line": 707,
+              "score": -0.01608118657298985
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 27,
+              "end_line": 68,
+              "score": -0.015989911727616643
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 25,
+              "end_line": 25,
+              "score": -0.015474520804114072
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 172,
+              "end_line": 196,
+              "score": -0.014302981466559226
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 84,
+              "end_line": 96,
+              "score": -0.014205231388329981
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 600,
+              "end_line": 654,
+              "score": -0.013241106719367589
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 19,
+              "end_line": 23,
+              "score": -0.01319116527037319
+            },
+            {
+              "file": "pkg/llms/oauth/anthropic.go",
+              "start_line": 11,
+              "end_line": 22,
+              "score": -0.011976744186046513
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 98,
+              "end_line": 117,
+              "score": -0.011560044893378226
+            },
+            {
+              "file": "pkg/llms/anthropic.go",
+              "start_line": 119,
+              "end_line": 165,
+              "score": -0.011470947151037268
+            }
+          ]
+        },
+        {
+          "query": "multimodal content handling for images and audio",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 0,
+            "ndcg@10": 0,
+            "recall@10": 0,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 12957.787,
+          "results": [
+            {
+              "file": "docs/content/docs/guides/multimodal.md",
+              "start_line": 1,
+              "end_line": 76,
+              "score": -0.015633167023045853
+            },
+            {
+              "file": "docs/content/docs/guides/multimodal.md",
+              "start_line": 493,
+              "end_line": 542,
+              "score": -0.015238095238095238
+            },
+            {
+              "file": "docs/content/docs/guides/multimodal.md",
+              "start_line": 312,
+              "end_line": 399,
+              "score": -0.014884135472370767
+            },
+            {
+              "file": "docs/content/docs/guides/multimodal.md",
+              "start_line": 147,
+              "end_line": 231,
+              "score": -0.012996727442730248
+            },
+            {
+              "file": "docs/content/docs/guides/multimodal.md",
+              "start_line": 397,
+              "end_line": 495,
+              "score": -0.01249243799153055
+            },
+            {
+              "file": "pkg/core/llm.go",
+              "start_line": 588,
+              "end_line": 613,
+              "score": -0.012406015037593985
+            },
+            {
+              "file": "docs/content/docs/guides/multimodal.md",
+              "start_line": 229,
+              "end_line": 314,
+              "score": -0.011933471933471933
+            },
+            {
+              "file": "pkg/core/llm.go",
+              "start_line": 512,
+              "end_line": 515,
+              "score": -0.01126466147950296
+            },
+            {
+              "file": "pkg/core/llm.go",
+              "start_line": 154,
+              "end_line": 157,
+              "score": -0.011263736263736264
+            },
+            {
+              "file": "pkg/llms/ollama.go",
+              "start_line": 844,
+              "end_line": 865,
+              "score": -0.01054287962234461
+            }
+          ]
+        },
+        {
+          "query": "self-refine answers through iteration",
+          "expected_answer": true,
+          "metrics": {
+            "mrr": 0,
+            "ndcg@10": 0,
+            "recall@10": 0,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 13806.558,
+          "results": [
+            {
+              "file": "pkg/modules/rlm/config.go",
+              "start_line": 215,
+              "end_line": 237,
+              "score": -0.010215623895369388
+            },
+            {
+              "file": "pkg/optimizers/gepa.go",
+              "start_line": 6250,
+              "end_line": 6275,
+              "score": -0.009836065573770491
+            },
+            {
+              "file": "pkg/agents/react/reflection.go",
+              "start_line": 537,
+              "end_line": 548,
+              "score": -0.00967741935483871
+            },
+            {
+              "file": "pkg/agents/react/reflection.go",
+              "start_line": 550,
+              "end_line": 579,
+              "score": -0.009523809523809523
+            },
+            {
+              "file": "pkg/agents/react/reflection.go",
+              "start_line": 158,
+              "end_line": 211,
+              "score": -0.009375
+            },
+            {
+              "file": "pkg/modules/rlm/signatures.go",
+              "start_line": 419,
+              "end_line": 467,
+              "score": -0.00923076923076923
+            },
+            {
+              "file": "pkg/optimizers/copro.go",
+              "start_line": 359,
+              "end_line": 418,
+              "score": -0.00909090909090909
+            },
+            {
+              "file": "pkg/modules/rlm/signatures.go",
+              "start_line": 300,
+              "end_line": 359,
+              "score": -0.008823529411764706
+            },
+            {
+              "file": "pkg/agents/react/reflection.go",
+              "start_line": 476,
+              "end_line": 493,
+              "score": -0.008695652173913044
+            },
+            {
+              "file": "pkg/modules/rlm/signatures.go",
+              "start_line": 360,
+              "end_line": 413,
+              "score": -0.008450704225352112
+            }
+          ]
+        },
+        {
+          "query": "Kubernetes pod eviction controller implementation",
+          "expected_answer": false,
+          "metrics": {
+            "mrr": 0,
+            "ndcg@10": 0,
+            "recall@10": 0,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 7134.526,
+          "results": [
+            {
+              "file": "pkg/optimizers/mcp_optimizer.go",
+              "start_line": 457,
+              "end_line": 492,
+              "score": -0.015647568608570053
+            },
+            {
+              "file": "pkg/optimizers/mcp_optimizer.go",
+              "start_line": 443,
+              "end_line": 455,
+              "score": -0.015633167023045853
+            },
+            {
+              "file": "pkg/cache/sqlite_cache.go",
+              "start_line": 287,
+              "end_line": 328,
+              "score": -0.015079365079365078
+            },
+            {
+              "file": "pkg/cache/cache.go",
+              "start_line": 108,
+              "end_line": 118,
+              "score": -0.012873166522864538
+            },
+            {
+              "file": "pkg/agents/ace/doc.go",
+              "start_line": 61,
+              "end_line": 93,
+              "score": -0.011017079550700108
+            },
+            {
+              "file": "pkg/config/interceptors.go",
+              "start_line": 505,
+              "end_line": 510,
+              "score": -0.009375
+            },
+            {
+              "file": "pkg/core/interceptor.go",
+              "start_line": 111,
+              "end_line": 116,
+              "score": -0.00923076923076923
+            },
+            {
+              "file": "pkg/optimizers/simba.go",
+              "start_line": 1209,
+              "end_line": 1214,
+              "score": -0.00909090909090909
+            },
+            {
+              "file": "pkg/agents/context/compressor.go",
+              "start_line": 699,
+              "end_line": 701,
+              "score": -0.008336166451349696
+            },
+            {
+              "file": "pkg/benchmarks/tblite/eval.go",
+              "start_line": 47,
+              "end_line": 58,
+              "score": -0.00821917808219178
+            }
+          ]
+        },
+        {
+          "query": "PostgreSQL WAL replication slot cleanup implementation",
+          "expected_answer": false,
+          "metrics": {
+            "mrr": 0,
+            "ndcg@10": 0,
+            "recall@10": 0,
+            "implementation_vs_prose_promotion_errors": 0
+          },
+          "latency_ms": 7351.745,
+          "results": [
+            {
+              "file": "pkg/agents/memory/sqlite_memory.go",
+              "start_line": 54,
+              "end_line": 90,
+              "score": -0.014786967418546366
+            },
+            {
+              "file": "pkg/interceptors/performance.go",
+              "start_line": 115,
+              "end_line": 139,
+              "score": -0.014433766723195778
+            },
+            {
+              "file": "pkg/cache/cache.go",
+              "start_line": 108,
+              "end_line": 118,
+              "score": -0.013128205128205127
+            },
+            {
+              "file": "pkg/config/config.go",
+              "start_line": 373,
+              "end_line": 380,
+              "score": -0.012423720857455797
+            },
+            {
+              "file": "pkg/interceptors/security.go",
+              "start_line": 675,
+              "end_line": 694,
+              "score": -0.011950146627565984
+            },
+            {
+              "file": "pkg/agents/react/memory_optimizer.go",
+              "start_line": 512,
+              "end_line": 539,
+              "score": -0.01065943992773261
+            },
+            {
+              "file": "pkg/agents/communication/server.go",
+              "start_line": 292,
+              "end_line": 339,
+              "score": -0.01035873265252684
+            },
+            {
+              "file": "pkg/agents/memory/sqlite_memory.go",
+              "start_line": 325,
+              "end_line": 347,
+              "score": -0.010202348945804443
+            },
+            {
+              "file": "pkg/cache/sqlite_cache.go",
+              "start_line": 346,
+              "end_line": 371,
+              "score": -0.010170397594386902
+            },
+            {
+              "file": "pkg/config/config.go",
+              "start_line": 358,
+              "end_line": 371,
+              "score": -0.009704008992131884
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

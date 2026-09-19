@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -553,6 +554,9 @@ func TestDefaultSearchOptions(t *testing.T) {
 	if opts.Deduplicate != true {
 		t.Error("expected Deduplicate true")
 	}
+	if opts.ImplementationFirst {
+		t.Error("expected ImplementationFirst false")
+	}
 	if opts.BoostImpl != 0.92 {
 		t.Errorf("expected BoostImpl 0.85, got %f", opts.BoostImpl)
 	}
@@ -655,17 +659,66 @@ func TestSearcher_SearchWithOptions_NoBoost(t *testing.T) {
 	}
 }
 
+func TestSearcher_SearchWithOptions_ImplementationFirst(t *testing.T) {
+	ms := &mockStore{
+		docs: []*store.Document{
+			{ID: "test", FilePath: "pkg/source_test.go", Content: "test", IsTest: true},
+			{ID: "docs", FilePath: "docs/guide.md", Content: "guide"},
+			{ID: "source-a", FilePath: "pkg/source_a.go", Content: "source a"},
+			{ID: "example", FilePath: "examples/demo/main.go", Content: "example"},
+			{ID: "source-b", FilePath: "internal/source_b.go", Content: "source b"},
+		},
+		distances: []float64{0.05, 0.1, 0.2, 0.3, 0.4},
+	}
+	s := newUnitSearcher(t, ms)
+
+	opts := DefaultSearchOptions()
+	opts.BoostImpl = 1
+	opts.IncludeTests = true
+	legacy, err := s.SearchWithOptions(context.Background(), "source", opts)
+	if err != nil {
+		t.Fatalf("legacy search: %v", err)
+	}
+	if got, want := resultPaths(legacy), []string{"pkg/source_test.go", "docs/guide.md", "pkg/source_a.go", "examples/demo/main.go", "internal/source_b.go"}; !slices.Equal(got, want) {
+		t.Fatalf("legacy order: got %v, want %v", got, want)
+	}
+
+	opts.ImplementationFirst = true
+	prioritized, err := s.SearchWithOptions(context.Background(), "source", opts)
+	if err != nil {
+		t.Fatalf("implementation-first search: %v", err)
+	}
+	if got, want := resultPaths(prioritized), []string{"pkg/source_a.go", "internal/source_b.go", "pkg/source_test.go", "docs/guide.md", "examples/demo/main.go"}; !slices.Equal(got, want) {
+		t.Fatalf("implementation-first order: got %v, want %v", got, want)
+	}
+}
+
+func TestPrioritizeImplementationResults_Empty(t *testing.T) {
+	if got := prioritizeImplementationResults(nil); len(got) != 0 {
+		t.Fatalf("prioritize empty results: got %v, want empty", got)
+	}
+}
+
+func resultPaths(results []Result) []string {
+	paths := make([]string, len(results))
+	for i, result := range results {
+		paths[i] = result.FilePath
+	}
+	return paths
+}
+
 func TestSearcher_cacheKeyWithOpts(t *testing.T) {
 	s := New(&mockStore{})
 	base := DefaultSearchOptions()
 	baseKey := s.cacheKeyWithOpts("query", base)
 
 	cases := map[string]func(*SearchOptions){
-		"include tests":   func(o *SearchOptions) { o.IncludeTests = true },
-		"use colbert":     func(o *SearchOptions) { o.UseColBERT = true },
-		"colbert weight":  func(o *SearchOptions) { o.ColBERTWeight = 0.9 },
-		"reranker weight": func(o *SearchOptions) { o.RerankWeight = 0.9 },
-		"exact threshold": func(o *SearchOptions) { o.Threshold += 0.00001 },
+		"include tests":        func(o *SearchOptions) { o.IncludeTests = true },
+		"implementation first": func(o *SearchOptions) { o.ImplementationFirst = true },
+		"use colbert":          func(o *SearchOptions) { o.UseColBERT = true },
+		"colbert weight":       func(o *SearchOptions) { o.ColBERTWeight = 0.9 },
+		"reranker weight":      func(o *SearchOptions) { o.RerankWeight = 0.9 },
+		"exact threshold":      func(o *SearchOptions) { o.Threshold += 0.00001 },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -1,0 +1,136 @@
+{
+  "name": "dspy-go-jev-heldout",
+  "description": "Frozen asymmetric code-search cases derived from the repository's existing model-judged benchmark, plus two no-answer controls. Relevant labels identify implementation evidence; prose, examples, and tests are deliberately unlabeled competitors. A blind human audit is still required.",
+  "corpus": "dspy-go",
+  "corpus_hash": "87cb50fa0611ef8a3905494c8b16fb0aab7666d3",
+  "cases": [
+    {
+      "split": "dev",
+      "query": "cache LLM responses to avoid redundant calls",
+      "answers_query": true,
+      "judgments": [
+        {"file": "pkg/cache/cache.go", "rel": 3},
+        {"file": "pkg/cache/provider_cache.go", "rel": 3},
+        {"file": "pkg/cache/memory_cache.go", "rel": 2}
+      ]
+    },
+    {
+      "split": "dev",
+      "query": "signature fields for module input and output",
+      "answers_query": true,
+      "judgments": [
+        {"file": "pkg/core/signature.go", "rel": 3},
+        {"file": "pkg/core/typed_signature.go", "rel": 2}
+      ]
+    },
+    {
+      "split": "dev",
+      "query": "compare multiple reasoning chains and pick best",
+      "answers_query": true,
+      "judgments": [
+        {"file": "pkg/modules/multi_chain_comparison.go", "rel": 3},
+        {"file": "pkg/modules/chain_of_thought.go", "rel": 2}
+      ]
+    },
+    {
+      "split": "dev",
+      "query": "run modules in parallel with concurrency control",
+      "answers_query": true,
+      "judgments": [
+        {"file": "pkg/modules/parallel.go", "rel": 3},
+        {"file": "pkg/tools/parallel_executor.go", "rel": 2},
+        {"file": "pkg/agents/orchestrator.go", "rel": 1}
+      ]
+    },
+    {
+      "split": "heldout",
+      "query": "ReAct agent reasoning and action loop",
+      "answers_query": true,
+      "judgments": [
+        {"file": "pkg/modules/react.go", "rel": 3},
+        {"file": "pkg/agents/react/react_agent.go", "rel": 2},
+        {"file": "pkg/agents/agent.go", "rel": 2}
+      ]
+    },
+    {
+      "split": "heldout",
+      "query": "register and discover tools for LLM agents",
+      "answers_query": true,
+      "judgments": [
+        {"file": "pkg/tools/registry.go", "rel": 3},
+        {"file": "pkg/tools/smart_registry.go", "rel": 3},
+        {"file": "pkg/config/discovery.go", "rel": 2},
+        {"file": "pkg/tools/tool.go", "rel": 2}
+      ]
+    },
+    {
+      "split": "heldout",
+      "query": "bootstrap few shot examples from training data",
+      "answers_query": true,
+      "judgments": [
+        {"file": "pkg/optimizers/bootstrap_fewshot.go", "rel": 3},
+        {"file": "pkg/datasets/dataset.go", "rel": 2},
+        {"file": "pkg/core/optimizer.go", "rel": 1}
+      ]
+    },
+    {
+      "split": "heldout",
+      "query": "intercept and modify module execution",
+      "answers_query": true,
+      "judgments": [
+        {"file": "pkg/core/interceptor.go", "rel": 3},
+        {"file": "pkg/cache/middleware.go", "rel": 2},
+        {"file": "pkg/core/decorators.go", "rel": 2}
+      ]
+    },
+    {
+      "split": "heldout",
+      "query": "configure logging and debugging",
+      "answers_query": true,
+      "judgments": [
+        {"file": "pkg/logging/logger.go", "rel": 3},
+        {"file": "pkg/logging/log_entry.go", "rel": 2},
+        {"file": "pkg/logging/flight_recorder.go", "rel": 2}
+      ]
+    },
+    {
+      "split": "heldout",
+      "query": "use anthropic claude models",
+      "answers_query": true,
+      "judgments": [
+        {"file": "pkg/llms/anthropic.go", "rel": 3},
+        {"file": "pkg/core/llm.go", "rel": 1}
+      ]
+    },
+    {
+      "split": "heldout",
+      "query": "multimodal content handling for images and audio",
+      "answers_query": true,
+      "judgments": [
+        {"file": "pkg/core/content_utils.go", "rel": 3},
+        {"file": "pkg/core/signature.go", "rel": 2}
+      ]
+    },
+    {
+      "split": "heldout",
+      "query": "self-refine answers through iteration",
+      "answers_query": true,
+      "judgments": [
+        {"file": "pkg/modules/refine.go", "rel": 3},
+        {"file": "pkg/modules/chain_of_thought.go", "rel": 1}
+      ]
+    },
+    {
+      "split": "heldout",
+      "query": "Kubernetes pod eviction controller implementation",
+      "answers_query": false,
+      "judgments": []
+    },
+    {
+      "split": "heldout",
+      "query": "PostgreSQL WAL replication slot cleanup implementation",
+      "answers_query": false,
+      "judgments": []
+    }
+  ]
+}

@@ -115,37 +115,39 @@ type Result struct {
 
 // SearchOptions configures search behavior.
 type SearchOptions struct {
-	Limit          int
-	Threshold      float64
-	IncludeTests   bool    // Include test files in results (default: false)
-	Deduplicate    bool    // Deduplicate results by file (default: true)
-	BoostImpl      float64 // Boost factor for implementation files (default: 0.85, lower = better ranking)
-	UseHybrid      bool    // Enable hybrid search combining semantic + BM25 (default: false)
-	SemanticWeight float64 // Weight for semantic score in hybrid mode (default: 0.6)
-	BM25Weight     float64 // Weight for BM25 score in hybrid mode (default: 0.4)
-	UseRerank      bool    // Enable reranking stage for better precision (default: false)
-	RerankTopK     int     // Number of candidates to fetch for reranking (default: 50)
-	RerankWeight   float64 // Weight for reranker in RRF fusion (0-1, default: 0.5). Lower = trust vector search more.
-	UseColBERT     bool    // Enable ColBERT-style late interaction scoring (default: false)
-	ColBERTWeight  float64 // Weight for ColBERT score in fusion (0-1, default: 0.3)
+	Limit               int
+	Threshold           float64
+	IncludeTests        bool    // Include test files in results (default: false)
+	Deduplicate         bool    // Deduplicate results by file (default: true)
+	ImplementationFirst bool    // Place source implementation before docs, examples, and tests (default: false)
+	BoostImpl           float64 // Boost factor for implementation files (default: 0.85, lower = better ranking)
+	UseHybrid           bool    // Enable hybrid search combining semantic + BM25 (default: false)
+	SemanticWeight      float64 // Weight for semantic score in hybrid mode (default: 0.6)
+	BM25Weight          float64 // Weight for BM25 score in hybrid mode (default: 0.4)
+	UseRerank           bool    // Enable reranking stage for better precision (default: false)
+	RerankTopK          int     // Number of candidates to fetch for reranking (default: 50)
+	RerankWeight        float64 // Weight for reranker in RRF fusion (0-1, default: 0.5). Lower = trust vector search more.
+	UseColBERT          bool    // Enable ColBERT-style late interaction scoring (default: false)
+	ColBERTWeight       float64 // Weight for ColBERT score in fusion (0-1, default: 0.3)
 }
 
 // DefaultSearchOptions returns sensible default options.
 func DefaultSearchOptions() SearchOptions {
 	return SearchOptions{
-		Limit:          10,
-		Threshold:      0.65, // Cosine distance threshold (0 = identical, 2 = opposite)
-		IncludeTests:   false,
-		Deduplicate:    true,
-		BoostImpl:      0.92, // Implementation files get 8% score boost (lower distance = better)
-		UseHybrid:      false,
-		SemanticWeight: 0.6,
-		BM25Weight:     0.4,
-		UseRerank:      false,
-		RerankTopK:     30,  // Fetch 30 candidates for reranking (reduced from 50 for performance)
-		RerankWeight:   0.5, // Balance between vector search and reranker (0.5 = equal weight)
-		UseColBERT:     false,
-		ColBERTWeight:  0.3, // ColBERT contribution in fusion (0.3 = 30% ColBERT, 70% other signals)
+		Limit:               10,
+		Threshold:           0.65, // Cosine distance threshold (0 = identical, 2 = opposite)
+		IncludeTests:        false,
+		Deduplicate:         true,
+		ImplementationFirst: false,
+		BoostImpl:           0.92, // Implementation files get 8% score boost (lower distance = better)
+		UseHybrid:           false,
+		SemanticWeight:      0.6,
+		BM25Weight:          0.4,
+		UseRerank:           false,
+		RerankTopK:          30,  // Fetch 30 candidates for reranking (reduced from 50 for performance)
+		RerankWeight:        0.5, // Balance between vector search and reranker (0.5 = equal weight)
+		UseColBERT:          false,
+		ColBERTWeight:       0.3, // ColBERT contribution in fusion (0.3 = 30% ColBERT, 70% other signals)
 	}
 }
 
@@ -407,6 +409,9 @@ func (s *Searcher) SearchWithOptions(ctx context.Context, query string, opts Sea
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].Score < results[j].Score
 	})
+	if opts.ImplementationFirst {
+		results = prioritizeImplementationResults(results)
+	}
 
 	// Deduplicate by file if requested
 	if opts.Deduplicate {
@@ -542,6 +547,26 @@ func deduplicateResults(results []Result) []Result {
 	return dedupedResults
 }
 
+// prioritizeImplementationResults preserves relevance order within two groups,
+// while placing source implementation before prose, examples, and tests.
+func prioritizeImplementationResults(results []Result) []Result {
+	prioritized := make([]Result, 0, len(results))
+	deferred := make([]Result, 0, len(results))
+	for _, result := range results {
+		path := strings.ToLower(strings.ReplaceAll(result.FilePath, "\\", "/"))
+		isProse := strings.HasSuffix(path, ".md") ||
+			strings.HasPrefix(path, "docs/") || strings.Contains(path, "/docs/") ||
+			strings.HasPrefix(path, "examples/") || strings.Contains(path, "/examples/") ||
+			strings.HasPrefix(path, "compatibility_test/") || strings.Contains(path, "/compatibility_test/")
+		if result.IsTest || isProse {
+			deferred = append(deferred, result)
+			continue
+		}
+		prioritized = append(prioritized, result)
+	}
+	return append(prioritized, deferred...)
+}
+
 // chunksOverlap returns true if two line ranges overlap significantly.
 // We consider chunks overlapping if they share more than 50% of lines.
 func chunksOverlap(start1, end1, start2, end2 int) bool {
@@ -616,6 +641,7 @@ func (s *Searcher) cacheKeyWithOpts(query string, opts SearchOptions) string {
 	for _, value := range []uint64{
 		uint64(opts.Limit), math.Float64bits(opts.Threshold), boolBits(opts.IncludeTests),
 		boolBits(opts.Deduplicate), math.Float64bits(opts.BoostImpl), boolBits(opts.UseHybrid),
+		boolBits(opts.ImplementationFirst),
 		math.Float64bits(opts.SemanticWeight), math.Float64bits(opts.BM25Weight), boolBits(opts.UseRerank),
 		uint64(opts.RerankTopK), math.Float64bits(opts.RerankWeight), boolBits(opts.UseColBERT),
 		math.Float64bits(opts.ColBERTWeight),

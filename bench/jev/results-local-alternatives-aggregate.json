@@ -1,0 +1,896 @@
+{
+  "experiment": "isolated self-hosted reranker alternatives",
+  "dataset": "dspy-go-jev-heldout",
+  "corpus_commit": "87cb50fa0611ef8a3905494c8b16fb0aab7666d3",
+  "labels": "Frozen fixed labels; not human-audited. Models and Jev were not used as judges.",
+  "runtime": {
+    "host": "8 vCPU, 15 GiB RAM, CPU-only",
+    "llama_cpp": "0.4.0-dev build 10809 commit 5266f24da",
+    "server_flags": "--reranking --offline --threads 8 --threads-batch 8 --parallel 1 --ctx-size 8192 --batch-size 2048 --ubatch-size 2048",
+    "privacy": "All alternative inference stayed on 127.0.0.1 with llama.cpp --offline; zero hosted calls and zero token cost."
+  },
+  "models": [
+    {
+      "name": "qwen3-reranker-0.6b-q8",
+      "file_size_bytes": 639153184,
+      "sha256": "22c9979ce4fbcdc5acdc310c6641c32797eff1aa980b8f7a2db8a8ea23429a48",
+      "peak_rss_kib": 2886880,
+      "prompt_tokens_per_second": 367.255,
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "bge-reranker-v2-m3-q4km",
+      "file_size_bytes": 438376864,
+      "sha256": "e186a244ed455b4ab66ec64339ce7427a6ae13f5c0b5e544de96e50f0f8b3673",
+      "peak_rss_kib": 1794828,
+      "prompt_tokens_per_second": 667.366,
+      "license": "Apache-2.0"
+    }
+  ],
+  "arms": [
+    {
+      "name": "ColBERT shortlist + bge-reranker-v2-m3-q4km",
+      "runs": 3,
+      "mrr_values": [
+        0.6875
+      ],
+      "ndcg10_values": [
+        0.5175134978456125
+      ],
+      "recall10_values": [
+        0.4375
+      ],
+      "promotion_error_values": [
+        0
+      ],
+      "aggregate_p50_end_to_end_latency_ms": 17589.74,
+      "aggregate_p95_end_to_end_latency_ms": 23487.976,
+      "per_run_p50_ms": [
+        16982.329,
+        17589.74,
+        17709.473
+      ],
+      "per_run_p95_ms": [
+        23953.463,
+        23108.06,
+        23487.976
+      ]
+    },
+    {
+      "name": "ColBERT shortlist + qwen3-reranker-0.6b-q8",
+      "runs": 3,
+      "mrr_values": [
+        0.7125
+      ],
+      "ndcg10_values": [
+        0.561871946587956
+      ],
+      "recall10_values": [
+        0.5
+      ],
+      "promotion_error_values": [
+        0
+      ],
+      "aggregate_p50_end_to_end_latency_ms": 25038.581,
+      "aggregate_p95_end_to_end_latency_ms": 36004.063,
+      "per_run_p50_ms": [
+        24996.21,
+        24928.066,
+        25038.581
+      ],
+      "per_run_p95_ms": [
+        38337.889,
+        35651.239,
+        35234.464
+      ]
+    },
+    {
+      "name": "balanced + bge-reranker-v2-m3-q4km",
+      "runs": 3,
+      "mrr_values": [
+        0.6666666666666666
+      ],
+      "ndcg10_values": [
+        0.5034389434532374
+      ],
+      "recall10_values": [
+        0.4375
+      ],
+      "promotion_error_values": [
+        1
+      ],
+      "aggregate_p50_end_to_end_latency_ms": 10874.049,
+      "aggregate_p95_end_to_end_latency_ms": 14880.958,
+      "per_run_p50_ms": [
+        10583.396,
+        11310.674,
+        10874.049
+      ],
+      "per_run_p95_ms": [
+        14869.158,
+        14880.958,
+        15578.109
+      ]
+    },
+    {
+      "name": "balanced + existing Jina",
+      "runs": 6,
+      "mrr_values": [
+        0.7291666666666666
+      ],
+      "ndcg10_values": [
+        0.5649682367708565
+      ],
+      "recall10_values": [
+        0.5
+      ],
+      "promotion_error_values": [
+        1
+      ],
+      "aggregate_p50_end_to_end_latency_ms": 35.398,
+      "aggregate_p95_end_to_end_latency_ms": 49.226,
+      "per_run_p50_ms": [
+        35.164,
+        35.595,
+        31.649,
+        33.216,
+        32.438,
+        41.171
+      ],
+      "per_run_p95_ms": [
+        49.442,
+        50.842,
+        45.213,
+        45.247,
+        49.226,
+        55.931
+      ]
+    },
+    {
+      "name": "balanced + qwen3-reranker-0.6b-q8",
+      "runs": 3,
+      "mrr_values": [
+        0.6666666666666666
+      ],
+      "ndcg10_values": [
+        0.5034389434532374
+      ],
+      "recall10_values": [
+        0.4375
+      ],
+      "promotion_error_values": [
+        1
+      ],
+      "aggregate_p50_end_to_end_latency_ms": 19079.409,
+      "aggregate_p95_end_to_end_latency_ms": 26954.279,
+      "per_run_p50_ms": [
+        18941.85,
+        18821.689,
+        19541.144
+      ],
+      "per_run_p95_ms": [
+        26068.813,
+        27119.023,
+        26336.662
+      ]
+    },
+    {
+      "name": "balanced baseline",
+      "runs": 6,
+      "mrr_values": [
+        0.6666666666666666
+      ],
+      "ndcg10_values": [
+        0.4988529192030594
+      ],
+      "recall10_values": [
+        0.4375
+      ],
+      "promotion_error_values": [
+        1
+      ],
+      "aggregate_p50_end_to_end_latency_ms": 35.359,
+      "aggregate_p95_end_to_end_latency_ms": 48.835,
+      "per_run_p50_ms": [
+        38.016,
+        35.359,
+        33.496,
+        30.051,
+        32.652,
+        39.009
+      ],
+      "per_run_p95_ms": [
+        48.835,
+        50.581,
+        49.246,
+        44.135,
+        52.574,
+        47.64
+      ]
+    },
+    {
+      "name": "quality / ColBERT",
+      "runs": 6,
+      "mrr_values": [
+        0.7291666666666666
+      ],
+      "ndcg10_values": [
+        0.5667106605325483
+      ],
+      "recall10_values": [
+        0.5
+      ],
+      "promotion_error_values": [
+        1
+      ],
+      "aggregate_p50_end_to_end_latency_ms": 6645.363,
+      "aggregate_p95_end_to_end_latency_ms": 8637.914,
+      "per_run_p50_ms": [
+        6700.517,
+        6511.463,
+        6634.047,
+        6359.209,
+        6399.554,
+        6576.563
+      ],
+      "per_run_p95_ms": [
+        8593.287,
+        8404.196,
+        8637.914,
+        8391.121,
+        11131.702,
+        9524.754
+      ]
+    }
+  ],
+  "answerability_and_synthetic_diagnostics": [
+    {
+      "model": "qwen3-reranker-0.6b-q8",
+      "answerability_protocol": "Threshold llama.cpp relevance probability at 0.5 over the returned top 10; threshold fixed from the model card before observing these scores.",
+      "answerability_correct": 10,
+      "answerability_total": 10,
+      "answerability_cases": [
+        {
+          "query": "ReAct agent reasoning and action loop",
+          "expected_answer": true,
+          "predicted_any_answer": true,
+          "max_score": 0.999966025352478,
+          "correct": true
+        },
+        {
+          "query": "register and discover tools for LLM agents",
+          "expected_answer": true,
+          "predicted_any_answer": true,
+          "max_score": 0.9992722272872925,
+          "correct": true
+        },
+        {
+          "query": "bootstrap few shot examples from training data",
+          "expected_answer": true,
+          "predicted_any_answer": true,
+          "max_score": 0.9998449683189392,
+          "correct": true
+        },
+        {
+          "query": "intercept and modify module execution",
+          "expected_answer": true,
+          "predicted_any_answer": true,
+          "max_score": 0.9995617270469666,
+          "correct": true
+        },
+        {
+          "query": "configure logging and debugging",
+          "expected_answer": true,
+          "predicted_any_answer": true,
+          "max_score": 0.5808215737342834,
+          "correct": true
+        },
+        {
+          "query": "use anthropic claude models",
+          "expected_answer": true,
+          "predicted_any_answer": true,
+          "max_score": 0.9982302188873291,
+          "correct": true
+        },
+        {
+          "query": "multimodal content handling for images and audio",
+          "expected_answer": true,
+          "predicted_any_answer": true,
+          "max_score": 0.998210072517395,
+          "correct": true
+        },
+        {
+          "query": "self-refine answers through iteration",
+          "expected_answer": true,
+          "predicted_any_answer": true,
+          "max_score": 0.8242350220680237,
+          "correct": true
+        },
+        {
+          "query": "Kubernetes pod eviction controller implementation",
+          "expected_answer": false,
+          "predicted_any_answer": false,
+          "max_score": 0.07866436243057251,
+          "correct": true
+        },
+        {
+          "query": "PostgreSQL WAL replication slot cleanup implementation",
+          "expected_answer": false,
+          "predicted_any_answer": false,
+          "max_score": 0.39925703406333923,
+          "correct": true
+        }
+      ],
+      "implementation_vs_prose_protocol": "Six synthetic asymmetric pairs, prose at index 0 and implementation at index 1; expected implementation winner authored before scoring.",
+      "implementation_wins": 2,
+      "implementation_challenges": [
+        {
+          "query": "where is JWT signature validation implemented?",
+          "prose_score": 0.9890932440757751,
+          "implementation_score": 0.4367046058177948,
+          "implementation_wins": false
+        },
+        {
+          "query": "implementation of retry with exponential backoff",
+          "prose_score": 0.9995949864387512,
+          "implementation_score": 0.9944087266921997,
+          "implementation_wins": false
+        },
+        {
+          "query": "code that closes idle database connections",
+          "prose_score": 0.9776305556297302,
+          "implementation_score": 0.9982751607894897,
+          "implementation_wins": true
+        },
+        {
+          "query": "request rate limiter implementation",
+          "prose_score": 0.3727622330188751,
+          "implementation_score": 0.05365980416536331,
+          "implementation_wins": false
+        },
+        {
+          "query": "parse and validate configuration",
+          "prose_score": 0.9894224405288696,
+          "implementation_score": 0.8703205585479736,
+          "implementation_wins": false
+        },
+        {
+          "query": "cancel worker goroutines on context cancellation",
+          "prose_score": 0.9272372722625732,
+          "implementation_score": 0.9879457950592041,
+          "implementation_wins": true
+        }
+      ],
+      "instruction_variant_protocol": "One predeclared generic code-search instruction prepended to the query; synthetic diagnostic only, not selected or evaluated on held-out labels.",
+      "instruction_variant": "Find source code that implements the requested behavior. Prefer executable implementation over documentation, tests, examples, or incidental mentions.\nQuery: ",
+      "instruction_variant_implementation_wins": 2,
+      "instruction_variant_challenges": [
+        {
+          "query": "where is JWT signature validation implemented?",
+          "prose_score": 0.9993179440498352,
+          "implementation_score": 0.9036760926246643,
+          "implementation_wins": false
+        },
+        {
+          "query": "implementation of retry with exponential backoff",
+          "prose_score": 0.9995939135551453,
+          "implementation_score": 0.9942240715026855,
+          "implementation_wins": false
+        },
+        {
+          "query": "code that closes idle database connections",
+          "prose_score": 0.9992267489433289,
+          "implementation_score": 0.9969277381896973,
+          "implementation_wins": false
+        },
+        {
+          "query": "request rate limiter implementation",
+          "prose_score": 0.164291650056839,
+          "implementation_score": 0.0037433835677802563,
+          "implementation_wins": false
+        },
+        {
+          "query": "parse and validate configuration",
+          "prose_score": 0.6611438989639282,
+          "implementation_score": 0.9220603704452515,
+          "implementation_wins": true
+        },
+        {
+          "query": "cancel worker goroutines on context cancellation",
+          "prose_score": 0.8386520147323608,
+          "implementation_score": 0.8860257863998413,
+          "implementation_wins": true
+        }
+      ]
+    },
+    {
+      "model": "bge-reranker-v2-m3-q4km",
+      "answerability_protocol": "Threshold raw model logit at 0.0 over the returned top 10; threshold fixed from the model card before observing these scores.",
+      "answerability_correct": 9,
+      "answerability_total": 10,
+      "answerability_cases": [
+        {
+          "query": "ReAct agent reasoning and action loop",
+          "expected_answer": true,
+          "predicted_any_answer": true,
+          "max_score": 3.943157196044922,
+          "correct": true
+        },
+        {
+          "query": "register and discover tools for LLM agents",
+          "expected_answer": true,
+          "predicted_any_answer": true,
+          "max_score": 0.2665932774543762,
+          "correct": true
+        },
+        {
+          "query": "bootstrap few shot examples from training data",
+          "expected_answer": true,
+          "predicted_any_answer": true,
+          "max_score": 1.7611407041549683,
+          "correct": true
+        },
+        {
+          "query": "intercept and modify module execution",
+          "expected_answer": true,
+          "predicted_any_answer": true,
+          "max_score": 2.8386096954345703,
+          "correct": true
+        },
+        {
+          "query": "configure logging and debugging",
+          "expected_answer": true,
+          "predicted_any_answer": true,
+          "max_score": 1.4894888401031494,
+          "correct": true
+        },
+        {
+          "query": "use anthropic claude models",
+          "expected_answer": true,
+          "predicted_any_answer": true,
+          "max_score": 2.823174476623535,
+          "correct": true
+        },
+        {
+          "query": "multimodal content handling for images and audio",
+          "expected_answer": true,
+          "predicted_any_answer": true,
+          "max_score": 1.8026859760284424,
+          "correct": true
+        },
+        {
+          "query": "self-refine answers through iteration",
+          "expected_answer": true,
+          "predicted_any_answer": false,
+          "max_score": -3.5997133255004883,
+          "correct": false
+        },
+        {
+          "query": "Kubernetes pod eviction controller implementation",
+          "expected_answer": false,
+          "predicted_any_answer": false,
+          "max_score": -3.663088083267212,
+          "correct": true
+        },
+        {
+          "query": "PostgreSQL WAL replication slot cleanup implementation",
+          "expected_answer": false,
+          "predicted_any_answer": false,
+          "max_score": -3.340630054473877,
+          "correct": true
+        }
+      ],
+      "implementation_vs_prose_protocol": "Six synthetic asymmetric pairs, prose at index 0 and implementation at index 1; expected implementation winner authored before scoring.",
+      "implementation_wins": 1,
+      "implementation_challenges": [
+        {
+          "query": "where is JWT signature validation implemented?",
+          "prose_score": -1.4943294525146484,
+          "implementation_score": -4.648314476013184,
+          "implementation_wins": false
+        },
+        {
+          "query": "implementation of retry with exponential backoff",
+          "prose_score": 2.234705924987793,
+          "implementation_score": -2.729422092437744,
+          "implementation_wins": false
+        },
+        {
+          "query": "code that closes idle database connections",
+          "prose_score": 1.2465503215789795,
+          "implementation_score": 1.3276877403259277,
+          "implementation_wins": true
+        },
+        {
+          "query": "request rate limiter implementation",
+          "prose_score": -2.4164681434631348,
+          "implementation_score": -8.150779724121094,
+          "implementation_wins": false
+        },
+        {
+          "query": "parse and validate configuration",
+          "prose_score": 2.7231016159057617,
+          "implementation_score": -1.284050464630127,
+          "implementation_wins": false
+        },
+        {
+          "query": "cancel worker goroutines on context cancellation",
+          "prose_score": -3.1477415561676025,
+          "implementation_score": -4.199755668640137,
+          "implementation_wins": false
+        }
+      ]
+    }
+  ],
+  "case_outcomes": {
+    "balanced + qwen3-reranker-0.6b-q8": [
+      {
+        "query": "ReAct agent reasoning and action loop",
+        "expected_answer": true,
+        "mrr": 1,
+        "ndcg@10": 0.7136205775898136,
+        "recall@10": 0.6666666666666666,
+        "promotion_errors": 0,
+        "latency_ms": 18475.349
+      },
+      {
+        "query": "register and discover tools for LLM agents",
+        "expected_answer": true,
+        "mrr": 0.3333333333333333,
+        "ndcg@10": 0.4585085340797653,
+        "recall@10": 0.5,
+        "promotion_errors": 1,
+        "latency_ms": 20171.118
+      },
+      {
+        "query": "bootstrap few shot examples from training data",
+        "expected_answer": true,
+        "mrr": 1,
+        "ndcg@10": 0.7984848580994977,
+        "recall@10": 0.6666666666666666,
+        "promotion_errors": 0,
+        "latency_ms": 20660.554
+      },
+      {
+        "query": "intercept and modify module execution",
+        "expected_answer": true,
+        "mrr": 1,
+        "ndcg@10": 0.6735439182299786,
+        "recall@10": 0.3333333333333333,
+        "promotion_errors": 0,
+        "latency_ms": 18941.85
+      },
+      {
+        "query": "configure logging and debugging",
+        "expected_answer": true,
+        "mrr": 1,
+        "ndcg@10": 0.6735439182299786,
+        "recall@10": 0.3333333333333333,
+        "promotion_errors": 0,
+        "latency_ms": 10430.238
+      },
+      {
+        "query": "use anthropic claude models",
+        "expected_answer": true,
+        "mrr": 1,
+        "ndcg@10": 0.7098097413968654,
+        "recall@10": 1,
+        "promotion_errors": 0,
+        "latency_ms": 23531.216
+      },
+      {
+        "query": "multimodal content handling for images and audio",
+        "expected_answer": true,
+        "mrr": 0,
+        "ndcg@10": 0,
+        "recall@10": 0,
+        "promotion_errors": 0,
+        "latency_ms": 26068.813
+      },
+      {
+        "query": "self-refine answers through iteration",
+        "expected_answer": true,
+        "mrr": 0,
+        "ndcg@10": 0,
+        "recall@10": 0,
+        "promotion_errors": 0,
+        "latency_ms": 23707.682
+      },
+      {
+        "query": "Kubernetes pod eviction controller implementation",
+        "expected_answer": false,
+        "mrr": 0,
+        "ndcg@10": 0,
+        "recall@10": 0,
+        "promotion_errors": 0,
+        "latency_ms": 13017.688
+      },
+      {
+        "query": "PostgreSQL WAL replication slot cleanup implementation",
+        "expected_answer": false,
+        "mrr": 0,
+        "ndcg@10": 0,
+        "recall@10": 0,
+        "promotion_errors": 0,
+        "latency_ms": 14120.471
+      }
+    ],
+    "ColBERT shortlist + qwen3-reranker-0.6b-q8": [
+      {
+        "query": "ReAct agent reasoning and action loop",
+        "expected_answer": true,
+        "mrr": 1,
+        "ndcg@10": 0.7136205775898136,
+        "recall@10": 0.6666666666666666,
+        "promotion_errors": 0,
+        "latency_ms": 26344.891
+      },
+      {
+        "query": "register and discover tools for LLM agents",
+        "expected_answer": true,
+        "mrr": 0.5,
+        "ndcg@10": 0.5571655791252315,
+        "recall@10": 0.5,
+        "promotion_errors": 0,
+        "latency_ms": 24170.214
+      },
+      {
+        "query": "bootstrap few shot examples from training data",
+        "expected_answer": true,
+        "mrr": 1,
+        "ndcg@10": 0.8124242481930319,
+        "recall@10": 0.6666666666666666,
+        "promotion_errors": 0,
+        "latency_ms": 30205.165
+      },
+      {
+        "query": "intercept and modify module execution",
+        "expected_answer": true,
+        "mrr": 1,
+        "ndcg@10": 0.6735439182299786,
+        "recall@10": 0.3333333333333333,
+        "promotion_errors": 0,
+        "latency_ms": 24996.21
+      },
+      {
+        "query": "configure logging and debugging",
+        "expected_answer": true,
+        "mrr": 1,
+        "ndcg@10": 0.6735439182299786,
+        "recall@10": 0.3333333333333333,
+        "promotion_errors": 0,
+        "latency_ms": 20247.68
+      },
+      {
+        "query": "use anthropic claude models",
+        "expected_answer": true,
+        "mrr": 1,
+        "ndcg@10": 0.7098097413968654,
+        "recall@10": 1,
+        "promotion_errors": 0,
+        "latency_ms": 38337.889
+      },
+      {
+        "query": "multimodal content handling for images and audio",
+        "expected_answer": true,
+        "mrr": 0,
+        "ndcg@10": 0,
+        "recall@10": 0,
+        "promotion_errors": 0,
+        "latency_ms": 31623.082
+      },
+      {
+        "query": "self-refine answers through iteration",
+        "expected_answer": true,
+        "mrr": 0.2,
+        "ndcg@10": 0.3548675899387485,
+        "recall@10": 0.5,
+        "promotion_errors": 0,
+        "latency_ms": 36004.063
+      },
+      {
+        "query": "Kubernetes pod eviction controller implementation",
+        "expected_answer": false,
+        "mrr": 0,
+        "ndcg@10": 0,
+        "recall@10": 0,
+        "promotion_errors": 0,
+        "latency_ms": 19550.013
+      },
+      {
+        "query": "PostgreSQL WAL replication slot cleanup implementation",
+        "expected_answer": false,
+        "mrr": 0,
+        "ndcg@10": 0,
+        "recall@10": 0,
+        "promotion_errors": 0,
+        "latency_ms": 21513.724
+      }
+    ],
+    "balanced + bge-reranker-v2-m3-q4km": [
+      {
+        "query": "ReAct agent reasoning and action loop",
+        "expected_answer": true,
+        "mrr": 1,
+        "ndcg@10": 0.7136205775898136,
+        "recall@10": 0.6666666666666666,
+        "promotion_errors": 0,
+        "latency_ms": 10265.521
+      },
+      {
+        "query": "register and discover tools for LLM agents",
+        "expected_answer": true,
+        "mrr": 0.3333333333333333,
+        "ndcg@10": 0.4585085340797653,
+        "recall@10": 0.5,
+        "promotion_errors": 1,
+        "latency_ms": 10929.257
+      },
+      {
+        "query": "bootstrap few shot examples from training data",
+        "expected_answer": true,
+        "mrr": 1,
+        "ndcg@10": 0.7984848580994977,
+        "recall@10": 0.6666666666666666,
+        "promotion_errors": 0,
+        "latency_ms": 11615.615
+      },
+      {
+        "query": "intercept and modify module execution",
+        "expected_answer": true,
+        "mrr": 1,
+        "ndcg@10": 0.6735439182299786,
+        "recall@10": 0.3333333333333333,
+        "promotion_errors": 0,
+        "latency_ms": 10874.049
+      },
+      {
+        "query": "configure logging and debugging",
+        "expected_answer": true,
+        "mrr": 1,
+        "ndcg@10": 0.6735439182299786,
+        "recall@10": 0.3333333333333333,
+        "promotion_errors": 0,
+        "latency_ms": 4746.605
+      },
+      {
+        "query": "use anthropic claude models",
+        "expected_answer": true,
+        "mrr": 1,
+        "ndcg@10": 0.7098097413968654,
+        "recall@10": 1,
+        "promotion_errors": 0,
+        "latency_ms": 11961.476
+      },
+      {
+        "query": "multimodal content handling for images and audio",
+        "expected_answer": true,
+        "mrr": 0,
+        "ndcg@10": 0,
+        "recall@10": 0,
+        "promotion_errors": 0,
+        "latency_ms": 15578.109
+      },
+      {
+        "query": "self-refine answers through iteration",
+        "expected_answer": true,
+        "mrr": 0,
+        "ndcg@10": 0,
+        "recall@10": 0,
+        "promotion_errors": 0,
+        "latency_ms": 13894.895
+      },
+      {
+        "query": "Kubernetes pod eviction controller implementation",
+        "expected_answer": false,
+        "mrr": 0,
+        "ndcg@10": 0,
+        "recall@10": 0,
+        "promotion_errors": 0,
+        "latency_ms": 6323.985
+      },
+      {
+        "query": "PostgreSQL WAL replication slot cleanup implementation",
+        "expected_answer": false,
+        "mrr": 0,
+        "ndcg@10": 0,
+        "recall@10": 0,
+        "promotion_errors": 0,
+        "latency_ms": 7499.329
+      }
+    ],
+    "ColBERT shortlist + bge-reranker-v2-m3-q4km": [
+      {
+        "query": "ReAct agent reasoning and action loop",
+        "expected_answer": true,
+        "mrr": 1,
+        "ndcg@10": 0.7136205775898136,
+        "recall@10": 0.6666666666666666,
+        "promotion_errors": 0,
+        "latency_ms": 17709.473
+      },
+      {
+        "query": "register and discover tools for LLM agents",
+        "expected_answer": true,
+        "mrr": 0.5,
+        "ndcg@10": 0.5571655791252315,
+        "recall@10": 0.5,
+        "promotion_errors": 0,
+        "latency_ms": 16948.061
+      },
+      {
+        "query": "bootstrap few shot examples from training data",
+        "expected_answer": true,
+        "mrr": 1,
+        "ndcg@10": 0.8124242481930319,
+        "recall@10": 0.6666666666666666,
+        "promotion_errors": 0,
+        "latency_ms": 22384.797
+      },
+      {
+        "query": "intercept and modify module execution",
+        "expected_answer": true,
+        "mrr": 1,
+        "ndcg@10": 0.6735439182299786,
+        "recall@10": 0.3333333333333333,
+        "promotion_errors": 0,
+        "latency_ms": 17978.754
+      },
+      {
+        "query": "configure logging and debugging",
+        "expected_answer": true,
+        "mrr": 1,
+        "ndcg@10": 0.6735439182299786,
+        "recall@10": 0.3333333333333333,
+        "promotion_errors": 0,
+        "latency_ms": 14588.512
+      },
+      {
+        "query": "use anthropic claude models",
+        "expected_answer": true,
+        "mrr": 1,
+        "ndcg@10": 0.7098097413968654,
+        "recall@10": 1,
+        "promotion_errors": 0,
+        "latency_ms": 22094.732
+      },
+      {
+        "query": "multimodal content handling for images and audio",
+        "expected_answer": true,
+        "mrr": 0,
+        "ndcg@10": 0,
+        "recall@10": 0,
+        "promotion_errors": 0,
+        "latency_ms": 22096.137
+      },
+      {
+        "query": "self-refine answers through iteration",
+        "expected_answer": true,
+        "mrr": 0,
+        "ndcg@10": 0,
+        "recall@10": 0,
+        "promotion_errors": 0,
+        "latency_ms": 23487.976
+      },
+      {
+        "query": "Kubernetes pod eviction controller implementation",
+        "expected_answer": false,
+        "mrr": 0,
+        "ndcg@10": 0,
+        "recall@10": 0,
+        "promotion_errors": 0,
+        "latency_ms": 11938.976
+      },
+      {
+        "query": "PostgreSQL WAL replication slot cleanup implementation",
+        "expected_answer": false,
+        "mrr": 0,
+        "ndcg@10": 0,
+        "recall@10": 0,
+        "promotion_errors": 0,
+        "latency_ms": 16741.334
+      }
+    ]
+  },
+  "invalidated_artifacts": "results-{qwen3,bge}-invalid-ubatch512-{1,2,3}.json are retained but invalid: llama.cpp default ubatch 512 rejected chunks over 512 tokens and Searcher intentionally swallowed reranker errors."
+}

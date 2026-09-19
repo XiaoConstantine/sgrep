@@ -31,6 +31,7 @@ var (
 	threshold               float64
 	includeTests            bool
 	allChunks               bool
+	implementationFirst     bool
 	hybridSearch            bool
 	semanticWeight          float64
 	bm25Weight              float64
@@ -125,6 +126,7 @@ func init() {
 	rootCmd.Flags().Float64Var(&threshold, "threshold", 1.5, "Similarity threshold (cosine distance, lower is more similar)")
 	rootCmd.Flags().BoolVarP(&includeTests, "include-tests", "t", false, "Include test files in results")
 	rootCmd.Flags().BoolVar(&allChunks, "all-chunks", false, "Show all matching chunks (disable deduplication)")
+	rootCmd.Flags().BoolVar(&implementationFirst, "implementation-first", false, "Place source implementation before docs, examples, and tests")
 	rootCmd.Flags().BoolVar(&hybridSearch, "hybrid", false, "Enable hybrid search (semantic + BM25)")
 	rootCmd.Flags().Float64Var(&semanticWeight, "semantic-weight", 0.6, "Weight for semantic score in hybrid mode")
 	rootCmd.Flags().Float64Var(&bm25Weight, "bm25-weight", 0.4, "Weight for BM25 score in hybrid mode")
@@ -189,6 +191,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	opts.Threshold = threshold
 	opts.IncludeTests = includeTests
 	opts.Deduplicate = !allChunks
+	opts.ImplementationFirst = implementationFirst
 	switch searchProfile {
 	case "fast":
 		opts.UseHybrid = false

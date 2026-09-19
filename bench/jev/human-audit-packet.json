@@ -1,0 +1,1224 @@
+{
+  "purpose": "Blind human audit packet. Contains no Jev judgments, scores, output order, or source content.",
+  "corpus": "dspy-go",
+  "corpus_hash": "87cb50fa0611ef8a3905494c8b16fb0aab7666d3",
+  "instructions": {
+    "query_answerability": "Without seeing model outputs, decide whether this corpus contains an answer to the query.",
+    "candidate_relevance": "For each candidate, label graded relevance 0-3, evidence_type implementation|test_or_docs|incidental, abstraction correct|adjacent|wrong, and test_or_docs_only true|false.",
+    "asymmetric_focus": "Check whether prose/tests/examples are promoted over production implementation. Inspect the pinned corpus at the listed path and range."
+  },
+  "cases": [
+    {
+      "query": "ReAct agent reasoning and action loop",
+      "query_answers_corpus": null,
+      "candidates": [
+        {
+          "file": "pkg/agents/README.md",
+          "start_line": 1,
+          "end_line": 87,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/agents/react/README.md",
+          "start_line": 1,
+          "end_line": 23,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/agents/react/react_agent.go",
+          "start_line": 27,
+          "end_line": 34,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/agents/react/react_agent.go",
+          "start_line": 540,
+          "end_line": 546,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/agents/react/react_agent.go",
+          "start_line": 675,
+          "end_line": 683,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/agents/react/react_agent.go",
+          "start_line": 838,
+          "end_line": 846,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/agents/react/react_agent.go",
+          "start_line": 903,
+          "end_line": 916,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/agents/react/react_agent.go",
+          "start_line": 1051,
+          "end_line": 1060,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/agents/react/react_agent.go",
+          "start_line": 1129,
+          "end_line": 1137,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/agents/react/react_agent.go",
+          "start_line": 1515,
+          "end_line": 1531,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/modules/react.go",
+          "start_line": 20,
+          "end_line": 31,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        }
+      ]
+    },
+    {
+      "query": "register and discover tools for LLM agents",
+      "query_answers_corpus": null,
+      "candidates": [
+        {
+          "file": "docs/content/docs/guides/agents.md",
+          "start_line": 177,
+          "end_line": 277,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "docs/content/docs/guides/agents.md",
+          "start_line": 672,
+          "end_line": 763,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "examples/ace_react/main.go",
+          "start_line": 434,
+          "end_line": 456,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "examples/smart_tool_registry/main.go",
+          "start_line": 178,
+          "end_line": 180,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/agents/native/agent.go",
+          "start_line": 226,
+          "end_line": 232,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/agents/react/react_agent.go",
+          "start_line": 519,
+          "end_line": 538,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/core/registry.go",
+          "start_line": 51,
+          "end_line": 85,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/llms/factory.go",
+          "start_line": 54,
+          "end_line": 106,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/tools/README.md",
+          "start_line": 1,
+          "end_line": 53,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/tools/mcp_discovery.go",
+          "start_line": 51,
+          "end_line": 92,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/tools/registry.go",
+          "start_line": 24,
+          "end_line": 43,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/tools/smart_registry.go",
+          "start_line": 59,
+          "end_line": 63,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/tools/smart_registry.go",
+          "start_line": 97,
+          "end_line": 124,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/tools/smart_registry.go",
+          "start_line": 423,
+          "end_line": 459,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        }
+      ]
+    },
+    {
+      "query": "bootstrap few shot examples from training data",
+      "query_answers_corpus": null,
+      "candidates": [
+        {
+          "file": "compatibility_test/compare_results.py",
+          "start_line": 38,
+          "end_line": 72,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "compatibility_test/dspy_comparison.py",
+          "start_line": 203,
+          "end_line": 255,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/core/optimizer.go",
+          "start_line": 112,
+          "end_line": 116,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/core/optimizer.go",
+          "start_line": 126,
+          "end_line": 131,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/optimizers/bootstrap_fewshot.go",
+          "start_line": 16,
+          "end_line": 19,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/optimizers/bootstrap_fewshot.go",
+          "start_line": 21,
+          "end_line": 26,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/optimizers/bootstrap_fewshot.go",
+          "start_line": 28,
+          "end_line": 51,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/optimizers/bootstrap_fewshot.go",
+          "start_line": 53,
+          "end_line": 56,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/optimizers/bootstrap_fewshot.go",
+          "start_line": 145,
+          "end_line": 157,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/optimizers/bootstrap_fewshot.go",
+          "start_line": 159,
+          "end_line": 185,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/optimizers/bootstrap_fewshot.go",
+          "start_line": 187,
+          "end_line": 196,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/optimizers/bootstrap_fewshot.go",
+          "start_line": 198,
+          "end_line": 235,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        }
+      ]
+    },
+    {
+      "query": "intercept and modify module execution",
+      "query_answers_corpus": null,
+      "candidates": [
+        {
+          "file": "docs/content/docs/guides/interceptors.md",
+          "start_line": 1,
+          "end_line": 87,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "examples/gsm8k/main.go",
+          "start_line": 94,
+          "end_line": 147,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "examples/xml_adapter/README.md",
+          "start_line": 67,
+          "end_line": 131,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/core/interceptor.go",
+          "start_line": 18,
+          "end_line": 21,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/core/interceptor.go",
+          "start_line": 132,
+          "end_line": 137,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/core/module.go",
+          "start_line": 34,
+          "end_line": 50,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/interceptors/README.md",
+          "start_line": 1,
+          "end_line": 59,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/interceptors/security.go",
+          "start_line": 324,
+          "end_line": 330,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/interceptors/standard.go",
+          "start_line": 11,
+          "end_line": 31,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/interceptors/standard.go",
+          "start_line": 77,
+          "end_line": 108,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/interceptors/standard.go",
+          "start_line": 175,
+          "end_line": 214,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/modules/react.go",
+          "start_line": 33,
+          "end_line": 57,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/optimizers/simba.go",
+          "start_line": 708,
+          "end_line": 737,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        }
+      ]
+    },
+    {
+      "query": "configure logging and debugging",
+      "query_answers_corpus": null,
+      "candidates": [
+        {
+          "file": "cmd/dspy-cli/internal/runner/optimizer_runner.go",
+          "start_line": 205,
+          "end_line": 227,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "doc.go",
+          "start_line": 331,
+          "end_line": 382,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "examples/others/mcp/main.go",
+          "start_line": 48,
+          "end_line": 51,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/config/config.go",
+          "start_line": 154,
+          "end_line": 167,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/config/manager.go",
+          "start_line": 180,
+          "end_line": 188,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/config/sources.go",
+          "start_line": 294,
+          "end_line": 309,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/core/config.go",
+          "start_line": 98,
+          "end_line": 118,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/logging/logger.go",
+          "start_line": 38,
+          "end_line": 44,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/logging/logger.go",
+          "start_line": 46,
+          "end_line": 54,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/logging/logger.go",
+          "start_line": 131,
+          "end_line": 134,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/logging/logger.go",
+          "start_line": 201,
+          "end_line": 206,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/logging/severity.go",
+          "start_line": 6,
+          "end_line": 12,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/modules/rlm/config.go",
+          "start_line": 359,
+          "end_line": 364,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        }
+      ]
+    },
+    {
+      "query": "use anthropic claude models",
+      "query_answers_corpus": null,
+      "candidates": [
+        {
+          "file": "docs/content/docs/reference/providers.md",
+          "start_line": 220,
+          "end_line": 302,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "docs/hugo_stats.json",
+          "start_line": 250,
+          "end_line": 330,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/config/validation.go",
+          "start_line": 470,
+          "end_line": 491,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/core/llm.go",
+          "start_line": 667,
+          "end_line": 707,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/llms/anthropic.go",
+          "start_line": 19,
+          "end_line": 23,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/llms/anthropic.go",
+          "start_line": 25,
+          "end_line": 25,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/llms/anthropic.go",
+          "start_line": 27,
+          "end_line": 68,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/llms/anthropic.go",
+          "start_line": 70,
+          "end_line": 77,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/llms/anthropic.go",
+          "start_line": 84,
+          "end_line": 96,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/llms/anthropic.go",
+          "start_line": 172,
+          "end_line": 196,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/llms/anthropic.go",
+          "start_line": 198,
+          "end_line": 261,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/llms/anthropic.go",
+          "start_line": 600,
+          "end_line": 654,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        }
+      ]
+    },
+    {
+      "query": "multimodal content handling for images and audio",
+      "query_answers_corpus": null,
+      "candidates": [
+        {
+          "file": "docs/content/docs/guides/multimodal.md",
+          "start_line": 1,
+          "end_line": 76,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "docs/content/docs/guides/multimodal.md",
+          "start_line": 147,
+          "end_line": 231,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "docs/content/docs/guides/multimodal.md",
+          "start_line": 312,
+          "end_line": 399,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "docs/content/docs/guides/multimodal.md",
+          "start_line": 493,
+          "end_line": 542,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "examples/multimodal/README.md",
+          "start_line": 1,
+          "end_line": 84,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "examples/multimodal/README.md",
+          "start_line": 82,
+          "end_line": 162,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "examples/multimodal/config.yaml",
+          "start_line": 1,
+          "end_line": 57,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "examples/multimodal/main.go",
+          "start_line": 40,
+          "end_line": 49,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "examples/multimodal/utils.go",
+          "start_line": 98,
+          "end_line": 102,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "examples/multimodal/utils.go",
+          "start_line": 111,
+          "end_line": 130,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/core/content_utils.go",
+          "start_line": 177,
+          "end_line": 225,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/core/content_utils.go",
+          "start_line": 277,
+          "end_line": 326,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/core/llm.go",
+          "start_line": 84,
+          "end_line": 91,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/core/llm.go",
+          "start_line": 154,
+          "end_line": 157,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/core/llm.go",
+          "start_line": 159,
+          "end_line": 162,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/core/llm.go",
+          "start_line": 512,
+          "end_line": 515,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/core/llm.go",
+          "start_line": 517,
+          "end_line": 520,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/core/llm.go",
+          "start_line": 588,
+          "end_line": 613,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/llms/ollama.go",
+          "start_line": 844,
+          "end_line": 865,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        }
+      ]
+    },
+    {
+      "query": "self-refine answers through iteration",
+      "query_answers_corpus": null,
+      "candidates": [
+        {
+          "file": "cmd/dspy-cli/internal/interactive/models/wizard.go",
+          "start_line": 329,
+          "end_line": 372,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "cmd/dspy-cli/internal/viewer/types.go",
+          "start_line": 65,
+          "end_line": 75,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/agents/react/reflection.go",
+          "start_line": 158,
+          "end_line": 211,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/agents/react/reflection.go",
+          "start_line": 537,
+          "end_line": 548,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/agents/react/reflection.go",
+          "start_line": 550,
+          "end_line": 579,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/modules/rlm/config.go",
+          "start_line": 215,
+          "end_line": 237,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/modules/rlm/rlm.go",
+          "start_line": 1712,
+          "end_line": 1724,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/modules/rlm/signatures.go",
+          "start_line": 411,
+          "end_line": 418,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/modules/rlm/signatures.go",
+          "start_line": 419,
+          "end_line": 467,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/optimizers/copro.go",
+          "start_line": 359,
+          "end_line": 418,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/optimizers/gepa.go",
+          "start_line": 482,
+          "end_line": 498,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/optimizers/gepa.go",
+          "start_line": 6250,
+          "end_line": 6275,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        }
+      ]
+    },
+    {
+      "query": "Kubernetes pod eviction controller implementation",
+      "query_answers_corpus": null,
+      "candidates": [
+        {
+          "file": "examples/xml_adapter/custom_config/custom_config.go",
+          "start_line": 236,
+          "end_line": 238,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/agents/ace/doc.go",
+          "start_line": 61,
+          "end_line": 93,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/cache/cache.go",
+          "start_line": 108,
+          "end_line": 118,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/cache/sqlite_cache.go",
+          "start_line": 287,
+          "end_line": 328,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/config/config.go",
+          "start_line": 729,
+          "end_line": 735,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/config/interceptors.go",
+          "start_line": 505,
+          "end_line": 510,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/core/interceptor.go",
+          "start_line": 111,
+          "end_line": 116,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/optimizers/gepa.go",
+          "start_line": 542,
+          "end_line": 561,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/optimizers/mcp_optimizer.go",
+          "start_line": 443,
+          "end_line": 455,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/optimizers/mcp_optimizer.go",
+          "start_line": 457,
+          "end_line": 492,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/optimizers/simba.go",
+          "start_line": 1209,
+          "end_line": 1214,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        }
+      ]
+    },
+    {
+      "query": "PostgreSQL WAL replication slot cleanup implementation",
+      "query_answers_corpus": null,
+      "candidates": [
+        {
+          "file": "examples/native_agent_session/main.go",
+          "start_line": 306,
+          "end_line": 316,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/agents/communication/server.go",
+          "start_line": 292,
+          "end_line": 339,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/agents/memory/sqlite_memory.go",
+          "start_line": 54,
+          "end_line": 90,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/agents/memory/sqlite_memory.go",
+          "start_line": 325,
+          "end_line": 347,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/agents/react/memory_optimizer.go",
+          "start_line": 512,
+          "end_line": 539,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/cache/cache.go",
+          "start_line": 108,
+          "end_line": 118,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/cache/sqlite_cache.go",
+          "start_line": 346,
+          "end_line": 371,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/config/config.go",
+          "start_line": 358,
+          "end_line": 371,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/config/config.go",
+          "start_line": 373,
+          "end_line": 380,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/interceptors/performance.go",
+          "start_line": 115,
+          "end_line": 139,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        },
+        {
+          "file": "pkg/interceptors/security.go",
+          "start_line": 675,
+          "end_line": 694,
+          "relevance": null,
+          "evidence_type": null,
+          "abstraction_layer": null,
+          "test_or_docs_only": null
+        }
+      ]
+    }
+  ]
+}

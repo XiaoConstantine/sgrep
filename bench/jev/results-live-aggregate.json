@@ -1,0 +1,246 @@
+{
+  "default_score_scale": 1,
+  "run_count": 3,
+  "arms": [
+    {
+      "name": "ColBERT shortlist + Jev",
+      "runs": 3,
+      "queries_per_run": 10,
+      "mrr_values": [
+        0.75
+      ],
+      "ndcg10_values": [
+        0.6075551314928064
+      ],
+      "recall10_values": [
+        0.5625
+      ],
+      "promotion_error_values": [
+        1
+      ],
+      "aggregate_p50_end_to_end_latency_ms": 7179.358,
+      "aggregate_p95_end_to_end_latency_ms": 9102.34,
+      "per_run_p50_ms": [
+        6827.645,
+        7179.358,
+        7331.494
+      ],
+      "per_run_p95_ms": [
+        9102.34,
+        9217.905,
+        8788.979
+      ],
+      "input_tokens_per_run": [
+        117138,
+        117134,
+        117134
+      ],
+      "input_tokens_total": 351406,
+      "cost_usd_per_run": [
+        0.004919796000000001,
+        0.0049196280000000005,
+        0.0049196280000000005
+      ],
+      "cost_usd_total": 0.014759052000000002,
+      "failures_total": 0,
+      "fallbacks_total": 0,
+      "answerability_correct_per_run": [
+        10,
+        10,
+        10
+      ]
+    },
+    {
+      "name": "balanced + Jev",
+      "runs": 3,
+      "queries_per_run": 10,
+      "mrr_values": [
+        0.7083333333333333
+      ],
+      "ndcg10_values": [
+        0.5526361061401731
+      ],
+      "recall10_values": [
+        0.5
+      ],
+      "promotion_error_values": [
+        2
+      ],
+      "aggregate_p50_end_to_end_latency_ms": 452.254,
+      "aggregate_p95_end_to_end_latency_ms": 520.81,
+      "per_run_p50_ms": [
+        470.404,
+        433.614,
+        448.582
+      ],
+      "per_run_p95_ms": [
+        520.81,
+        513.77,
+        522.386
+      ],
+      "input_tokens_per_run": [
+        106555,
+        106555,
+        106555
+      ],
+      "input_tokens_total": 319665,
+      "cost_usd_per_run": [
+        0.004475310000000001,
+        0.004475310000000001,
+        0.004475310000000001
+      ],
+      "cost_usd_total": 0.013425930000000003,
+      "failures_total": 0,
+      "fallbacks_total": 0,
+      "answerability_correct_per_run": [
+        10,
+        10,
+        10
+      ]
+    },
+    {
+      "name": "balanced + existing Jina",
+      "runs": 3,
+      "queries_per_run": 10,
+      "mrr_values": [
+        0.7291666666666666
+      ],
+      "ndcg10_values": [
+        0.5649682367708565
+      ],
+      "recall10_values": [
+        0.5
+      ],
+      "promotion_error_values": [
+        1
+      ],
+      "aggregate_p50_end_to_end_latency_ms": 33.573,
+      "aggregate_p95_end_to_end_latency_ms": 49.398,
+      "per_run_p50_ms": [
+        36.063,
+        32.647,
+        32.449
+      ],
+      "per_run_p95_ms": [
+        49.398,
+        48.027,
+        55.452
+      ],
+      "input_tokens_per_run": [
+        0,
+        0,
+        0
+      ],
+      "input_tokens_total": 0,
+      "cost_usd_per_run": [
+        0,
+        0,
+        0
+      ],
+      "cost_usd_total": 0,
+      "failures_total": 0,
+      "fallbacks_total": 0,
+      "answerability_correct_per_run": [
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "name": "balanced baseline",
+      "runs": 3,
+      "queries_per_run": 10,
+      "mrr_values": [
+        0.6666666666666666
+      ],
+      "ndcg10_values": [
+        0.4988529192030594
+      ],
+      "recall10_values": [
+        0.4375
+      ],
+      "promotion_error_values": [
+        1
+      ],
+      "aggregate_p50_end_to_end_latency_ms": 35.6,
+      "aggregate_p95_end_to_end_latency_ms": 55.306,
+      "per_run_p50_ms": [
+        32.155,
+        37.058,
+        36.738
+      ],
+      "per_run_p95_ms": [
+        53.106,
+        55.306,
+        55.545
+      ],
+      "input_tokens_per_run": [
+        0,
+        0,
+        0
+      ],
+      "input_tokens_total": 0,
+      "cost_usd_per_run": [
+        0,
+        0,
+        0
+      ],
+      "cost_usd_total": 0,
+      "failures_total": 0,
+      "fallbacks_total": 0,
+      "answerability_correct_per_run": [
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "name": "quality / ColBERT",
+      "runs": 3,
+      "queries_per_run": 10,
+      "mrr_values": [
+        0.7291666666666666
+      ],
+      "ndcg10_values": [
+        0.5667106605325483
+      ],
+      "recall10_values": [
+        0.5
+      ],
+      "promotion_error_values": [
+        1
+      ],
+      "aggregate_p50_end_to_end_latency_ms": 6666.037,
+      "aggregate_p95_end_to_end_latency_ms": 8699.288,
+      "per_run_p50_ms": [
+        6574.985,
+        6489.878,
+        6756.272
+      ],
+      "per_run_p95_ms": [
+        9134.449,
+        8684.046,
+        8699.288
+      ],
+      "input_tokens_per_run": [
+        0,
+        0,
+        0
+      ],
+      "input_tokens_total": 0,
+      "cost_usd_per_run": [
+        0,
+        0,
+        0
+      ],
+      "cost_usd_total": 0,
+      "failures_total": 0,
+      "fallbacks_total": 0,
+      "answerability_correct_per_run": [
+        null,
+        null,
+        null
+      ]
+    }
+  ]
+}

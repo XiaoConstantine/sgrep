@@ -1,0 +1,51 @@
+arm	query	expected_answer	mrr	ndcg@10	recall@10	promotion_errors	predicted_run1	predicted_run2	predicted_run3	any_answer_run1	any_answer_run2	any_answer_run3	latency_run1_ms	latency_run2_ms	latency_run3_ms	input_tokens_run1	input_tokens_run2	input_tokens_run3
+balanced baseline	ReAct agent reasoning and action loop	true	1	0.7136205775898136	0.6666666666666666	0	n/a	n/a	n/a	n/a	n/a	n/a	43.954	47.225	43.636	0	0	0
+balanced baseline	register and discover tools for LLM agents	true	0.3333333333333333	0.421820340078341	0.5	1	n/a	n/a	n/a	n/a	n/a	n/a	53.106	55.306	55.545	0	0	0
+balanced baseline	bootstrap few shot examples from training data	true	1	0.7984848580994977	0.6666666666666666	0	n/a	n/a	n/a	n/a	n/a	n/a	41.266	50.495	50.106	0	0	0
+balanced baseline	intercept and modify module execution	true	1	0.6735439182299786	0.3333333333333333	0	n/a	n/a	n/a	n/a	n/a	n/a	35.529	50.307	36.738	0	0	0
+balanced baseline	configure logging and debugging	true	1	0.6735439182299786	0.3333333333333333	0	n/a	n/a	n/a	n/a	n/a	n/a	30.578	33.924	35.6	0	0	0
+balanced baseline	use anthropic claude models	true	1	0.7098097413968654	1	0	n/a	n/a	n/a	n/a	n/a	n/a	31.866	30.797	37.894	0	0	0
+balanced baseline	multimodal content handling for images and audio	true	0	0	0	0	n/a	n/a	n/a	n/a	n/a	n/a	33.759	37.058	42.384	0	0	0
+balanced baseline	self-refine answers through iteration	true	0	0	0	0	n/a	n/a	n/a	n/a	n/a	n/a	28.087	27.849	34.662	0	0	0
+balanced baseline	Kubernetes pod eviction controller implementation	false	0	0	0	0	n/a	n/a	n/a	n/a	n/a	n/a	30.961	45.955	34.625	0	0	0
+balanced baseline	PostgreSQL WAL replication slot cleanup implementation	false	0	0	0	0	n/a	n/a	n/a	n/a	n/a	n/a	32.155	32.596	33.559	0	0	0
+balanced + existing Jina	ReAct agent reasoning and action loop	true	1	0.7136205775898136	0.6666666666666666	0	n/a	n/a	n/a	n/a	n/a	n/a	36.063	34.814	34.992	0	0	0
+balanced + existing Jina	register and discover tools for LLM agents	true	0.5	0.5571655791252315	0.5	0	n/a	n/a	n/a	n/a	n/a	n/a	49.398	48.027	55.452	0	0	0
+balanced + existing Jina	bootstrap few shot examples from training data	true	1	0.7984848580994977	0.6666666666666666	0	n/a	n/a	n/a	n/a	n/a	n/a	46.679	36.251	40.675	0	0	0
+balanced + existing Jina	intercept and modify module execution	true	1	0.6735439182299786	0.3333333333333333	0	n/a	n/a	n/a	n/a	n/a	n/a	45.379	33.025	34.939	0	0	0
+balanced + existing Jina	configure logging and debugging	true	1	0.6735439182299786	0.3333333333333333	0	n/a	n/a	n/a	n/a	n/a	n/a	33.573	25.175	28.557	0	0	0
+balanced + existing Jina	use anthropic claude models	true	1	0.7098097413968654	1	0	n/a	n/a	n/a	n/a	n/a	n/a	36.853	31.313	32.449	0	0	0
+balanced + existing Jina	multimodal content handling for images and audio	true	0.3333333333333333	0.393577301495486	0.5	1	n/a	n/a	n/a	n/a	n/a	n/a	39.783	33.808	35.649	0	0	0
+balanced + existing Jina	self-refine answers through iteration	true	0	0	0	0	n/a	n/a	n/a	n/a	n/a	n/a	31.626	26.206	23.654	0	0	0
+balanced + existing Jina	Kubernetes pod eviction controller implementation	false	0	0	0	0	n/a	n/a	n/a	n/a	n/a	n/a	29.307	25.92	31.18	0	0	0
+balanced + existing Jina	PostgreSQL WAL replication slot cleanup implementation	false	0	0	0	0	n/a	n/a	n/a	n/a	n/a	n/a	31.552	32.647	29.116	0	0	0
+quality / ColBERT	ReAct agent reasoning and action loop	true	1	0.7136205775898136	0.6666666666666666	0	n/a	n/a	n/a	n/a	n/a	n/a	6666.037	6285.083	6375.234	0	0	0
+quality / ColBERT	register and discover tools for LLM agents	true	0.5	0.5571655791252315	0.5	0	n/a	n/a	n/a	n/a	n/a	n/a	6784.149	6871.092	7510.886	0	0	0
+quality / ColBERT	bootstrap few shot examples from training data	true	1	0.8124242481930319	0.6666666666666666	0	n/a	n/a	n/a	n/a	n/a	n/a	8075.768	7931.757	8639.044	0	0	0
+quality / ColBERT	intercept and modify module execution	true	1	0.6735439182299786	0.3333333333333333	0	n/a	n/a	n/a	n/a	n/a	n/a	6456.028	6489.878	6756.272	0	0	0
+quality / ColBERT	configure logging and debugging	true	1	0.6735439182299786	0.3333333333333333	0	n/a	n/a	n/a	n/a	n/a	n/a	5656.034	5315.223	5514.081	0	0	0
+quality / ColBERT	use anthropic claude models	true	1	0.7098097413968654	1	0	n/a	n/a	n/a	n/a	n/a	n/a	9134.449	8684.046	8699.288	0	0	0
+quality / ColBERT	multimodal content handling for images and audio	true	0.3333333333333333	0.393577301495486	0.5	1	n/a	n/a	n/a	n/a	n/a	n/a	6574.985	7409.387	7235.533	0	0	0
+quality / ColBERT	self-refine answers through iteration	true	0	0	0	0	n/a	n/a	n/a	n/a	n/a	n/a	7321.287	8177.037	7512.668	0	0	0
+quality / ColBERT	Kubernetes pod eviction controller implementation	false	0	0	0	0	n/a	n/a	n/a	n/a	n/a	n/a	4225.949	4697.138	4420.261	0	0	0
+quality / ColBERT	PostgreSQL WAL replication slot cleanup implementation	false	0	0	0	0	n/a	n/a	n/a	n/a	n/a	n/a	5927.178	6142.619	6030.791	0	0	0
+balanced + Jev	ReAct agent reasoning and action loop	true	1	0.7136205775898136	0.6666666666666666	0	true	true	true	0.67	0.69	0.69	470.404	513.77	522.386	9571	9571	9571
+balanced + Jev	register and discover tools for LLM agents	true	0.3333333333333333	0.4585085340797653	0.5	1	true	true	true	0.91	0.91	0.91	501.12	470.585	489.224	9975	9975	9975
+balanced + Jev	bootstrap few shot examples from training data	true	1	0.7984848580994977	0.6666666666666666	0	true	true	true	0.83	0.82	0.83	435.227	421.84	476.18	10342	10342	10342
+balanced + Jev	intercept and modify module execution	true	1	0.6735439182299786	0.3333333333333333	0	true	true	true	0.86	0.86	0.84	498.781	417.007	425.2	11770	11770	11770
+balanced + Jev	configure logging and debugging	true	1	0.6735439182299786	0.3333333333333333	0	true	true	true	0.9	0.89	0.9	470.899	462.504	448.582	9234	9234	9234
+balanced + Jev	use anthropic claude models	true	1	0.7098097413968654	1	0	true	true	true	0.91	0.9	0.91	520.81	415.664	393.948	12632	12632	12632
+balanced + Jev	multimodal content handling for images and audio	true	0.3333333333333333	0.393577301495486	0.5	1	true	true	true	0.65	0.64	0.67	382.003	452.254	406.748	11749	11749	11749
+balanced + Jev	self-refine answers through iteration	true	0	0	0	0	true	true	true	0.62	0.6	0.62	387.545	433.614	452.541	11307	11307	11307
+balanced + Jev	Kubernetes pod eviction controller implementation	false	0	0	0	0	n/a	n/a	n/a	0.03	0.03	0.03	367.066	419.397	374.479	9904	9904	9904
+balanced + Jev	PostgreSQL WAL replication slot cleanup implementation	false	0	0	0	0	n/a	n/a	n/a	0.05	0.04	0.04	491.55	474.774	505.505	10071	10071	10071
+ColBERT shortlist + Jev	ReAct agent reasoning and action loop	true	1	0.7136205775898136	0.6666666666666666	0	true	true	true	0.76	0.79	0.76	6616.685	6683.31	6620.039	12239	12239	12239
+ColBERT shortlist + Jev	register and discover tools for LLM agents	true	0.5	0.5571655791252315	0.5	0	true	true	true	0.9	0.91	0.91	7104.896	7332.369	7341.394	11288	11288	11288
+ColBERT shortlist + Jev	bootstrap few shot examples from training data	true	1	0.8124242481930319	0.6666666666666666	0	true	true	true	0.9	0.91	0.91	8735.977	8166.26	8277.304	12076	12076	12076
+ColBERT shortlist + Jev	intercept and modify module execution	true	1	0.6735439182299786	0.3333333333333333	0	true	true	true	0.86	0.86	0.84	6782.79	7248.419	7331.494	11371	11371	11371
+ColBERT shortlist + Jev	configure logging and debugging	true	1	0.6735439182299786	0.3333333333333333	0	true	true	true	0.9	0.89	0.89	5580.714	6974.604	5694.637	9595	9591	9591
+ColBERT shortlist + Jev	use anthropic claude models	true	1	0.7098097413968654	1	0	true	true	true	0.91	0.91	0.91	9102.34	9217.905	8788.979	13741	13741	13741
+ColBERT shortlist + Jev	multimodal content handling for images and audio	true	0.3333333333333333	0.393577301495486	0.5	1	true	true	true	0.9	0.9	0.9	7287.11	7179.358	7709.172	12825	12825	12825
+ColBERT shortlist + Jev	self-refine answers through iteration	true	0.16666666666666666	0.3267557676820653	0.5	0	true	true	true	0.84	0.82	0.81	8173.019	8491.071	8538.559	12508	12508	12508
+ColBERT shortlist + Jev	Kubernetes pod eviction controller implementation	false	0	0	0	0	n/a	n/a	n/a	0.03	0.03	0.03	4771.89	4828.024	4576.535	10895	10895	10895
+ColBERT shortlist + Jev	PostgreSQL WAL replication slot cleanup implementation	false	0	0	0	0	n/a	n/a	n/a	0.02	0.02	0.02	6827.645	6586.848	6433.289	10600	10600	10600
